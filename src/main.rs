@@ -1,7 +1,4 @@
-mod extractor;
-mod models;
-mod parser;
-mod whatsapp;
+use receipt_engine::{extractor, parser, whatsapp};
 
 use dotenv::dotenv;
 use std::env;
