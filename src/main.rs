@@ -342,7 +342,12 @@ async fn send_message(
         "message": message,
     });
 
-    client.post(&url).json(&body).send().await?;
+    let response = client.post(&url).json(&body).send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await?;
+        return Err(format!("Green API error {}: {}", status, text).into());
+    }
     Ok(())
 }
 
