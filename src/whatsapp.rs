@@ -3,8 +3,14 @@ use reqwest::Client;
 use std::path::PathBuf;
 use tokio::fs;
 
-/// Directory where downloaded receipt files are saved at runtime.
-const DOWNLOAD_DIR: &str = "/private/tmp/receipt_engine";
+/// Returns the directory where downloaded receipt files are saved.
+/// Reads `RECEIPT_DOWNLOAD_DIR` from the environment; falls back to the
+/// OS temp directory so the code works on macOS, Linux, and Windows.
+fn download_dir() -> PathBuf {
+    std::env::var("RECEIPT_DOWNLOAD_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("receipt_engine"))
+}
 
 /// Maximum file size accepted for download — protects against memory exhaustion.
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
@@ -98,7 +104,7 @@ pub async fn download_file(
         _ => "jpg",
     };
 
-    let dir = PathBuf::from(DOWNLOAD_DIR);
+    let dir = download_dir();
     fs::create_dir_all(&dir).await?;
 
     let filename = format!("receipt_{}.{}", receipt_id, extension);
