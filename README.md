@@ -50,7 +50,12 @@ brew install tesseract poppler pkgconf
    cargo run
    ```
 
-Downloaded files are saved to `/tmp/receipt_engine/`.
+**Optional env vars:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RECEIPT_DOWNLOAD_DIR` | OS temp dir (`/tmp/receipt_engine`) | Where downloaded receipt files are saved |
+| `RUST_LOG` | `info` | Log level — `debug`, `info`, `warn`, `error` |
 
 ## Notes
 
