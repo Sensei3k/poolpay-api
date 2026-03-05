@@ -5,9 +5,11 @@ use tracing::info;
 
 // Compiled once at first use — compiling regexes on every call is measurably expensive.
 static AMOUNT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // Tesseract often renders ₦ as #, so both are matched and # is normalised to ₦.
-    // Handles patterns like: #97,800.00  ₦97,800.00  NGN 97,800.00
-    Regex::new(r"(?:[#₦]|NGN\s*)[\d,]+(?:\.\d{1,2})?").unwrap()
+    // Tesseract often renders ₦ as # and may insert spaces within digit groups
+    // (e.g. "#9 7,800.00" instead of "#97,800.00"). The pattern allows an optional
+    // space or comma between digit runs; spaces are stripped in post-processing.
+    // Handles: #97,800.00  #9 7,800.00  ₦97,800.00  NGN 97,800.00
+    Regex::new(r"(?:[#₦]|NGN\s*)\d+(?:[ ,]\d+)*(?:\.\d{1,2})?").unwrap()
 });
 
 static SENDER_LABEL_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -40,9 +42,13 @@ pub fn parse_receipt(text: &str) -> ParsedReceipt {
         .filter(|l| !l.is_empty())
         .collect();
 
-    let amount = AMOUNT_RE
-        .find(text)
-        .map(|m| m.as_str().trim().replace('#', "₦"));
+    let amount = AMOUNT_RE.find(text).map(|m| {
+        // Strip any OCR-introduced spaces within the number, then normalise the symbol.
+        m.as_str()
+            .split_whitespace()
+            .collect::<String>()
+            .replace('#', "₦")
+    });
 
     let mut sender: Option<String> = None;
     let mut bank: Option<String> = None;
