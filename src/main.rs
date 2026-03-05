@@ -1,5 +1,4 @@
-use receipt_engine::{extractor, parser, sheets, whatsapp};
-use receipt_engine::models::ReceiptRow;
+use receipt_engine::{extractor, parser, whatsapp};
 
 use dotenv::dotenv;
 use std::env;
@@ -9,9 +8,6 @@ use tracing::{error, info, warn};
 /// How long to wait between polls when the Green API queue is empty.
 const POLL_INTERVAL_SECS: u64 = 5;
 
-// TEMPORARY: suppresses the "unreachable code" warning caused by the smoke-test
-// `return` below. Remove this attribute when the smoke test block is removed.
-#[allow(unreachable_code)]
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -22,40 +18,6 @@ async fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-
-    // -------------------------------------------------------------------------
-    // TEMPORARY — Sheets smoke test. Remove once append_row is confirmed working.
-    // -------------------------------------------------------------------------
-    {
-        let key_path = env::var("GOOGLE_SERVICE_ACCOUNT_KEY_PATH")
-            .expect("GOOGLE_SERVICE_ACCOUNT_KEY_PATH must be set in .env");
-        let spreadsheet_id = env::var("GOOGLE_SPREADSHEET_ID")
-            .expect("GOOGLE_SPREADSHEET_ID must be set in .env");
-
-        info!("Sheets smoke test: attempting to append a dummy row");
-
-        match sheets::SheetsClient::new(&key_path, spreadsheet_id).await {
-            Ok(client) => {
-                let dummy = ReceiptRow {
-                    sender: "Test Sender".to_string(),
-                    bank: "Test Bank".to_string(),
-                    amount: "₦1.00".to_string(),
-                    message_id: "smoke-test-msg-id".to_string(),
-                    chat_id: "smoke-test-chat-id".to_string(),
-                };
-                match client.append_row(&dummy).await {
-                    Ok(()) => info!("Sheets smoke test PASSED — row written successfully"),
-                    Err(e) => error!(error = %e, "Sheets smoke test FAILED — append_row error"),
-                }
-            }
-            Err(e) => error!(error = %e, "Sheets smoke test FAILED — could not build SheetsClient"),
-        }
-
-        return;
-    }
-    // -------------------------------------------------------------------------
-    // END TEMPORARY
-    // -------------------------------------------------------------------------
 
     let instance_id = env::var("GREEN_API_INSTANCE_ID")
         .expect("GREEN_API_INSTANCE_ID must be set in .env");

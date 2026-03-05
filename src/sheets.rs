@@ -1,6 +1,8 @@
 use crate::models::ReceiptRow;
 use reqwest::Client;
 use std::time::{Duration, Instant};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tokio::sync::Mutex;
 use tracing::info;
 use yup_oauth2::ServiceAccountKey;
@@ -19,6 +21,20 @@ const APPEND_RANGE: &str = "A:G";
 struct CachedToken {
     value: String,
     valid_until: Instant,
+}
+
+/// A sheet row that has been confirmed by the user but not yet acknowledged
+/// by the engine. Returned by `fetch_unacknowledged_confirmed`.
+pub struct PendingRow {
+    /// 1-based sheet row number — used to write the AcknowledgedAt timestamp
+    /// back to column F of exactly this row via `mark_acknowledged`.
+    pub row_index: usize,
+    /// WhatsApp message ID (column E) — used to quote the original receipt
+    /// message in the acknowledgement reply.
+    pub message_id: String,
+    /// WhatsApp chat ID (column G) — used to send the acknowledgement reply
+    /// to the correct chat.
+    pub chat_id: String,
 }
 
 /// Client for the Google Sheets v4 REST API, authenticated via a service account.
@@ -113,6 +129,119 @@ impl SheetsClient {
         Ok(())
     }
 
+    /// Reads all rows in the sheet and returns those where the user has ticked
+    /// Confirmed (column D = "TRUE") but the engine has not yet written an
+    /// AcknowledgedAt timestamp (column F is empty).
+    ///
+    /// The Sheets API returns checkboxes as the strings "TRUE" or "FALSE" when
+    /// using the default FORMATTED_VALUE render option.
+    ///
+    /// Row indices are 1-based sheet row numbers (row 1 = header). A row at
+    /// position `i` in the returned values array (0-based, skipping the header)
+    /// corresponds to sheet row `i + 2`.
+    ///
+    /// Returns an empty Vec if the sheet has no data rows or no pending rows,
+    /// rather than an error.
+    pub async fn fetch_unacknowledged_confirmed(
+        &self,
+    ) -> Result<Vec<PendingRow>, Box<dyn std::error::Error>> {
+        let token = self.access_token().await?;
+
+        let url = format!("{}/{}/values/A:G", SHEETS_BASE, self.spreadsheet_id);
+
+        let resp = self.http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            return Err(format!("Sheets API {status}: {text}").into());
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+
+        // The "values" key is absent entirely when the sheet has no data rows.
+        let rows = match body["values"].as_array() {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
+
+        // Skip index 0 (header row). For a row at array index i, the sheet row
+        // number is i + 1 (the header occupies sheet row 1, so data starts at 2,
+        // meaning array index 1 → sheet row 2, i.e. i + 1).
+        let mut pending = Vec::new();
+        for (i, entry) in rows.iter().enumerate().skip(1) {
+            let cols = match entry.as_array() {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // D = index 3 (Confirmed), F = index 5 (AcknowledgedAt)
+            if col_str(cols, 3) == "TRUE" && col_str(cols, 5).is_empty() {
+                pending.push(PendingRow {
+                    row_index: i + 1,
+                    message_id: col_str(cols, 4).to_string(), // E
+                    chat_id:    col_str(cols, 6).to_string(), // G
+                });
+            }
+        }
+
+        info!(count = pending.len(), "Pending confirmed rows fetched");
+        Ok(pending)
+    }
+
+    /// Writes an RFC 3339 UTC timestamp to column F of the given sheet row,
+    /// marking it as acknowledged so it is not reprocessed on the next poll.
+    ///
+    /// Uses `valueInputOption=USER_ENTERED` so Google stores it as a plain
+    /// string rather than attempting date parsing (dates behave unpredictably
+    /// across locale settings).
+    ///
+    /// Idempotent: calling this twice on the same row overwrites F with a new
+    /// timestamp — harmless since the row is already acknowledged after the
+    /// first call.
+    pub async fn mark_acknowledged(
+        &self,
+        row_index: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let token = self.access_token().await?;
+
+        let cell = format!("F{}", row_index);
+        let url = format!(
+            "{}/{}/values/{}?valueInputOption=USER_ENTERED",
+            SHEETS_BASE, self.spreadsheet_id, cell,
+        );
+
+        let timestamp = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let body = serde_json::json!({
+            "range": &cell,
+            "majorDimension": "ROWS",
+            "values": [[timestamp]],
+        });
+
+        let resp = self.http
+            .put(&url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            return Err(format!("Sheets API {status}: {text}").into());
+        }
+
+        info!(row_index, "Row marked as acknowledged");
+        Ok(())
+    }
+
     /// Returns a valid access token, refreshing from Google if the cached one
     /// has expired or was never fetched.
     ///
@@ -150,6 +279,18 @@ impl SheetsClient {
         info!("Google OAuth2 token refreshed");
         Ok(value)
     }
+}
+
+/// Returns the string value of a cell at `index` within a row's column array.
+///
+/// Returns `""` for any of these cases — all treated as "empty" by the callers:
+///   - Index is beyond the end of the row (Google omits trailing empty cells)
+///   - Value is JSON null
+///   - Value is not a JSON string (e.g. a boolean from an un-formatted checkbox)
+fn col_str(cols: &[serde_json::Value], index: usize) -> &str {
+    cols.get(index)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
 }
 
 /// Extracts the bare spreadsheet ID from either a raw ID or a full Google Sheets URL.
