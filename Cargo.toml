@@ -16,3 +16,6 @@ serde_json = "1"
 
 # Loads variables from a .env file into the process environment
 dotenv = "0.15"
+
+# Tesseract OCR bindings
+tesseract = "0.14"

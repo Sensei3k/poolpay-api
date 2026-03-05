@@ -128,7 +128,7 @@ async fn download_image(
     };
 
     // Build the destination folder and create it if it doesn't exist
-    let dir = PathBuf::from("/tmp/receipt_engine");
+    let dir = PathBuf::from("/private/tmp/receipt_engine");
     fs::create_dir_all(&dir).await?;
 
     let filename = format!("image_{}.{}", receipt_id, extension);
@@ -141,6 +141,16 @@ async fn download_image(
     fs::write(&dest, &bytes).await?;
 
     Ok(dest)
+}
+
+// --------------------------------------------------------------------------
+// OCR
+// --------------------------------------------------------------------------
+
+/// Run Tesseract OCR on the image at `path` and return the extracted text.
+fn ocr_image(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    let text = tesseract::ocr(path.to_str().unwrap(), "eng")?;
+    Ok(text)
 }
 
 // --------------------------------------------------------------------------
@@ -254,7 +264,14 @@ async fn main() {
                         )
                         .await
                         {
-                            Ok(path) => println!("Image saved to: {}", path.display()),
+                            Ok(path) => {
+                                println!("Image saved to: {}", path.display());
+                                println!("Running OCR...");
+                                match ocr_image(&path) {
+                                    Ok(text) => println!("OCR result:\n{}", text),
+                                    Err(e) => eprintln!("OCR failed: {}", e),
+                                }
+                            }
                             Err(e) => eprintln!("Failed to download image: {}", e),
                         }
                     }
