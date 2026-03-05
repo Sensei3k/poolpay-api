@@ -45,6 +45,9 @@ struct SenderData {
 
     #[serde(rename = "sender")]
     sender: Option<String>,
+
+    #[serde(rename = "chatId")]
+    chat_id: Option<String>,
 }
 
 // Green API message types we handle:
@@ -321,6 +324,28 @@ async fn delete_notification(
     Ok(())
 }
 
+/// Send a text message to a WhatsApp chat via Green API.
+async fn send_message(
+    client: &Client,
+    instance_id: &str,
+    api_token: &str,
+    chat_id: &str,
+    message: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let url = format!(
+        "https://api.green-api.com/waInstance{}/sendMessage/{}",
+        instance_id, api_token
+    );
+
+    let body = serde_json::json!({
+        "chatId": chat_id,
+        "message": message,
+    });
+
+    client.post(&url).json(&body).send().await?;
+    Ok(())
+}
+
 /// Print a notification summary to the terminal.
 fn print_notification(n: &Notification) {
     let body = &n.body;
@@ -404,6 +429,28 @@ async fn main() {
                                         println!("OCR result:\n{}", text);
                                         let parsed = parse_receipt(&text);
                                         print_parsed(&parsed);
+
+                                        // Send the extracted data back to the chat
+                                        let chat_id = notification
+                                            .body
+                                            .sender_data
+                                            .as_ref()
+                                            .and_then(|s| s.chat_id.as_deref());
+
+                                        if let Some(chat_id) = chat_id {
+                                            let reply = format!(
+                                                "✅ Sender: {} | Bank: {} | Amount: {}",
+                                                parsed.sender.as_deref().unwrap_or("unknown"),
+                                                parsed.bank.as_deref().unwrap_or("unknown"),
+                                                parsed.amount.as_deref().unwrap_or("unknown"),
+                                            );
+                                            match send_message(&client, &instance_id, &api_token, chat_id, &reply).await {
+                                                Ok(_) => println!("Reply sent to {}", chat_id),
+                                                Err(e) => eprintln!("Failed to send reply: {}", e),
+                                            }
+                                        } else {
+                                            eprintln!("No chat_id found — cannot send reply");
+                                        }
                                     }
                                     Err(e) => eprintln!("OCR failed: {}", e),
                                 }
