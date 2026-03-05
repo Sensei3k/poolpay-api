@@ -26,7 +26,7 @@ src/
 ├── extractor.rs   — Tesseract OCR for images and PDFs
 └── parser.rs      — receipt parsing (sender, bank, amount)
 tests/
-└── parser_tests.rs — integration tests for the parser module
+└── parser_tests.rs — 28 integration tests for the parser module
 ```
 
 The project uses a **lib + bin** layout: `src/lib.rs` exposes all modules as a library crate (`receipt_engine`), and `src/main.rs` is the binary entry point that imports from it. This allows `tests/` to import the public API directly, keeping integration tests separate from source files.
@@ -77,6 +77,31 @@ brew install tesseract poppler pkgconf
 | `GREEN_API_TOKEN` | Yes | — | API token shown next to your instance |
 | `RECEIPT_DOWNLOAD_DIR` | No | OS temp dir | Directory where receipt files are saved during OCR |
 | `RUST_LOG` | No | `info` | Log verbosity — `debug`, `info`, `warn`, `error` |
+
+## Testing
+
+```bash
+cargo test
+```
+
+28 integration tests covering the parser module (`tests/parser_tests.rs`):
+
+| Group | Tests | What's covered |
+|---|---|---|
+| Amount | 11 | `₦` symbol, `#` → `₦` normalisation, mid-number OCR spaces, `NGN` prefix, trailing zeros, no decimal, absent amount |
+| Sender | 8 | Primary label, case insensitivity, fallback labels (`Sender:`, `From:`, `Originator:`), OCR garbage after name, absent sender, whitespace trimming |
+| Bank | 7 | Next-line extraction, pipe-separator stripping, known-bank fallback, case insensitivity, absent bank, leading-space trimming |
+| Combined | 2 | Full realistic receipts (OPay style, heavy OCR noise) |
+
+## Known limitations
+
+**Sender name truncation** — The parser captures at most 41 characters for a sender name (`[A-Za-z][A-Za-z ]{2,40}`). Names longer than this are silently truncated. Real Nigerian names fit well within this limit; the cap exists to prevent runaway matches on garbled OCR paragraphs.
+
+**Hyphenated and apostrophe names** — The capture groups only allow letters and spaces. Names like `Adewale-Okonkwo` or `O'Brien` will be truncated at the first non-letter, non-space character (`Adewale` and `O` respectively). This is a known gap to be addressed when such names are encountered in production receipts.
+
+**`#` → `₦` order dependency** — Amount normalisation replaces `#` with `₦` before stripping an `NGN` prefix. A string like `#NGN97,800.00` would survive as `₦NGN97,800.00` rather than `₦97,800.00`. This edge case does not occur on real receipts — no bank produces both artefacts simultaneously.
+
+**OCR accuracy** — All parsing relies on Tesseract output quality. Low-resolution or skewed receipt images will produce degraded OCR text that the parser may not handle correctly. PDFs consistently produce cleaner results than phone photos.
 
 ## Notes
 
