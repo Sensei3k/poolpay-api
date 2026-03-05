@@ -133,7 +133,13 @@ brew install tesseract poppler pkgconf
 cargo test
 ```
 
-48 tests total — 28 parser integration tests + 20 sheets unit tests:
+51 tests total — 28 parser integration tests + 20 sheets unit tests + 3 models deserialization tests:
+
+**Models** (`src/models.rs` — `#[cfg(test)]` module, 3 tests):
+
+| Group | Tests | What's covered |
+|---|---|---|
+| `notification_id_message` | 3 | `idMessage` deserialises from body level (not messageData), absent field is `None`, `MessageData` does not contain `idMessage` |
 
 **Sheets** (`src/sheets.rs` — `#[cfg(test)]` module, 20 tests):
 
@@ -166,3 +172,4 @@ cargo test
 
 - The Green API free plan only allows sending messages to whitelisted numbers. Upgrade to a Business plan to send replies to groups.
 - OCR accuracy depends on receipt image quality. PDFs generally produce cleaner results than photos.
+- `idMessage` in the Green API notification JSON lives at the `body` level (sibling of `senderData`/`messageData`), not inside `messageData`. The `NotificationBody` struct reflects this. Placing it on `MessageData` would cause quoted replies to silently fall back to plain (unquoted) sends.
