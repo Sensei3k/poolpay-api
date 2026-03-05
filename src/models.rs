@@ -14,6 +14,12 @@ pub struct NotificationBody {
     #[serde(rename = "typeWebhook")]
     pub type_webhook: String,
 
+    /// The WhatsApp message ID for the incoming message.
+    /// Lives at the body level in the Green API JSON — not inside messageData.
+    /// Used to quote the original receipt message in the acknowledgement reply.
+    #[serde(rename = "idMessage")]
+    pub id_message: Option<String>,
+
     #[serde(rename = "senderData")]
     pub sender_data: Option<SenderData>,
 
@@ -39,11 +45,6 @@ pub struct SenderData {
 pub struct MessageData {
     #[serde(rename = "typeMessage")]
     pub type_message: String,
-
-    /// The WhatsApp message ID assigned by the Green API.
-    /// Used when quoting the original receipt message in the acknowledgement reply.
-    #[serde(rename = "idMessage")]
-    pub id_message: Option<String>,
 
     #[serde(rename = "textMessageData")]
     pub text_message_data: Option<TextMessageData>,

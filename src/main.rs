@@ -146,7 +146,8 @@ async fn main() {
                                             .as_ref()
                                             .and_then(|s| s.chat_id.as_deref());
 
-                                        let message_id = msg
+                                        let message_id = notification
+                                            .body
                                             .id_message
                                             .as_deref()
                                             .unwrap_or("")
