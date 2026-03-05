@@ -19,12 +19,19 @@ A Rust service that watches a WhatsApp chat or group for payment receipts (image
 
 ```
 src/
-├── main.rs        — entry point and polling loop
+├── lib.rs         — crate root; declares all public modules
+├── main.rs        — entry point and polling loop (thin — orchestration only)
 ├── models.rs      — all structs and types
 ├── whatsapp.rs    — Green API calls (receive, delete, send, download)
 ├── extractor.rs   — Tesseract OCR for images and PDFs
 └── parser.rs      — receipt parsing (sender, bank, amount)
+tests/
+└── parser_tests.rs — integration tests for the parser module
 ```
+
+The project uses a **lib + bin** layout: `src/lib.rs` exposes all modules as a library crate (`receipt_engine`), and `src/main.rs` is the binary entry point that imports from it. This allows `tests/` to import the public API directly, keeping integration tests separate from source files.
+
+New modules should be added to `src/lib.rs` as `pub mod <name>` and tested in a corresponding `tests/<name>_tests.rs` file.
 
 ## Prerequisites
 
