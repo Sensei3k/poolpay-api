@@ -106,6 +106,82 @@ pub struct ParsedReceipt {
     pub amount: Option<String>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Parses a realistic Green API image-message notification.
+    // Asserts that idMessage is read from the body level, not from inside messageData.
+    // This test would have caught the Phase 9 regression where id_message was placed
+    // on MessageData instead of NotificationBody, causing it to always deserialise as None.
+    #[test]
+    fn notification_id_message_deserialises_from_body_level() {
+        let json = r#"{
+            "receiptId": 123,
+            "body": {
+                "typeWebhook": "incomingMessageReceived",
+                "idMessage": "BAE5F4886F532D01",
+                "senderData": {
+                    "chatId": "2349000000001@c.us",
+                    "sender": "2349000000001@c.us",
+                    "senderName": "Test Sender"
+                },
+                "messageData": {
+                    "typeMessage": "imageMessage",
+                    "fileMessageData": {
+                        "downloadUrl": "https://example.com/file.jpg",
+                        "mimeType": "image/jpeg",
+                        "caption": ""
+                    }
+                }
+            }
+        }"#;
+
+        let notification: Notification = serde_json::from_str(json).unwrap();
+        assert_eq!(notification.body.id_message.as_deref(), Some("BAE5F4886F532D01"));
+    }
+
+    // Confirms that a notification without idMessage (e.g. a delivery receipt event)
+    // deserialises cleanly with id_message as None rather than panicking.
+    #[test]
+    fn notification_id_message_absent_is_none() {
+        let json = r#"{
+            "receiptId": 456,
+            "body": {
+                "typeWebhook": "outgoingMessageStatus",
+                "messageData": {
+                    "typeMessage": "textMessage",
+                    "textMessageData": { "textMessage": "hello" }
+                }
+            }
+        }"#;
+
+        let notification: Notification = serde_json::from_str(json).unwrap();
+        assert_eq!(notification.body.id_message, None);
+    }
+
+    // Regression guard: idMessage must NOT be present on MessageData.
+    // If someone re-adds it there, this test catches it — the field on the body
+    // would still parse, but a dedicated messageData-level field would shadow it
+    // in the wrong struct.
+    #[test]
+    fn message_data_does_not_contain_id_message() {
+        // Verify MessageData deserialises without an idMessage field — any stray
+        // idMessage in the messageData object is simply ignored (serde default).
+        let json = r#"{
+            "typeMessage": "imageMessage",
+            "idMessage": "SHOULD_BE_IGNORED",
+            "fileMessageData": {
+                "downloadUrl": "https://example.com/f.jpg",
+                "mimeType": "image/jpeg",
+                "caption": ""
+            }
+        }"#;
+        // This must compile and parse without error — MessageData has no id_message field.
+        let _: MessageData = serde_json::from_str(json).unwrap();
+    }
+}
+
 /// One row written to the Google Sheet after a receipt is parsed.
 ///
 /// Column layout (A–G):
