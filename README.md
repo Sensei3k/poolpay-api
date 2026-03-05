@@ -8,30 +8,76 @@ A Rust service that watches a WhatsApp chat or group for payment receipts (image
 2. Detects image and PDF attachments and downloads them
 3. Runs Tesseract OCR to extract raw text (PDFs are first converted to images via `pdftoppm`)
 4. Parses the OCR text to extract sender name, bank, and amount
-5. Replies to the chat with:
+5. Replies to the chat with a formatted summary:
    ```
    ✅ Sender: FULL NAME
    Bank: BankName
    Amount: ₦97,800.00
    ```
+6. Writes a row to a Google Sheet for record-keeping and human review
+7. Every 30 seconds, checks the sheet for rows the user has marked **Confirmed** and sends a quoted "Acknowledged" reply back to the original WhatsApp chat
 
 ## Project structure
 
 ```
 src/
 ├── lib.rs         — crate root; declares all public modules
-├── main.rs        — entry point and polling loop (thin — orchestration only)
+├── main.rs        — entry point; receipt loop (5 s) + confirmation loop (30 s)
 ├── models.rs      — all structs and types
-├── whatsapp.rs    — Green API calls (receive, delete, send, download)
+├── whatsapp.rs    — Green API calls (receive, delete, send, download, quote-reply)
 ├── extractor.rs   — Tesseract OCR for images and PDFs
-└── parser.rs      — receipt parsing (sender, bank, amount)
+├── parser.rs      — receipt parsing (sender, bank, amount)
+└── sheets.rs      — Google Sheets v4 REST client (append, fetch, mark-acknowledged)
 tests/
-└── parser_tests.rs — 28 integration tests for the parser module
+├── parser_tests.rs — 28 integration tests for the parser module
+└── (sheets unit tests live in src/sheets.rs as a #[cfg(test)] module)
 ```
 
 The project uses a **lib + bin** layout: `src/lib.rs` exposes all modules as a library crate (`receipt_engine`), and `src/main.rs` is the binary entry point that imports from it. This allows `tests/` to import the public API directly, keeping integration tests separate from source files.
 
 New modules should be added to `src/lib.rs` as `pub mod <name>` and tested in a corresponding `tests/<name>_tests.rs` file.
+
+## Google Sheets integration
+
+### Sheet setup
+
+Create a Google Sheet with the following headers in row 1:
+
+| A | B | C | D | E | F | G |
+|---|---|---|---|---|---|---|
+| Sender | Bank | Amount | Confirmed | MessageID | AcknowledgedAt | ChatID |
+
+Column D must be formatted as a **checkbox** (Insert → Checkbox in Google Sheets). The engine reads it as the string `"TRUE"` or `"FALSE"`.
+
+The engine writes columns A, B, C, E, and G automatically. Column D is for you to tick. Column F is written by the engine when it sends the acknowledgement reply.
+
+### Service account setup
+
+1. Create a GCP project and enable the **Google Sheets API**
+2. Create a **Service Account** and download the JSON key file
+3. Share your spreadsheet with the service account email (`... @...iam.gserviceaccount.com`) — Editor access is required
+4. Set `GOOGLE_SERVICE_ACCOUNT_KEY_PATH` in `.env` to the path of the JSON key file
+5. Set `GOOGLE_SPREADSHEET_ID` in `.env` to the spreadsheet ID or full URL — both forms work:
+   - `1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms`
+   - `https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms/edit`
+
+### How confirmation works
+
+```
+Receipt arrives
+    ↓
+Engine parses → replies ✅ summary → writes row to sheet (D and F blank)
+    ↓
+You tick D (Confirmed checkbox) in the sheet
+    ↓
+Confirmation loop (every 30 s) detects D="TRUE", F=""
+    ↓
+Engine sends "✅ Acknowledged" as a quoted WhatsApp reply
+    ↓
+Engine writes RFC 3339 timestamp to column F — row is never reprocessed
+```
+
+Acknowledgement is idempotent — if the write to column F fails after the reply is sent, the next poll will attempt to send again. The user sees a duplicate reply in that case, but no receipts are silently lost.
 
 ## Prerequisites
 
@@ -40,6 +86,7 @@ New modules should be added to `src/lib.rs` as `pub mod <name>` and tested in a 
 - [Poppler](https://poppler.freedesktop.org/) (for `pdftoppm`)
 - [pkgconf](https://github.com/pkgconf/pkgconf)
 - A [Green API](https://green-api.com/) account with an active WhatsApp instance
+- A Google Cloud project with the Sheets API enabled and a service account key
 
 On macOS:
 ```bash
@@ -52,7 +99,7 @@ brew install tesseract poppler pkgconf
    ```bash
    cp .env.example .env
    ```
-   Fill in your credentials from the [Green API dashboard](https://green-api.com/).
+   Fill in your Green API credentials and Google Sheets credentials (see [Google Sheets integration](#google-sheets-integration) above).
 
 2. Build and run:
    ```bash
@@ -75,6 +122,8 @@ brew install tesseract poppler pkgconf
 |----------|----------|---------|-------------|
 | `GREEN_API_INSTANCE_ID` | Yes | — | Instance ID from the Green API dashboard |
 | `GREEN_API_TOKEN` | Yes | — | API token shown next to your instance |
+| `GOOGLE_SERVICE_ACCOUNT_KEY_PATH` | Yes | — | Path to the GCP service account JSON key file |
+| `GOOGLE_SPREADSHEET_ID` | Yes | — | Bare spreadsheet ID or full Google Sheets URL |
 | `RECEIPT_DOWNLOAD_DIR` | No | OS temp dir | Directory where receipt files are saved during OCR |
 | `RUST_LOG` | No | `info` | Log verbosity — `debug`, `info`, `warn`, `error` |
 
@@ -84,7 +133,17 @@ brew install tesseract poppler pkgconf
 cargo test
 ```
 
-28 integration tests covering the parser module (`tests/parser_tests.rs`):
+48 tests total — 28 parser integration tests + 20 sheets unit tests:
+
+**Sheets** (`src/sheets.rs` — `#[cfg(test)]` module, 20 tests):
+
+| Group | Tests | What's covered |
+|---|---|---|
+| `extract_spreadsheet_id` | 5 | Bare ID passthrough, full URL `/edit`, `#gid` anchor, `?usp` query param, combined |
+| `col_str` | 6 | Valid strings, out-of-bounds index, JSON null, boolean, number |
+| `pending_from_rows` | 9 | Empty input, header-only, confirmed+unacknowledged included, already-acknowledged excluded, not-confirmed excluded, row index arithmetic, mixed rows, short rows with missing trailing cols, non-array entries skipped |
+
+**Parser** (`tests/parser_tests.rs`, 28 tests):
 
 | Group | Tests | What's covered |
 |---|---|---|

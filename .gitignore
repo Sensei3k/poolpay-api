@@ -1,2 +1,10 @@
 /target
 .env
+
+# Google service account key files — these are credentials, never commit them
+service-account.json
+*.json.key
+*-key.json
+*-credentials.json
+credentials.json
+key.json
