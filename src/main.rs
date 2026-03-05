@@ -64,6 +64,11 @@ async fn main() {
                                     extractor::ocr_image(&path)
                                 };
 
+                                // Clean up the local file now that OCR has run (or failed).
+                                if let Err(e) = tokio::fs::remove_file(&path).await {
+                                    warn!(path = %path.display(), error = %e, "Failed to clean up temp file");
+                                }
+
                                 match ocr_result {
                                     Ok(text) => {
                                         info!(ocr_text = %text, "OCR complete");
