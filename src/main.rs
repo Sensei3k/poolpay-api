@@ -1,7 +1,7 @@
-use receipt_engine::{extractor, models::ReceiptRow, parser, sheets::SheetsClient, whatsapp};
+use receipt_engine::{api, db, extractor, models::ReceiptRow, parser, sheets::SheetsClient, whatsapp};
 
 use dotenv::dotenv;
-use std::{env, sync::Arc};
+use std::{env, net::SocketAddr, sync::Arc};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
@@ -39,6 +39,26 @@ async fn main() {
             .await
             .expect("Failed to initialise SheetsClient"),
     );
+
+    // Initialise embedded SurrealDB and seed fixture data if the DB is empty.
+    let surreal_db = db::init()
+        .await
+        .expect("Failed to initialise SurrealDB");
+
+    // Spawn the Axum HTTP server as a background task — runs independently of
+    // the WhatsApp polling loops below.
+    let api_db = surreal_db.clone();
+    tokio::spawn(async move {
+        let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+        let router = api::router(api_db);
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("Failed to bind Axum listener on :8080");
+        info!(addr = %addr, "API server listening");
+        axum::serve(listener, router)
+            .await
+            .expect("Axum server error");
+    });
 
     info!(
         receipt_poll_secs = RECEIPT_POLL_SECS,
