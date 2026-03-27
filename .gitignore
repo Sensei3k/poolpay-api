@@ -8,3 +8,4 @@ service-account.json
 *-credentials.json
 credentials.json
 key.json
+data.surreal/

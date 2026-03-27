@@ -1,7 +1,7 @@
-use receipt_engine::{extractor, models::ReceiptRow, parser, sheets::SheetsClient, whatsapp};
+use receipt_engine::{api, db, extractor, models::ReceiptRow, parser, sheets::SheetsClient, whatsapp};
 
 use dotenv::dotenv;
-use std::{env, sync::Arc};
+use std::{env, net::SocketAddr, sync::Arc};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
@@ -40,6 +40,30 @@ async fn main() {
             .expect("Failed to initialise SheetsClient"),
     );
 
+    // Initialise embedded SurrealDB and seed fixture data if the DB is empty.
+    let surreal_db = db::init()
+        .await
+        .expect("Failed to initialise SurrealDB");
+
+    // Spawn the Axum HTTP server.
+    // The handle is stored and monitored via tokio::select! below — if the
+    // server dies the process exits rather than silently running without an API.
+    let api_db = surreal_db.clone();
+    let api_handle = tokio::spawn(async move {
+        let bind_addr = env::var("API_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        let addr: SocketAddr = bind_addr
+            .parse()
+            .expect("API_BIND_ADDR is not a valid socket address");
+        let router = api::router(api_db);
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("Failed to bind Axum listener");
+        info!(addr = %addr, "API server listening");
+        if let Err(e) = axum::serve(listener, router).await {
+            error!(error = %e, "API server error");
+        }
+    });
+
     info!(
         receipt_poll_secs = RECEIPT_POLL_SECS,
         confirm_poll_secs = CONFIRM_POLL_SECS,
@@ -55,7 +79,7 @@ async fn main() {
     // Results from async calls are fully consumed (matched) before the next await so
     // the non-Send `Box<dyn Error>` is never held across an await point, keeping the
     // future Send and therefore compatible with tokio::spawn.
-    tokio::spawn(async move {
+    let confirm_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
         let client = reqwest::Client::new();
         loop {
             let pending = match sheets_for_confirm.fetch_unacknowledged_confirmed().await {
@@ -98,7 +122,21 @@ async fn main() {
         }
     });
 
+    // Watchdog: if either long-running task dies, the process exits rather
+    // than silently continuing with a broken API or confirmation loop.
+    tokio::spawn(async move {
+        tokio::select! {
+            r = api_handle => error!("API server task exited: {:?} — shutting down", r),
+            r = confirm_handle => error!("Confirmation loop task exited: {:?} — shutting down", r),
+        }
+        std::process::exit(1);
+    });
+
     // Receipt loop — polls Green API every 5 s, runs OCR, writes to sheet.
+    //
+    // Kept in the main thread: the error type (Box<dyn Error>) is not Send, so
+    // the loop cannot be moved into tokio::spawn. The watchdog above handles
+    // monitoring of the API server and confirmation loop independently.
     let client = reqwest::Client::new();
     loop {
         match whatsapp::receive_notification(&client, &instance_id, &api_token).await {

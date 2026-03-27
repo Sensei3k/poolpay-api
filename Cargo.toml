@@ -34,3 +34,23 @@ yup-oauth2 = "12"
 # Timestamp formatting for AcknowledgedAt column — already a transitive dep via yup-oauth2,
 # declared explicitly here to use the formatting feature for RFC 3339 output
 time = { version = "0.3", features = ["formatting"] }
+
+# HTTP server — Axum REST API for the circle dashboard frontend
+axum = "0.8"
+
+# CORS middleware for the Axum server — permits localhost:3001 in development
+tower-http = { version = "0.6", features = ["cors"] }
+
+# SurrealDB embedded database — RocksDB engine, persists to ./data.surreal
+surrealdb = { version = "3", features = ["kv-rocksdb", "kv-mem"] }
+# Direct dep so the SurrealValue derive macro resolves surrealdb_types:: paths correctly
+surrealdb-types = "3"
+
+# Timestamp-based payment ID generation
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+# HTTP service test utilities — used in API integration tests
+tower = { version = "0.5", features = ["util"] }
+# Read axum response bodies in integration tests
+http-body-util = "0.1"
