@@ -322,7 +322,7 @@ impl CreatePaymentRequest {
         }
         self.currency
             .parse::<Currency>()
-            .map_err(|e| AppError::BadRequest(e))?;
+            .map_err(AppError::BadRequest)?;
         if !is_valid_date(&self.payment_date) {
             return Err(AppError::BadRequest(
                 "paymentDate must be a valid YYYY-MM-DD date".into(),

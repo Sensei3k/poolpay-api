@@ -90,43 +90,6 @@ pub async fn send_message(
     Ok(())
 }
 
-/// Sends a text message to a WhatsApp chat, optionally quoting a previous message.
-///
-/// When `quoted_message_id` is non-empty, the API request includes a `"quotedMessageId"` field
-/// so the reply appears as a quote in WhatsApp. When it is empty, the message is sent without
-/// a quote — identical behaviour to `send_message`.
-pub async fn send_quoted_message(
-    client: &Client,
-    instance_id: &str,
-    api_token: &str,
-    chat_id: &str,
-    message: &str,
-    quoted_message_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let url = api_url(instance_id, "sendMessage", api_token);
-
-    let body = if quoted_message_id.is_empty() {
-        serde_json::json!({
-            "chatId": chat_id,
-            "message": message,
-        })
-    } else {
-        serde_json::json!({
-            "chatId": chat_id,
-            "message": message,
-            "quotedMessageId": quoted_message_id,
-        })
-    };
-
-    let response = client.post(&url).json(&body).send().await?;
-    let status = response.status();
-    if !status.is_success() {
-        let text = response.text().await?;
-        return Err(format!("Green API error {}: {}", status, text).into());
-    }
-    Ok(())
-}
-
 /// Downloads a file from the URL in the given FileMessageData and saves it to DOWNLOAD_DIR.
 /// The filename is derived from the receipt ID to ensure uniqueness across messages.
 pub async fn download_file(

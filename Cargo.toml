@@ -27,14 +27,6 @@ regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Google OAuth2 — service account authentication for the Sheets API
-# Default features include hyper-rustls (TLS), ring (crypto), and service-account support
-yup-oauth2 = "12"
-
-# Timestamp formatting for AcknowledgedAt column — already a transitive dep via yup-oauth2,
-# declared explicitly here to use the formatting feature for RFC 3339 output
-time = { version = "0.3", features = ["formatting"] }
-
 # HTTP server — Axum REST API for the circle dashboard frontend
 axum = "0.8"
 

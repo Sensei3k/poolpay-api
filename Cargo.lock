@@ -904,7 +904,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 dependencies = [
  "powerfmt",
- "serde_core",
 ]
 
 [[package]]
@@ -1800,7 +1799,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
- "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
@@ -2626,15 +2624,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num_threads"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3366,13 +3355,11 @@ dependencies = [
  "surrealdb",
  "surrealdb-types",
  "tesseract",
- "time",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "yup-oauth2",
 ]
 
 [[package]]
@@ -4714,9 +4701,7 @@ checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
  "deranged",
  "itoa",
- "libc",
  "num-conv",
- "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",
@@ -6002,31 +5987,6 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "synstructure",
-]
-
-[[package]]
-name = "yup-oauth2"
-version = "12.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef19a12dfb29fe39f78e1547e1be49717b84aef8762a4001359ed4f94d3accc1"
-dependencies = [
- "async-trait",
- "base64",
- "http",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "log",
- "percent-encoding",
- "rustls",
- "seahash",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "url",
 ]
 
 [[package]]

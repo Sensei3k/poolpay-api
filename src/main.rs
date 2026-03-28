@@ -1,15 +1,12 @@
-use receipt_engine::{api, db, extractor, models::ReceiptRow, parser, sheets::SheetsClient, whatsapp};
+use receipt_engine::{api, db, extractor, parser, whatsapp};
 
 use dotenv::dotenv;
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{env, net::SocketAddr};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
 /// How long to wait between polls when the Green API queue is empty.
 const RECEIPT_POLL_SECS: u64 = 5;
-
-/// How long to wait between confirmation polls against the Google Sheet.
-const CONFIRM_POLL_SECS: u64 = 30;
 
 #[tokio::main]
 async fn main() {
@@ -28,26 +25,14 @@ async fn main() {
     let api_token = env::var("GREEN_API_TOKEN")
         .expect("GREEN_API_TOKEN must be set in .env");
 
-    let key_path = env::var("GOOGLE_SERVICE_ACCOUNT_KEY_PATH")
-        .expect("GOOGLE_SERVICE_ACCOUNT_KEY_PATH must be set in .env");
-
-    let spreadsheet_id = env::var("GOOGLE_SPREADSHEET_ID")
-        .expect("GOOGLE_SPREADSHEET_ID must be set in .env");
-
-    let sheets = Arc::new(
-        SheetsClient::new(&key_path, spreadsheet_id)
-            .await
-            .expect("Failed to initialise SheetsClient"),
-    );
-
     // Initialise embedded SurrealDB and seed fixture data if the DB is empty.
     let surreal_db = db::init()
         .await
         .expect("Failed to initialise SurrealDB");
 
     // Spawn the Axum HTTP server.
-    // The handle is stored and monitored via tokio::select! below — if the
-    // server dies the process exits rather than silently running without an API.
+    // Monitored below — if the server dies the process exits rather than
+    // silently running without an API.
     let api_db = surreal_db.clone();
     let api_handle = tokio::spawn(async move {
         let bind_addr = env::var("API_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
@@ -64,79 +49,20 @@ async fn main() {
         }
     });
 
-    info!(
-        receipt_poll_secs = RECEIPT_POLL_SECS,
-        confirm_poll_secs = CONFIRM_POLL_SECS,
-        "Receipt engine started"
-    );
+    info!(receipt_poll_secs = RECEIPT_POLL_SECS, "Receipt engine started");
 
-    let sheets_for_confirm = Arc::clone(&sheets);
-    let instance_id_confirm = instance_id.clone();
-    let api_token_confirm = api_token.clone();
-
-    // Confirmation loop — polls the sheet every 30 s and sends acknowledged replies.
-    //
-    // Results from async calls are fully consumed (matched) before the next await so
-    // the non-Send `Box<dyn Error>` is never held across an await point, keeping the
-    // future Send and therefore compatible with tokio::spawn.
-    let confirm_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        loop {
-            let pending = match sheets_for_confirm.fetch_unacknowledged_confirmed().await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    error!(error = %e, "Failed to fetch confirmed rows from sheet");
-                    vec![]
-                }
-            };
-
-            for row in pending {
-                let send_ok = match whatsapp::send_quoted_message(
-                    &client,
-                    &instance_id_confirm,
-                    &api_token_confirm,
-                    &row.chat_id,
-                    "✅ Acknowledged",
-                    &row.message_id,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        info!(row_index = row.row_index, "Acknowledgement sent");
-                        true
-                    }
-                    Err(e) => {
-                        error!(error = %e, row_index = row.row_index, "Failed to send acknowledgement");
-                        false
-                    }
-                };
-
-                if send_ok {
-                    if let Err(e) = sheets_for_confirm.mark_acknowledged(row.row_index).await {
-                        error!(error = %e, row_index = row.row_index, "Failed to mark row acknowledged");
-                    }
-                }
-            }
-
-            sleep(Duration::from_secs(CONFIRM_POLL_SECS)).await;
-        }
-    });
-
-    // Watchdog: if either long-running task dies, the process exits rather
-    // than silently continuing with a broken API or confirmation loop.
+    // Watchdog: if the API server task dies, exit rather than silently
+    // continuing with a broken API.
     tokio::spawn(async move {
-        tokio::select! {
-            r = api_handle => error!("API server task exited: {:?} — shutting down", r),
-            r = confirm_handle => error!("Confirmation loop task exited: {:?} — shutting down", r),
-        }
+        let r = api_handle.await;
+        error!("API server task exited: {:?} — shutting down", r);
         std::process::exit(1);
     });
 
-    // Receipt loop — polls Green API every 5 s, runs OCR, writes to sheet.
+    // Receipt loop — polls Green API every 5 s, runs OCR, sends WhatsApp reply.
     //
     // Kept in the main thread: the error type (Box<dyn Error>) is not Send, so
-    // the loop cannot be moved into tokio::spawn. The watchdog above handles
-    // monitoring of the API server and confirmation loop independently.
+    // the loop cannot be moved into tokio::spawn.
     let client = reqwest::Client::new();
     loop {
         match whatsapp::receive_notification(&client, &instance_id, &api_token).await {
@@ -184,31 +110,14 @@ async fn main() {
                                             .as_ref()
                                             .and_then(|s| s.chat_id.as_deref());
 
-                                        let message_id = notification
-                                            .body
-                                            .id_message
-                                            .as_deref()
-                                            .unwrap_or("")
-                                            .to_string();
-
                                         if let Some(chat_id) = chat_id {
-                                            let row = ReceiptRow {
-                                                sender: parsed
-                                                    .sender
-                                                    .unwrap_or_else(|| "unknown".to_string()),
-                                                bank: parsed
-                                                    .bank
-                                                    .unwrap_or_else(|| "unknown".to_string()),
-                                                amount: parsed
-                                                    .amount
-                                                    .unwrap_or_else(|| "unknown".to_string()),
-                                                message_id,
-                                                chat_id: chat_id.to_string(),
-                                            };
+                                            let sender = parsed.sender.unwrap_or_else(|| "unknown".to_string());
+                                            let bank = parsed.bank.unwrap_or_else(|| "unknown".to_string());
+                                            let amount = parsed.amount.unwrap_or_else(|| "unknown".to_string());
 
                                             let reply = format!(
                                                 "✅ Sender: {}\nBank: {}\nAmount: {}",
-                                                row.sender, row.bank, row.amount,
+                                                sender, bank, amount,
                                             );
 
                                             match whatsapp::send_message(
@@ -225,12 +134,6 @@ async fn main() {
                                                     error!(error = %e, "Failed to send reply");
                                                     processing_ok = false;
                                                 }
-                                            }
-
-                                            if let Err(e) = sheets.append_row(&row).await {
-                                                error!(error = %e, "Failed to write row to sheet");
-                                                // Non-fatal: the receipt reply already went out.
-                                                // Log and continue rather than discarding the notification.
                                             }
                                         } else {
                                             error!("No chat_id found — cannot send reply");
