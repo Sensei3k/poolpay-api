@@ -15,7 +15,7 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt;
-use receipt_engine::{api, db};
+use poolpay::{api, db};
 use tower::ServiceExt;
 
 // ── Test helpers ──────────────────────────────────────────────────────────────

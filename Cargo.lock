@@ -3004,6 +3004,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
+name = "poolpay"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "dotenv",
+ "http-body-util",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "subtle",
+ "surrealdb",
+ "surrealdb-types",
+ "tesseract",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3339,29 +3362,6 @@ name = "reblessive"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbc4a4ea2a66a41a1152c4b3d86e8954dc087bdf33af35446e6e176db4e73c8c"
-
-[[package]]
-name = "receipt-engine"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "dotenv",
- "http-body-util",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "subtle",
- "surrealdb",
- "surrealdb-types",
- "tesseract",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "redox_syscall"

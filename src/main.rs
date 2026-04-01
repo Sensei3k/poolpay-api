@@ -1,4 +1,4 @@
-use receipt_engine::{api, db, extractor, parser, whatsapp};
+use poolpay::{api, db, extractor, parser, whatsapp};
 
 use dotenv::dotenv;
 use std::{env, net::SocketAddr};
