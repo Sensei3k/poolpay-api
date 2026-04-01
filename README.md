@@ -1,4 +1,4 @@
-# rust-receipt-engine
+# poolpay
 
 A Rust service that manages Ajo savings circles with a REST API and WhatsApp receipt OCR. Built with Axum, SurrealDB, and Green API.
 
@@ -44,7 +44,7 @@ tests/
 └── api_integration.rs  — 75 API route and database integration tests
 ```
 
-The project uses a **lib + bin** layout: `src/lib.rs` exposes all modules as a library crate (`receipt_engine`), and `src/main.rs` is the binary entry point that imports from it. This allows `tests/` to import the public API directly, keeping integration tests separate from source files.
+The project uses a **lib + bin** layout: `src/lib.rs` exposes all modules as a library crate (`poolpay`), and `src/main.rs` is the binary entry point that imports from it. This allows `tests/` to import the public API directly, keeping integration tests separate from source files.
 
 New modules should be added to `src/lib.rs` as `pub mod <name>` and tested in a corresponding `tests/<name>_tests.rs` file.
 

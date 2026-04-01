@@ -2,7 +2,7 @@
 
 Last Updated: 2026-04-01
 
-Quick reference to all documentation for the Rust Receipt Engine project.
+Quick reference to all documentation for the PoolPay project.
 
 ## For Developers
 
@@ -98,7 +98,7 @@ cargo build --release
 
 # Run
 APP_ENV=production DASHBOARD_ORIGIN=https://dashboard.example.com \
-  ./target/release/receipt-engine
+  ./target/release/poolpay
 ```
 
 ## Architecture Overview

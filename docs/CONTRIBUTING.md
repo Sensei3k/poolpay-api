@@ -1,4 +1,4 @@
-# Contributing to Receipt Engine
+# Contributing to PoolPay
 
 Last Updated: 2026-04-01
 
@@ -109,7 +109,7 @@ RUST_LOG=debug cargo run
 Or set a specific module:
 
 ```bash
-RUST_LOG=receipt_engine::parser=debug,receipt_engine::api=debug cargo run
+RUST_LOG=poolpay::parser=debug,poolpay::api=debug cargo run
 ```
 
 Supported log levels: `debug`, `info`, `warn`, `error`.
@@ -315,7 +315,7 @@ let value = dbg!(some_function());
 Use the Rust debugger (lldb on macOS):
 
 ```bash
-rust-lldb target/debug/receipt-engine
+rust-lldb target/debug/poolpay
 (lldb) run
 ```
 
