@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::{RecordId, RecordIdKey};
 use surrealdb_types::SurrealValue;
 
+/// Stable alias for entity IDs across the API and DB layers.
+/// If the underlying representation changes, only this line needs updating.
+pub type EntityId = String;
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -153,7 +157,7 @@ pub struct DbMember {
     pub phone: String,
     pub position: i64,
     pub status: String,
-    pub group_id: i64,
+    pub group_id: EntityId,
     pub notes: Option<String>,
     pub joined_at: Option<String>,
     pub created_at: String,
@@ -170,9 +174,9 @@ pub struct DbCycle {
     pub end_date: String,
     pub contribution_per_member: i64,
     pub total_amount: i64,
-    pub recipient_member_id: i64,
+    pub recipient_member_id: EntityId,
     pub status: String,
-    pub group_id: i64,
+    pub group_id: EntityId,
     pub notes: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -182,8 +186,8 @@ pub struct DbCycle {
 #[derive(Debug, Deserialize, SurrealValue)]
 pub struct DbPayment {
     pub id: RecordId,
-    pub member_id: i64,
-    pub cycle_id: i64,
+    pub member_id: EntityId,
+    pub cycle_id: EntityId,
     pub amount: i64,
     pub currency: String,
     pub payment_date: String,
@@ -202,7 +206,7 @@ pub struct DbPayment {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
-    pub id: i64,
+    pub id: EntityId,
     pub name: String,
     pub status: GroupStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -218,13 +222,13 @@ pub struct Group {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Member {
-    pub id: i64,
+    pub id: EntityId,
     pub name: String,
     pub phone: String,
     pub position: i64,
     pub status: MemberStatus,
     #[serde(rename = "groupId")]
-    pub group_id: i64,
+    pub group_id: EntityId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     #[serde(rename = "joinedAt", skip_serializing_if = "Option::is_none")]
@@ -240,7 +244,7 @@ pub struct Member {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cycle {
-    pub id: i64,
+    pub id: EntityId,
     #[serde(rename = "cycleNumber")]
     pub cycle_number: i64,
     #[serde(rename = "startDate")]
@@ -252,10 +256,10 @@ pub struct Cycle {
     #[serde(rename = "totalAmount")]
     pub total_amount: i64,
     #[serde(rename = "recipientMemberId")]
-    pub recipient_member_id: i64,
+    pub recipient_member_id: EntityId,
     pub status: CycleStatus,
     #[serde(rename = "groupId")]
-    pub group_id: i64,
+    pub group_id: EntityId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     #[serde(rename = "createdAt")]
@@ -267,11 +271,11 @@ pub struct Cycle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
-    pub id: i64,
+    pub id: EntityId,
     #[serde(rename = "memberId")]
-    pub member_id: i64,
+    pub member_id: EntityId,
     #[serde(rename = "cycleId")]
-    pub cycle_id: i64,
+    pub cycle_id: EntityId,
     pub amount: i64,
     pub currency: Currency,
     #[serde(rename = "paymentDate")]
@@ -294,13 +298,12 @@ pub struct Payment {
 
 // ── DB-to-API conversions ───────────────────────────────────────────────────
 
-/// Extract the integer key from a SurrealDB RecordId (e.g. `member:1` → 1).
-pub(crate) fn record_id_to_i64(rid: RecordId) -> Result<i64, AppError> {
+/// Extract the string key from a SurrealDB RecordId.
+pub(crate) fn record_id_to_string(rid: RecordId) -> String {
     match rid.key {
-        RecordIdKey::Number(n) => Ok(n),
-        other => Err(AppError::Internal(format!(
-            "expected integer RecordId key, got: {other:?}"
-        ))),
+        RecordIdKey::Number(n) => n.to_string(),
+        RecordIdKey::String(s) => s,
+        other => format!("{other:?}"),
     }
 }
 
@@ -308,7 +311,7 @@ impl TryFrom<DbGroup> for Group {
     type Error = AppError;
     fn try_from(db: DbGroup) -> Result<Self, AppError> {
         Ok(Self {
-            id: record_id_to_i64(db.id)?,
+            id: record_id_to_string(db.id),
             name: db.name,
             status: db.status.parse().map_err(|e: String| AppError::Internal(e))?,
             description: db.description,
@@ -324,7 +327,7 @@ impl TryFrom<DbMember> for Member {
     type Error = AppError;
     fn try_from(db: DbMember) -> Result<Self, AppError> {
         Ok(Self {
-            id: record_id_to_i64(db.id)?,
+            id: record_id_to_string(db.id),
             name: db.name,
             phone: db.phone,
             position: db.position,
@@ -344,7 +347,7 @@ impl TryFrom<DbCycle> for Cycle {
     type Error = AppError;
     fn try_from(db: DbCycle) -> Result<Self, AppError> {
         Ok(Self {
-            id: record_id_to_i64(db.id)?,
+            id: record_id_to_string(db.id),
             cycle_number: db.cycle_number,
             start_date: db.start_date,
             end_date: db.end_date,
@@ -365,7 +368,7 @@ impl TryFrom<DbPayment> for Payment {
     type Error = AppError;
     fn try_from(db: DbPayment) -> Result<Self, AppError> {
         Ok(Self {
-            id: record_id_to_i64(db.id)?,
+            id: record_id_to_string(db.id),
             member_id: db.member_id,
             cycle_id: db.cycle_id,
             amount: db.amount,
@@ -401,7 +404,7 @@ pub struct MemberContent {
     pub phone: String,
     pub position: i64,
     pub status: String,
-    pub group_id: i64,
+    pub group_id: EntityId,
     pub notes: Option<String>,
     pub joined_at: Option<String>,
     pub created_at: String,
@@ -417,9 +420,9 @@ pub struct CycleContent {
     pub end_date: String,
     pub contribution_per_member: i64,
     pub total_amount: i64,
-    pub recipient_member_id: i64,
+    pub recipient_member_id: EntityId,
     pub status: String,
-    pub group_id: i64,
+    pub group_id: EntityId,
     pub notes: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -428,8 +431,8 @@ pub struct CycleContent {
 
 #[derive(Debug, Clone, Serialize, SurrealValue)]
 pub struct PaymentContent {
-    pub member_id: i64,
-    pub cycle_id: i64,
+    pub member_id: EntityId,
+    pub cycle_id: EntityId,
     pub amount: i64,
     pub currency: String,
     pub payment_date: String,
@@ -573,7 +576,7 @@ pub struct CreateCycleRequest {
     #[serde(rename = "contributionPerMember")]
     pub contribution_per_member: i64,
     #[serde(rename = "recipientMemberId")]
-    pub recipient_member_id: i64,
+    pub recipient_member_id: EntityId,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -608,9 +611,9 @@ impl CreateCycleRequest {
                 "contributionPerMember must be a positive integer (in kobo)".into(),
             ));
         }
-        if self.recipient_member_id <= 0 {
+        if self.recipient_member_id.trim().is_empty() {
             return Err(AppError::BadRequest(
-                "recipientMemberId must be a positive integer".into(),
+                "recipientMemberId must not be empty".into(),
             ));
         }
         Ok(())
@@ -626,7 +629,7 @@ pub struct UpdateCycleRequest {
     #[serde(rename = "contributionPerMember")]
     pub contribution_per_member: Option<i64>,
     #[serde(rename = "recipientMemberId")]
-    pub recipient_member_id: Option<i64>,
+    pub recipient_member_id: Option<EntityId>,
     pub status: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
@@ -677,9 +680,9 @@ impl UpdateCycleRequest {
 #[derive(Debug, Deserialize)]
 pub struct CreatePaymentRequest {
     #[serde(rename = "memberId")]
-    pub member_id: i64,
+    pub member_id: EntityId,
     #[serde(rename = "cycleId")]
-    pub cycle_id: i64,
+    pub cycle_id: EntityId,
     pub amount: i64,
     pub currency: String,
     #[serde(rename = "paymentDate")]
@@ -688,14 +691,14 @@ pub struct CreatePaymentRequest {
 
 impl CreatePaymentRequest {
     pub fn validate(&self) -> Result<(), AppError> {
-        if self.member_id <= 0 {
+        if self.member_id.trim().is_empty() {
             return Err(AppError::BadRequest(
-                "memberId must be a positive integer".into(),
+                "memberId must not be empty".into(),
             ));
         }
-        if self.cycle_id <= 0 {
+        if self.cycle_id.trim().is_empty() {
             return Err(AppError::BadRequest(
-                "cycleId must be a positive integer".into(),
+                "cycleId must not be empty".into(),
             ));
         }
         if self.amount <= 0 {

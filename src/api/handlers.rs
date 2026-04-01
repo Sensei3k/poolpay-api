@@ -9,9 +9,9 @@ use tracing::error;
 use super::auth::AdminToken;
 use crate::api::models::{
     AppError, CreateCycleRequest, CreateGroupRequest, CreateMemberRequest, CreatePaymentRequest,
-    Cycle, CycleContent, DbCycle, DbGroup, DbMember, DbPayment, Group, GroupContent, Member,
-    MemberContent, Payment, PaymentContent, UpdateCycleRequest, UpdateGroupRequest,
-    UpdateMemberRequest, now_iso, record_id_to_i64,
+    Cycle, CycleContent, DbCycle, DbGroup, DbMember, DbPayment, EntityId, Group, GroupContent,
+    Member, MemberContent, Payment, PaymentContent, UpdateCycleRequest, UpdateGroupRequest,
+    UpdateMemberRequest, now_iso, record_id_to_string,
 };
 use crate::db::{DbConn, reseed};
 
@@ -20,13 +20,13 @@ use crate::db::{DbConn, reseed};
 #[derive(Debug, Deserialize)]
 pub struct GroupIdQuery {
     #[serde(rename = "groupId")]
-    pub group_id: Option<i64>,
+    pub group_id: Option<EntityId>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PaymentsQuery {
     #[serde(rename = "cycleId")]
-    pub cycle_id: Option<i64>,
+    pub cycle_id: Option<EntityId>,
 }
 
 // ── Public GET handlers ──────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ pub async fn get_members(
     let filtered: Vec<Member> = members
         .into_iter()
         .filter(|m| m.deleted_at.is_none())
-        .filter(|m| params.group_id.map_or(true, |gid| m.group_id == gid))
+        .filter(|m| params.group_id.as_ref().map_or(true, |gid| m.group_id == *gid))
         .collect();
 
     Ok(Json(filtered))
@@ -69,7 +69,7 @@ pub async fn get_cycles(
 
     let filtered: Vec<Cycle> = cycles
         .into_iter()
-        .filter(|c| params.group_id.map_or(true, |gid| c.group_id == gid))
+        .filter(|c| params.group_id.as_ref().map_or(true, |gid| c.group_id == *gid))
         .collect();
 
     Ok(Json(filtered))
@@ -87,7 +87,7 @@ pub async fn get_payments(
     let filtered: Vec<Payment> = payments
         .into_iter()
         .filter(|p| p.deleted_at.is_none())
-        .filter(|p| params.cycle_id.map_or(true, |cid| p.cycle_id == cid))
+        .filter(|p| params.cycle_id.as_ref().map_or(true, |cid| p.cycle_id == *cid))
         .collect();
 
     Ok(Json(filtered))
@@ -102,7 +102,6 @@ pub async fn create_group(
 ) -> Result<(StatusCode, Json<Group>), AppError> {
     body.validate()?;
 
-    let id = chrono::Utc::now().timestamp_millis();
     let now = now_iso();
     let content = GroupContent {
         name: body.name.trim().to_string(),
@@ -114,8 +113,8 @@ pub async fn create_group(
         version: 1,
     };
 
-    let created: Option<DbGroup> = db.upsert(("group", id)).content(content).await?;
-    let db_group = created.ok_or_else(|| AppError::Internal("group was not created".into()))?;
+    let db_group: Option<DbGroup> = db.create("group").content(content).await?;
+    let db_group = db_group.ok_or_else(|| AppError::Internal("group was not created".into()))?;
 
     Ok((StatusCode::CREATED, Json(Group::try_from(db_group)?)))
 }
@@ -123,12 +122,12 @@ pub async fn create_group(
 pub async fn update_group(
     _auth: AdminToken,
     State(db): State<DbConn>,
-    Path(id): Path<i64>,
+    Path(id): Path<EntityId>,
     Json(body): Json<UpdateGroupRequest>,
 ) -> Result<Json<Group>, AppError> {
     body.validate()?;
 
-    let existing: Option<DbGroup> = db.select(("group", id)).await?;
+    let existing: Option<DbGroup> = db.select(("group", id.as_str())).await?;
     let existing = existing.ok_or_else(|| AppError::NotFound(format!("group {id} does not exist")))?;
 
     if existing.version != body.version {
@@ -147,7 +146,7 @@ pub async fn update_group(
         version: existing.version + 1,
     };
 
-    let updated: Option<DbGroup> = db.upsert(("group", id)).content(content).await?;
+    let updated: Option<DbGroup> = db.upsert(("group", id.as_str())).content(content).await?;
     let db_group = updated.ok_or_else(|| AppError::Internal("group update failed".into()))?;
 
     Ok(Json(Group::try_from(db_group)?))
@@ -156,15 +155,15 @@ pub async fn update_group(
 pub async fn delete_group(
     _auth: AdminToken,
     State(db): State<DbConn>,
-    Path(id): Path<i64>,
+    Path(id): Path<EntityId>,
 ) -> Result<StatusCode, AppError> {
-    let existing: Option<DbGroup> = db.select(("group", id)).await?;
+    let existing: Option<DbGroup> = db.select(("group", id.as_str())).await?;
     let existing = existing.ok_or_else(|| AppError::NotFound(format!("group {id} does not exist")))?;
 
     // Check for members in this group.
     let members: Vec<DbMember> = db
         .query("SELECT * FROM member WHERE group_id = $gid AND deleted_at IS NONE")
-        .bind(("gid", id))
+        .bind(("gid", id.clone()))
         .await?
         .take(0)?;
 
@@ -177,7 +176,7 @@ pub async fn delete_group(
     // Check for cycles in this group.
     let cycles: Vec<DbCycle> = db
         .query("SELECT * FROM cycle WHERE group_id = $gid")
-        .bind(("gid", id))
+        .bind(("gid", id.clone()))
         .await?
         .take(0)?;
 
@@ -198,7 +197,7 @@ pub async fn delete_group(
         deleted_at: Some(now),
         version: existing.version + 1,
     };
-    let _: Option<DbGroup> = db.upsert(("group", id)).content(content).await?;
+    let _: Option<DbGroup> = db.upsert(("group", id.as_str())).content(content).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -208,13 +207,13 @@ pub async fn delete_group(
 pub async fn create_member(
     _auth: AdminToken,
     State(db): State<DbConn>,
-    Path(group_id): Path<i64>,
+    Path(group_id): Path<EntityId>,
     Json(body): Json<CreateMemberRequest>,
 ) -> Result<(StatusCode, Json<Member>), AppError> {
     body.validate()?;
 
     // Verify group exists and is not soft-deleted.
-    let group: Option<DbGroup> = db.select(("group", group_id)).await?;
+    let group: Option<DbGroup> = db.select(("group", group_id.as_str())).await?;
     match &group {
         None => return Err(AppError::NotFound(format!("group {group_id} does not exist"))),
         Some(g) if g.deleted_at.is_some() => {
@@ -228,7 +227,7 @@ pub async fn create_member(
     let phone_trimmed = body.phone.trim().to_string();
     let dupes: Vec<DbMember> = db
         .query("SELECT * FROM member WHERE group_id = $gid AND phone = $phone AND deleted_at IS NONE")
-        .bind(("gid", group_id))
+        .bind(("gid", group_id.clone()))
         .bind(("phone", phone_trimmed))
         .await?
         .take(0)?;
@@ -239,7 +238,6 @@ pub async fn create_member(
         ));
     }
 
-    let id = chrono::Utc::now().timestamp_millis();
     let now = now_iso();
     let content = MemberContent {
         name: body.name.trim().to_string(),
@@ -255,8 +253,8 @@ pub async fn create_member(
         version: 1,
     };
 
-    let created: Option<DbMember> = db.upsert(("member", id)).content(content).await?;
-    let db_member = created.ok_or_else(|| AppError::Internal("member was not created".into()))?;
+    let db_member: Option<DbMember> = db.create("member").content(content).await?;
+    let db_member = db_member.ok_or_else(|| AppError::Internal("member was not created".into()))?;
 
     Ok((StatusCode::CREATED, Json(Member::try_from(db_member)?)))
 }
@@ -264,12 +262,12 @@ pub async fn create_member(
 pub async fn update_member(
     _auth: AdminToken,
     State(db): State<DbConn>,
-    Path(id): Path<i64>,
+    Path(id): Path<EntityId>,
     Json(body): Json<UpdateMemberRequest>,
 ) -> Result<Json<Member>, AppError> {
     body.validate()?;
 
-    let existing: Option<DbMember> = db.select(("member", id)).await?;
+    let existing: Option<DbMember> = db.select(("member", id.as_str())).await?;
     let existing = existing.ok_or_else(|| AppError::NotFound(format!("member {id} does not exist")))?;
 
     if existing.version != body.version {
@@ -282,9 +280,9 @@ pub async fn update_member(
     if let Some(new_phone) = &body.phone {
         let dupes: Vec<DbMember> = db
             .query("SELECT * FROM member WHERE group_id = $gid AND phone = $phone AND deleted_at IS NONE AND id != $mid")
-            .bind(("gid", existing.group_id))
+            .bind(("gid", existing.group_id.clone()))
             .bind(("phone", new_phone.trim().to_string()))
-            .bind(("mid", surrealdb::types::RecordId::new("member", id)))
+            .bind(("mid", surrealdb::types::RecordId::new("member", id.clone())))
             .await?
             .take(0)?;
 
@@ -309,7 +307,7 @@ pub async fn update_member(
         version: existing.version + 1,
     };
 
-    let updated: Option<DbMember> = db.upsert(("member", id)).content(content).await?;
+    let updated: Option<DbMember> = db.upsert(("member", id.as_str())).content(content).await?;
     let db_member = updated.ok_or_else(|| AppError::Internal("member update failed".into()))?;
 
     Ok(Json(Member::try_from(db_member)?))
@@ -318,15 +316,15 @@ pub async fn update_member(
 pub async fn delete_member(
     _auth: AdminToken,
     State(db): State<DbConn>,
-    Path(id): Path<i64>,
+    Path(id): Path<EntityId>,
 ) -> Result<StatusCode, AppError> {
-    let existing: Option<DbMember> = db.select(("member", id)).await?;
+    let existing: Option<DbMember> = db.select(("member", id.as_str())).await?;
     let existing = existing.ok_or_else(|| AppError::NotFound(format!("member {id} does not exist")))?;
 
     // Check if member is a recipient of any active cycle.
     let active_cycles: Vec<DbCycle> = db
         .query("SELECT * FROM cycle WHERE recipient_member_id = $mid AND status = 'active'")
-        .bind(("mid", id))
+        .bind(("mid", id.clone()))
         .await?
         .take(0)?;
 
@@ -351,7 +349,7 @@ pub async fn delete_member(
         deleted_at: Some(now),
         version: existing.version + 1,
     };
-    let _: Option<DbMember> = db.upsert(("member", id)).content(content).await?;
+    let _: Option<DbMember> = db.upsert(("member", id.as_str())).content(content).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -361,13 +359,13 @@ pub async fn delete_member(
 pub async fn create_cycle(
     _auth: AdminToken,
     State(db): State<DbConn>,
-    Path(group_id): Path<i64>,
+    Path(group_id): Path<EntityId>,
     Json(body): Json<CreateCycleRequest>,
 ) -> Result<(StatusCode, Json<Cycle>), AppError> {
     body.validate()?;
 
     // Verify group exists and is not soft-deleted.
-    let group: Option<DbGroup> = db.select(("group", group_id)).await?;
+    let group: Option<DbGroup> = db.select(("group", group_id.as_str())).await?;
     match &group {
         None => return Err(AppError::NotFound(format!("group {group_id} does not exist"))),
         Some(g) if g.deleted_at.is_some() => {
@@ -377,7 +375,7 @@ pub async fn create_cycle(
     }
 
     // Verify recipient is in the same group and is not soft-deleted.
-    let recipient: Option<DbMember> = db.select(("member", body.recipient_member_id)).await?;
+    let recipient: Option<DbMember> = db.select(("member", body.recipient_member_id.as_str())).await?;
     match recipient {
         None => {
             return Err(AppError::NotFound(format!(
@@ -401,13 +399,12 @@ pub async fn create_cycle(
     // Count active members in the group for total_amount calculation.
     let active_members: Vec<DbMember> = db
         .query("SELECT * FROM member WHERE group_id = $gid AND status = 'active' AND deleted_at IS NONE")
-        .bind(("gid", group_id))
+        .bind(("gid", group_id.clone()))
         .await?
         .take(0)?;
 
     let total_amount = body.contribution_per_member * active_members.len() as i64;
 
-    let id = chrono::Utc::now().timestamp_millis();
     let now = now_iso();
     let content = CycleContent {
         cycle_number: body.cycle_number,
@@ -424,8 +421,8 @@ pub async fn create_cycle(
         version: 1,
     };
 
-    let created: Option<DbCycle> = db.upsert(("cycle", id)).content(content).await?;
-    let db_cycle = created.ok_or_else(|| AppError::Internal("cycle was not created".into()))?;
+    let db_cycle: Option<DbCycle> = db.create("cycle").content(content).await?;
+    let db_cycle = db_cycle.ok_or_else(|| AppError::Internal("cycle was not created".into()))?;
 
     Ok((StatusCode::CREATED, Json(Cycle::try_from(db_cycle)?)))
 }
@@ -433,12 +430,12 @@ pub async fn create_cycle(
 pub async fn update_cycle(
     _auth: AdminToken,
     State(db): State<DbConn>,
-    Path(id): Path<i64>,
+    Path(id): Path<EntityId>,
     Json(body): Json<UpdateCycleRequest>,
 ) -> Result<Json<Cycle>, AppError> {
     body.validate()?;
 
-    let existing: Option<DbCycle> = db.select(("cycle", id)).await?;
+    let existing: Option<DbCycle> = db.select(("cycle", id.as_str())).await?;
     let existing = existing.ok_or_else(|| AppError::NotFound(format!("cycle {id} does not exist")))?;
 
     if existing.version != body.version {
@@ -448,8 +445,8 @@ pub async fn update_cycle(
     }
 
     // Validate new recipient belongs to the same group and is not soft-deleted.
-    if let Some(new_rid) = body.recipient_member_id {
-        let recipient: Option<DbMember> = db.select(("member", new_rid)).await?;
+    if let Some(ref new_rid) = body.recipient_member_id {
+        let recipient: Option<DbMember> = db.select(("member", new_rid.as_str())).await?;
         match recipient {
             None => {
                 return Err(AppError::NotFound(format!(
@@ -476,7 +473,7 @@ pub async fn update_cycle(
     let total_amount = if body.contribution_per_member.is_some() {
         let active_members: Vec<DbMember> = db
             .query("SELECT * FROM member WHERE group_id = $gid AND status = 'active' AND deleted_at IS NONE")
-            .bind(("gid", existing.group_id))
+            .bind(("gid", existing.group_id.clone()))
             .await?
             .take(0)?;
         contribution * active_members.len() as i64
@@ -490,7 +487,7 @@ pub async fn update_cycle(
         end_date: body.end_date.unwrap_or(existing.end_date),
         contribution_per_member: contribution,
         total_amount,
-        recipient_member_id: body.recipient_member_id.unwrap_or(existing.recipient_member_id),
+        recipient_member_id: body.recipient_member_id.clone().unwrap_or(existing.recipient_member_id),
         status: body.status.unwrap_or(existing.status),
         group_id: existing.group_id,
         notes: body.notes.or(existing.notes),
@@ -499,7 +496,7 @@ pub async fn update_cycle(
         version: existing.version + 1,
     };
 
-    let updated: Option<DbCycle> = db.upsert(("cycle", id)).content(content).await?;
+    let updated: Option<DbCycle> = db.upsert(("cycle", id.as_str())).content(content).await?;
     let db_cycle = updated.ok_or_else(|| AppError::Internal("cycle update failed".into()))?;
 
     Ok(Json(Cycle::try_from(db_cycle)?))
@@ -508,9 +505,9 @@ pub async fn update_cycle(
 pub async fn delete_cycle(
     _auth: AdminToken,
     State(db): State<DbConn>,
-    Path(id): Path<i64>,
+    Path(id): Path<EntityId>,
 ) -> Result<StatusCode, AppError> {
-    let existing: Option<DbCycle> = db.select(("cycle", id)).await?;
+    let existing: Option<DbCycle> = db.select(("cycle", id.as_str())).await?;
     if existing.is_none() {
         return Err(AppError::NotFound(format!("cycle {id} does not exist")));
     }
@@ -518,7 +515,7 @@ pub async fn delete_cycle(
     // Check if cycle has payments.
     let payments: Vec<DbPayment> = db
         .query("SELECT * FROM payment WHERE cycle_id = $cid AND deleted_at IS NONE")
-        .bind(("cid", id))
+        .bind(("cid", id.clone()))
         .await?
         .take(0)?;
 
@@ -529,7 +526,7 @@ pub async fn delete_cycle(
     }
 
     // Hard delete for cycles (no soft delete per data model).
-    db.delete::<Option<DbCycle>>(("cycle", id)).await?;
+    db.delete::<Option<DbCycle>>(("cycle", id.as_str())).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -543,7 +540,7 @@ pub async fn create_payment(
 ) -> Result<(StatusCode, Json<Payment>), AppError> {
     body.validate()?;
 
-    let member: Option<DbMember> = db.select(("member", body.member_id)).await?;
+    let member: Option<DbMember> = db.select(("member", body.member_id.as_str())).await?;
     let member = member.ok_or_else(|| {
         AppError::NotFound(format!("member {} does not exist", body.member_id))
     })?;
@@ -553,7 +550,7 @@ pub async fn create_payment(
             body.member_id
         )));
     }
-    let cycle: Option<DbCycle> = db.select(("cycle", body.cycle_id)).await?;
+    let cycle: Option<DbCycle> = db.select(("cycle", body.cycle_id.as_str())).await?;
     let cycle = cycle.ok_or_else(|| {
         AppError::NotFound(format!("cycle {} does not exist", body.cycle_id))
     })?;
@@ -564,7 +561,6 @@ pub async fn create_payment(
         ));
     }
 
-    let id = chrono::Utc::now().timestamp_millis();
     let now = now_iso();
     let content = PaymentContent {
         member_id: body.member_id,
@@ -581,9 +577,9 @@ pub async fn create_payment(
         deleted_at: None,
     };
 
-    let created: Option<DbPayment> = db.upsert(("payment", id)).content(content).await?;
-    let db_payment = created.ok_or_else(|| {
-        error!(id, "Upsert returned None — payment may not have been persisted");
+    let db_payment: Option<DbPayment> = db.create("payment").content(content).await?;
+    let db_payment = db_payment.ok_or_else(|| {
+        error!("Create returned empty — payment may not have been persisted");
         AppError::Internal("payment was not created".into())
     })?;
 
@@ -593,12 +589,12 @@ pub async fn create_payment(
 pub async fn delete_payment(
     _auth: AdminToken,
     State(db): State<DbConn>,
-    Path((member_id, cycle_id)): Path<(i64, i64)>,
+    Path((member_id, cycle_id)): Path<(EntityId, EntityId)>,
 ) -> Result<StatusCode, AppError> {
     let rows: Vec<DbPayment> = db
         .query("SELECT * FROM payment WHERE member_id = $mid AND cycle_id = $cid AND deleted_at IS NONE")
-        .bind(("mid", member_id))
-        .bind(("cid", cycle_id))
+        .bind(("mid", member_id.clone()))
+        .bind(("cid", cycle_id.clone()))
         .await?
         .take(0)?;
 
@@ -610,7 +606,7 @@ pub async fn delete_payment(
 
     let now = now_iso();
     for row in rows {
-        let id = record_id_to_i64(row.id.clone())?;
+        let id = record_id_to_string(row.id.clone());
         let content = PaymentContent {
             member_id: row.member_id,
             cycle_id: row.cycle_id,
@@ -625,7 +621,7 @@ pub async fn delete_payment(
             updated_at: now.clone(),
             deleted_at: Some(now.clone()),
         };
-        let _: Option<DbPayment> = db.upsert(("payment", id)).content(content).await?;
+        let _: Option<DbPayment> = db.upsert(("payment", id.as_str())).content(content).await?;
     }
 
     Ok(StatusCode::NO_CONTENT)

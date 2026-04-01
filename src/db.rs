@@ -119,9 +119,9 @@ where
 // ── Fixture data ──────────────────────────────────────────────────────────────
 
 /// The seeded group ID used across all fixtures.
-const FIXTURE_GROUP_ID: i64 = 1;
+const FIXTURE_GROUP_ID: &str = "1";
 
-fn fixture_groups() -> Vec<(i64, GroupContent)> {
+fn fixture_groups() -> Vec<(&'static str, GroupContent)> {
     vec![
         (FIXTURE_GROUP_ID, GroupContent {
             name: "Ajo Circle Alpha".into(),
@@ -135,149 +135,149 @@ fn fixture_groups() -> Vec<(i64, GroupContent)> {
     ]
 }
 
-fn fixture_members() -> Vec<(i64, MemberContent)> {
-    let g = FIXTURE_GROUP_ID;
-    let ts = "2025-06-15T00:00:00+00:00";
+fn fixture_members() -> Vec<(&'static str, MemberContent)> {
+    let group_id = FIXTURE_GROUP_ID.to_string();
+    let created_at = "2025-06-15T00:00:00+00:00";
     vec![
-        (1, MemberContent { name: "Adaeze Okonkwo".into(),  phone: "2348101234567".into(), position: 1, status: "active".into(), group_id: g, notes: None, joined_at: Some("2025-06-15".into()), created_at: ts.into(), updated_at: ts.into(), deleted_at: None, version: 1 }),
-        (2, MemberContent { name: "Chukwuemeka Eze".into(), phone: "2347031234567".into(), position: 2, status: "active".into(), group_id: g, notes: None, joined_at: Some("2025-06-15".into()), created_at: ts.into(), updated_at: ts.into(), deleted_at: None, version: 1 }),
-        (3, MemberContent { name: "Ngozi Adeyemi".into(),   phone: "2349061234567".into(), position: 3, status: "active".into(), group_id: g, notes: None, joined_at: Some("2025-06-15".into()), created_at: ts.into(), updated_at: ts.into(), deleted_at: None, version: 1 }),
-        (4, MemberContent { name: "Tunde Bakare".into(),    phone: "2348031234567".into(), position: 4, status: "active".into(), group_id: g, notes: None, joined_at: Some("2025-06-15".into()), created_at: ts.into(), updated_at: ts.into(), deleted_at: None, version: 1 }),
-        (5, MemberContent { name: "Amaka Nwosu".into(),     phone: "2348161234567".into(), position: 5, status: "active".into(), group_id: g, notes: None, joined_at: Some("2025-06-15".into()), created_at: ts.into(), updated_at: ts.into(), deleted_at: None, version: 1 }),
-        (6, MemberContent { name: "Seun Okafor".into(),     phone: "2347061234567".into(), position: 6, status: "active".into(), group_id: g, notes: None, joined_at: Some("2025-06-15".into()), created_at: ts.into(), updated_at: ts.into(), deleted_at: None, version: 1 }),
+        ("1", MemberContent { name: "Adaeze Okonkwo".into(),  phone: "2348101234567".into(), position: 1, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
+        ("2", MemberContent { name: "Chukwuemeka Eze".into(), phone: "2347031234567".into(), position: 2, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
+        ("3", MemberContent { name: "Ngozi Adeyemi".into(),   phone: "2349061234567".into(), position: 3, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
+        ("4", MemberContent { name: "Tunde Bakare".into(),    phone: "2348031234567".into(), position: 4, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
+        ("5", MemberContent { name: "Amaka Nwosu".into(),     phone: "2348161234567".into(), position: 5, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
+        ("6", MemberContent { name: "Seun Okafor".into(),     phone: "2347061234567".into(), position: 6, status: "active".into(), group_id: group_id, notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
     ]
 }
 
-fn fixture_cycles() -> Vec<(i64, CycleContent)> {
-    let g = FIXTURE_GROUP_ID;
-    let ts = "2025-06-15T00:00:00+00:00";
+fn fixture_cycles() -> Vec<(&'static str, CycleContent)> {
+    let group_id = FIXTURE_GROUP_ID.to_string();
+    let created_at = "2025-06-15T00:00:00+00:00";
     vec![
         // Round 1: Jul–Dec 2025 (cycles 1–6, full rotation of all 6 members)
-        (4, CycleContent {
+        ("4", CycleContent {
             cycle_number: 1, start_date: "2025-07-01".into(), end_date: "2025-07-31".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: 1, status: "closed".into(), group_id: g, notes: None,
-            created_at: ts.into(), updated_at: ts.into(), version: 1,
+            recipient_member_id: "1".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
-        (5, CycleContent {
+        ("5", CycleContent {
             cycle_number: 2, start_date: "2025-08-01".into(), end_date: "2025-08-31".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: 2, status: "closed".into(), group_id: g, notes: None,
-            created_at: ts.into(), updated_at: ts.into(), version: 1,
+            recipient_member_id: "2".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
-        (6, CycleContent {
+        ("6", CycleContent {
             cycle_number: 3, start_date: "2025-09-01".into(), end_date: "2025-09-30".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: 3, status: "closed".into(), group_id: g, notes: None,
-            created_at: ts.into(), updated_at: ts.into(), version: 1,
+            recipient_member_id: "3".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
-        (7, CycleContent {
+        ("7", CycleContent {
             cycle_number: 4, start_date: "2025-10-01".into(), end_date: "2025-10-31".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: 4, status: "closed".into(), group_id: g, notes: None,
-            created_at: ts.into(), updated_at: ts.into(), version: 1,
+            recipient_member_id: "4".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
-        (8, CycleContent {
+        ("8", CycleContent {
             cycle_number: 5, start_date: "2025-11-01".into(), end_date: "2025-11-30".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: 5, status: "closed".into(), group_id: g, notes: None,
-            created_at: ts.into(), updated_at: ts.into(), version: 1,
+            recipient_member_id: "5".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
-        (9, CycleContent {
+        ("9", CycleContent {
             cycle_number: 6, start_date: "2025-12-01".into(), end_date: "2025-12-31".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: 6, status: "closed".into(), group_id: g, notes: None,
-            created_at: ts.into(), updated_at: ts.into(), version: 1,
+            recipient_member_id: "6".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
         // Round 2: Jan–Mar 2026 (cycles 7–9, second rotation begins)
-        (1, CycleContent {
+        ("1", CycleContent {
             cycle_number: 7, start_date: "2026-01-01".into(), end_date: "2026-01-31".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: 1, status: "closed".into(), group_id: g, notes: None,
-            created_at: ts.into(), updated_at: ts.into(), version: 1,
+            recipient_member_id: "1".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
-        (2, CycleContent {
+        ("2", CycleContent {
             cycle_number: 8, start_date: "2026-02-01".into(), end_date: "2026-02-28".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: 2, status: "closed".into(), group_id: g, notes: None,
-            created_at: ts.into(), updated_at: ts.into(), version: 1,
+            recipient_member_id: "2".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
-        (3, CycleContent {
+        ("3", CycleContent {
             cycle_number: 9, start_date: "2026-03-01".into(), end_date: "2026-03-31".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: 3, status: "active".into(), group_id: g, notes: None,
-            created_at: ts.into(), updated_at: ts.into(), version: 1,
+            recipient_member_id: "3".into(), status: "active".into(), group_id: group_id, notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
     ]
 }
 
-fn fixture_payments() -> Vec<(i64, PaymentContent)> {
-    let ts = "2025-06-15T00:00:00+00:00";
-    let p = |mid: i64, cid: i64, date: &str| PaymentContent {
-        member_id: mid, cycle_id: cid, amount: 1_000_000,
+fn fixture_payments() -> Vec<(&'static str, PaymentContent)> {
+    let created_at = "2025-06-15T00:00:00+00:00";
+    let payment = |member_id: &str, cycle_id: &str, date: &str| PaymentContent {
+        member_id: member_id.into(), cycle_id: cycle_id.into(), amount: 1_000_000,
         currency: "NGN".into(), payment_date: date.into(),
         payment_method: None, reference: None,
         confirmed_at: None, confirmed_by: None,
-        created_at: ts.into(), updated_at: ts.into(), deleted_at: None,
+        created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None,
     };
     vec![
         // Cycle 3 — March 2026 (Ngozi excluded as recipient; 3 of 5 contributing paid)
-        (1,  p(1, 3, "2026-03-02")),
-        (2,  p(2, 3, "2026-03-03")),
-        (4,  p(5, 3, "2026-03-07")),
+        ("1",  payment("1", "3", "2026-03-02")),
+        ("2",  payment("2", "3", "2026-03-03")),
+        ("4",  payment("5", "3", "2026-03-07")),
         // Cycle 1 — January 2026 (all 6 members paid)
-        (5,  p(1, 1, "2026-01-02")),
-        (6,  p(2, 1, "2026-01-03")),
-        (7,  p(3, 1, "2026-01-04")),
-        (8,  p(4, 1, "2026-01-05")),
-        (9,  p(5, 1, "2026-01-06")),
-        (10, p(6, 1, "2026-01-08")),
+        ("5",  payment("1", "1", "2026-01-02")),
+        ("6",  payment("2", "1", "2026-01-03")),
+        ("7",  payment("3", "1", "2026-01-04")),
+        ("8",  payment("4", "1", "2026-01-05")),
+        ("9",  payment("5", "1", "2026-01-06")),
+        ("10", payment("6", "1", "2026-01-08")),
         // Cycle 2 — February 2026 (all 6 members paid)
-        (11, p(1, 2, "2026-02-02")),
-        (12, p(2, 2, "2026-02-03")),
-        (13, p(3, 2, "2026-02-05")),
-        (14, p(4, 2, "2026-02-06")),
-        (15, p(5, 2, "2026-02-07")),
-        (16, p(6, 2, "2026-02-09")),
+        ("11", payment("1", "2", "2026-02-02")),
+        ("12", payment("2", "2", "2026-02-03")),
+        ("13", payment("3", "2", "2026-02-05")),
+        ("14", payment("4", "2", "2026-02-06")),
+        ("15", payment("5", "2", "2026-02-07")),
+        ("16", payment("6", "2", "2026-02-09")),
         // Cycle 4 — July 2025 (all 6 members paid)
-        (17, p(1, 4, "2025-07-03")),
-        (18, p(2, 4, "2025-07-04")),
-        (19, p(3, 4, "2025-07-05")),
-        (20, p(4, 4, "2025-07-07")),
-        (21, p(5, 4, "2025-07-08")),
-        (22, p(6, 4, "2025-07-09")),
+        ("17", payment("1", "4", "2025-07-03")),
+        ("18", payment("2", "4", "2025-07-04")),
+        ("19", payment("3", "4", "2025-07-05")),
+        ("20", payment("4", "4", "2025-07-07")),
+        ("21", payment("5", "4", "2025-07-08")),
+        ("22", payment("6", "4", "2025-07-09")),
         // Cycle 5 — August 2025 (5 of 6 paid; member 3 missed)
-        (23, p(1, 5, "2025-08-02")),
-        (24, p(2, 5, "2025-08-04")),
-        (25, p(4, 5, "2025-08-05")),
-        (26, p(5, 5, "2025-08-06")),
-        (27, p(6, 5, "2025-08-08")),
+        ("23", payment("1", "5", "2025-08-02")),
+        ("24", payment("2", "5", "2025-08-04")),
+        ("25", payment("4", "5", "2025-08-05")),
+        ("26", payment("5", "5", "2025-08-06")),
+        ("27", payment("6", "5", "2025-08-08")),
         // Cycle 6 — September 2025 (all 6 members paid)
-        (28, p(1, 6, "2025-09-02")),
-        (29, p(2, 6, "2025-09-03")),
-        (30, p(3, 6, "2025-09-04")),
-        (31, p(4, 6, "2025-09-05")),
-        (32, p(5, 6, "2025-09-06")),
-        (33, p(6, 6, "2025-09-08")),
+        ("28", payment("1", "6", "2025-09-02")),
+        ("29", payment("2", "6", "2025-09-03")),
+        ("30", payment("3", "6", "2025-09-04")),
+        ("31", payment("4", "6", "2025-09-05")),
+        ("32", payment("5", "6", "2025-09-06")),
+        ("33", payment("6", "6", "2025-09-08")),
         // Cycle 7 — October 2025 (5 of 6 paid; member 4 missed)
-        (34, p(1, 7, "2025-10-03")),
-        (35, p(2, 7, "2025-10-04")),
-        (36, p(3, 7, "2025-10-05")),
-        (37, p(5, 7, "2025-10-06")),
-        (38, p(6, 7, "2025-10-07")),
+        ("34", payment("1", "7", "2025-10-03")),
+        ("35", payment("2", "7", "2025-10-04")),
+        ("36", payment("3", "7", "2025-10-05")),
+        ("37", payment("5", "7", "2025-10-06")),
+        ("38", payment("6", "7", "2025-10-07")),
         // Cycle 8 — November 2025 (all 6 members paid)
-        (39, p(1, 8, "2025-11-03")),
-        (40, p(2, 8, "2025-11-04")),
-        (41, p(3, 8, "2025-11-05")),
-        (42, p(4, 8, "2025-11-06")),
-        (43, p(5, 8, "2025-11-07")),
-        (44, p(6, 8, "2025-11-09")),
+        ("39", payment("1", "8", "2025-11-03")),
+        ("40", payment("2", "8", "2025-11-04")),
+        ("41", payment("3", "8", "2025-11-05")),
+        ("42", payment("4", "8", "2025-11-06")),
+        ("43", payment("5", "8", "2025-11-07")),
+        ("44", payment("6", "8", "2025-11-09")),
         // Cycle 9 — December 2025 (all 6 members paid)
-        (45, p(1, 9, "2025-12-03")),
-        (46, p(2, 9, "2025-12-04")),
-        (47, p(3, 9, "2025-12-05")),
-        (48, p(4, 9, "2025-12-06")),
-        (49, p(5, 9, "2025-12-07")),
-        (50, p(6, 9, "2025-12-09")),
+        ("45", payment("1", "9", "2025-12-03")),
+        ("46", payment("2", "9", "2025-12-04")),
+        ("47", payment("3", "9", "2025-12-05")),
+        ("48", payment("4", "9", "2025-12-06")),
+        ("49", payment("5", "9", "2025-12-07")),
+        ("50", payment("6", "9", "2025-12-09")),
     ]
 }

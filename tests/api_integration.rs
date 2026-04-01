@@ -310,7 +310,7 @@ async fn get_members_filter_by_group_id() {
     let members: Vec<serde_json::Value> = json_body(resp).await;
     assert_eq!(members.len(), 6);
     for m in &members {
-        assert_eq!(m["groupId"], 1);
+        assert_eq!(m["groupId"], "1");
     }
 }
 
@@ -341,7 +341,7 @@ async fn create_member_returns_201() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let member: serde_json::Value = json_body(resp).await;
     assert_eq!(member["name"], "New Member");
-    assert_eq!(member["groupId"], 1);
+    assert_eq!(member["groupId"], "1");
     assert_eq!(member["status"], "active");
 }
 
@@ -377,7 +377,7 @@ async fn create_member_same_phone_different_group_allowed() {
     )
     .await;
     let new_group: serde_json::Value = json_body(resp).await;
-    let group_id = new_group["id"].as_i64().unwrap();
+    let group_id = new_group["id"].as_str().unwrap();
 
     // Same phone as member 1 in group 1 — should succeed in different group.
     let resp = call(
@@ -422,7 +422,7 @@ async fn update_member_name_only_preserves_other_fields() {
     // Read current state of member 1.
     let before: Vec<serde_json::Value> =
         json_body(call(app.clone(), get("/api/members")).await).await;
-    let member1 = before.iter().find(|m| m["id"] == 1).unwrap();
+    let member1 = before.iter().find(|m| m["id"] == "1").unwrap();
     let original_phone = member1["phone"].as_str().unwrap().to_string();
     let original_position = member1["position"].as_i64().unwrap();
 
@@ -593,7 +593,7 @@ async fn create_cycle_returns_201_with_computed_total() {
                 "startDate": "2026-04-01",
                 "endDate": "2026-04-30",
                 "contributionPerMember": 1_000_000,
-                "recipientMemberId": 4
+                "recipientMemberId": "4"
             }),
         ),
     )
@@ -602,7 +602,7 @@ async fn create_cycle_returns_201_with_computed_total() {
     let cycle: serde_json::Value = json_body(resp).await;
     assert_eq!(cycle["cycleNumber"], 10);
     assert_eq!(cycle["status"], "pending");
-    assert_eq!(cycle["groupId"], 1);
+    assert_eq!(cycle["groupId"], "1");
     // 6 active members × 1,000,000 = 6,000,000
     assert_eq!(cycle["totalAmount"], 6_000_000);
 }
@@ -621,7 +621,7 @@ async fn create_cycle_recipient_wrong_group_returns_400() {
     )
     .await;
     let other_group: serde_json::Value = json_body(resp).await;
-    let other_gid = other_group["id"].as_i64().unwrap();
+    let other_gid = other_group["id"].as_str().unwrap();
 
     // Create a member in the other group.
     let resp = call(
@@ -637,7 +637,7 @@ async fn create_cycle_recipient_wrong_group_returns_400() {
     )
     .await;
     let other_member: serde_json::Value = json_body(resp).await;
-    let other_mid = other_member["id"].as_i64().unwrap();
+    let other_mid = other_member["id"].as_str().unwrap();
 
     // Try to create cycle in group 1 with recipient from other group.
     let resp = call(
@@ -707,13 +707,13 @@ async fn delete_cycle_without_payments_returns_204() {
                 "startDate": "2026-05-01",
                 "endDate": "2026-05-31",
                 "contributionPerMember": 1_000_000,
-                "recipientMemberId": 1
+                "recipientMemberId": "1"
             }),
         ),
     )
     .await;
     let cycle: serde_json::Value = json_body(resp).await;
-    let cycle_id = cycle["id"].as_i64().unwrap();
+    let cycle_id = cycle["id"].as_str().unwrap();
 
     let resp = call(
         app,
@@ -735,7 +735,7 @@ async fn create_cycle_start_after_end_returns_400() {
                 "startDate": "2026-12-01",
                 "endDate": "2026-01-01",
                 "contributionPerMember": 1_000_000,
-                "recipientMemberId": 1
+                "recipientMemberId": "1"
             }),
         ),
     )
@@ -780,7 +780,7 @@ async fn get_payments_filter_by_cycle_id_returns_subset() {
     let payments: Vec<serde_json::Value> = json_body(resp).await;
     assert_eq!(payments.len(), 3, "cycle 3 should have 3 fixture payments");
     for p in &payments {
-        assert_eq!(p["cycleId"], 3, "all returned payments must belong to cycle 3");
+        assert_eq!(p["cycleId"], "3", "all returned payments must belong to cycle 3");
     }
 }
 
@@ -809,7 +809,7 @@ async fn create_payment_requires_auth() {
         post_json(
             "/api/payments",
             serde_json::json!({
-                "memberId": 4, "cycleId": 3,
+                "memberId": "4", "cycleId": "3",
                 "amount": 1_000_000, "currency": "NGN", "paymentDate": "2026-03-10"
             }),
         ),
@@ -826,8 +826,8 @@ async fn create_payment_returns_201() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 4,
-                "cycleId": 3,
+                "memberId": "4",
+                "cycleId": "3",
                 "amount": 1_000_000,
                 "currency": "NGN",
                 "paymentDate": "2026-03-10"
@@ -846,8 +846,8 @@ async fn create_payment_response_shape() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 4,
-                "cycleId": 3,
+                "memberId": "4",
+                "cycleId": "3",
                 "amount": 1_000_000,
                 "currency": "NGN",
                 "paymentDate": "2026-03-10"
@@ -857,8 +857,8 @@ async fn create_payment_response_shape() {
     .await;
     let payment: serde_json::Value = json_body(resp).await;
     assert!(payment.get("id").is_some(), "missing id");
-    assert_eq!(payment["memberId"], 4);
-    assert_eq!(payment["cycleId"], 3);
+    assert_eq!(payment["memberId"], "4");
+    assert_eq!(payment["cycleId"], "3");
     assert_eq!(payment["amount"], 1_000_000);
     assert_eq!(payment["currency"], "NGN");
     assert_eq!(payment["paymentDate"], "2026-03-10");
@@ -873,8 +873,8 @@ async fn create_payment_persists_to_db() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 4,
-                "cycleId": 3,
+                "memberId": "4",
+                "cycleId": "3",
                 "amount": 1_000_000,
                 "currency": "NGN",
                 "paymentDate": "2026-03-10"
@@ -896,7 +896,7 @@ async fn create_payment_zero_amount_returns_400() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 4, "cycleId": 3,
+                "memberId": "4", "cycleId": "3",
                 "amount": 0, "currency": "NGN", "paymentDate": "2026-03-10"
             }),
         ),
@@ -913,7 +913,7 @@ async fn create_payment_negative_amount_returns_400() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 4, "cycleId": 3,
+                "memberId": "4", "cycleId": "3",
                 "amount": -500, "currency": "NGN", "paymentDate": "2026-03-10"
             }),
         ),
@@ -930,7 +930,7 @@ async fn create_payment_invalid_currency_returns_400() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 4, "cycleId": 3,
+                "memberId": "4", "cycleId": "3",
                 "amount": 1_000_000, "currency": "USD", "paymentDate": "2026-03-10"
             }),
         ),
@@ -947,7 +947,7 @@ async fn create_payment_invalid_date_format_returns_400() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 4, "cycleId": 3,
+                "memberId": "4", "cycleId": "3",
                 "amount": 1_000_000, "currency": "NGN", "paymentDate": "10-03-2026"
             }),
         ),
@@ -964,7 +964,7 @@ async fn create_payment_empty_date_returns_400() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 4, "cycleId": 3,
+                "memberId": "4", "cycleId": "3",
                 "amount": 1_000_000, "currency": "NGN", "paymentDate": ""
             }),
         ),
@@ -981,7 +981,7 @@ async fn create_payment_invalid_member_id_returns_400() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 0, "cycleId": 3,
+                "memberId": "", "cycleId": "3",
                 "amount": 1_000_000, "currency": "NGN", "paymentDate": "2026-03-10"
             }),
         ),
@@ -998,7 +998,7 @@ async fn create_payment_nonexistent_member_returns_404() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 999, "cycleId": 3,
+                "memberId": "999", "cycleId": "3",
                 "amount": 1_000_000, "currency": "NGN", "paymentDate": "2026-03-10"
             }),
         ),
@@ -1015,7 +1015,7 @@ async fn create_payment_nonexistent_cycle_returns_404() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 1, "cycleId": 999,
+                "memberId": "1", "cycleId": "999",
                 "amount": 1_000_000, "currency": "NGN", "paymentDate": "2026-03-10"
             }),
         ),
@@ -1034,7 +1034,7 @@ async fn create_payment_same_group_returns_201() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 1, "cycleId": 3,
+                "memberId": "1", "cycleId": "3",
                 "amount": 1_000_000, "currency": "NGN", "paymentDate": "2026-03-10"
             }),
         ),
@@ -1118,7 +1118,7 @@ async fn reset_restores_payments_to_fixture_count() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 4, "cycleId": 3,
+                "memberId": "4", "cycleId": "3",
                 "amount": 1_000_000, "currency": "NGN", "paymentDate": "2026-03-10"
             }),
         ),
@@ -1169,7 +1169,7 @@ async fn bad_request_error_has_json_error_field() {
         post_json_authed(
             "/api/payments",
             serde_json::json!({
-                "memberId": 0, "cycleId": 3,
+                "memberId": "", "cycleId": "3",
                 "amount": 1_000_000, "currency": "NGN", "paymentDate": "2026-03-10"
             }),
         ),
