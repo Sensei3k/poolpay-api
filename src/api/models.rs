@@ -20,6 +20,8 @@ struct ErrorBody {
 pub enum AppError {
     NotFound(String),
     BadRequest(String),
+    Unauthorized,
+    Conflict(String),
     Internal(String),
 }
 
@@ -28,6 +30,8 @@ impl IntoResponse for AppError {
         let (status, message) = match self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg),
             // Don't leak internal error details to the caller.
             AppError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -47,7 +51,24 @@ impl From<surrealdb::Error> for AppError {
 
 // ── Domain enums ──────────────────────────────────────────────────────────────
 
-/// Valid statuses for a circle member.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupStatus {
+    Active,
+    Closed,
+}
+
+impl std::str::FromStr for GroupStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "closed" => Ok(Self::Closed),
+            _ => Err(format!("unknown group status: {s}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MemberStatus {
@@ -66,10 +87,10 @@ impl std::str::FromStr for MemberStatus {
     }
 }
 
-/// Valid statuses for a savings cycle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CycleStatus {
+    Pending,
     Active,
     Closed,
 }
@@ -78,6 +99,7 @@ impl std::str::FromStr for CycleStatus {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "pending" => Ok(Self::Pending),
             "active" => Ok(Self::Active),
             "closed" => Ok(Self::Closed),
             _ => Err(format!("unknown cycle status: {s}")),
@@ -85,7 +107,6 @@ impl std::str::FromStr for CycleStatus {
     }
 }
 
-/// Supported payment currencies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Currency {
     NGN,
@@ -109,11 +130,21 @@ impl std::fmt::Display for Currency {
     }
 }
 
-// ── DB-side structs (used when reading from SurrealDB) ────────────────────────
+// ── DB-side structs (used when reading from SurrealDB) ──────────────────────
 //
 // Fields stored as snake_case in SurrealDB — no serde renames needed.
-// String fields are kept here to keep SurrealValue derive simple; enum
-// conversion happens in the TryFrom impls below.
+
+#[derive(Debug, Deserialize, SurrealValue)]
+pub struct DbGroup {
+    pub id: RecordId,
+    pub name: String,
+    pub status: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+    pub version: i64,
+}
 
 #[derive(Debug, Deserialize, SurrealValue)]
 pub struct DbMember {
@@ -122,6 +153,13 @@ pub struct DbMember {
     pub phone: String,
     pub position: i64,
     pub status: String,
+    pub group_id: i64,
+    pub notes: Option<String>,
+    pub joined_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+    pub version: i64,
 }
 
 #[derive(Debug, Deserialize, SurrealValue)]
@@ -134,6 +172,11 @@ pub struct DbCycle {
     pub total_amount: i64,
     pub recipient_member_id: i64,
     pub status: String,
+    pub group_id: i64,
+    pub notes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub version: i64,
 }
 
 #[derive(Debug, Deserialize, SurrealValue)]
@@ -144,11 +187,34 @@ pub struct DbPayment {
     pub amount: i64,
     pub currency: String,
     pub payment_date: String,
+    pub payment_method: Option<String>,
+    pub reference: Option<String>,
+    pub confirmed_at: Option<String>,
+    pub confirmed_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
 }
 
-// ── API response structs (serialized to JSON for the frontend) ────────────────
+// ── API response structs (serialized to JSON for the frontend) ──────────────
 //
-// camelCase renames kept here — these are the types the Next.js frontend expects.
+// camelCase renames — these are the types the Next.js frontend expects.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Group {
+    pub id: i64,
+    pub name: String,
+    pub status: GroupStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    #[serde(rename = "deletedAt", skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+    pub version: i64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Member {
@@ -157,6 +223,19 @@ pub struct Member {
     pub phone: String,
     pub position: i64,
     pub status: MemberStatus,
+    #[serde(rename = "groupId")]
+    pub group_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(rename = "joinedAt", skip_serializing_if = "Option::is_none")]
+    pub joined_at: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    #[serde(rename = "deletedAt", skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+    pub version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +254,15 @@ pub struct Cycle {
     #[serde(rename = "recipientMemberId")]
     pub recipient_member_id: i64,
     pub status: CycleStatus,
+    #[serde(rename = "groupId")]
+    pub group_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    pub version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,20 +276,47 @@ pub struct Payment {
     pub currency: Currency,
     #[serde(rename = "paymentDate")]
     pub payment_date: String,
+    #[serde(rename = "paymentMethod", skip_serializing_if = "Option::is_none")]
+    pub payment_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(rename = "confirmedAt", skip_serializing_if = "Option::is_none")]
+    pub confirmed_at: Option<String>,
+    #[serde(rename = "confirmedBy", skip_serializing_if = "Option::is_none")]
+    pub confirmed_by: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    #[serde(rename = "deletedAt", skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
 }
 
-// ── DB-to-API conversions ─────────────────────────────────────────────────────
+// ── DB-to-API conversions ───────────────────────────────────────────────────
 
 /// Extract the integer key from a SurrealDB RecordId (e.g. `member:1` → 1).
-///
-/// Returns `AppError::Internal` rather than panicking if the key is not a
-/// number — non-integer keys mean a record was written outside normal code paths.
 pub(crate) fn record_id_to_i64(rid: RecordId) -> Result<i64, AppError> {
     match rid.key {
         RecordIdKey::Number(n) => Ok(n),
         other => Err(AppError::Internal(format!(
             "expected integer RecordId key, got: {other:?}"
         ))),
+    }
+}
+
+impl TryFrom<DbGroup> for Group {
+    type Error = AppError;
+    fn try_from(db: DbGroup) -> Result<Self, AppError> {
+        Ok(Self {
+            id: record_id_to_i64(db.id)?,
+            name: db.name,
+            status: db.status.parse().map_err(|e: String| AppError::Internal(e))?,
+            description: db.description,
+            created_at: db.created_at,
+            updated_at: db.updated_at,
+            deleted_at: db.deleted_at,
+            version: db.version,
+        })
     }
 }
 
@@ -213,10 +328,14 @@ impl TryFrom<DbMember> for Member {
             name: db.name,
             phone: db.phone,
             position: db.position,
-            status: db
-                .status
-                .parse()
-                .map_err(|e: String| AppError::Internal(e))?,
+            status: db.status.parse().map_err(|e: String| AppError::Internal(e))?,
+            group_id: db.group_id,
+            notes: db.notes,
+            joined_at: db.joined_at,
+            created_at: db.created_at,
+            updated_at: db.updated_at,
+            deleted_at: db.deleted_at,
+            version: db.version,
         })
     }
 }
@@ -232,10 +351,12 @@ impl TryFrom<DbCycle> for Cycle {
             contribution_per_member: db.contribution_per_member,
             total_amount: db.total_amount,
             recipient_member_id: db.recipient_member_id,
-            status: db
-                .status
-                .parse()
-                .map_err(|e: String| AppError::Internal(e))?,
+            status: db.status.parse().map_err(|e: String| AppError::Internal(e))?,
+            group_id: db.group_id,
+            notes: db.notes,
+            created_at: db.created_at,
+            updated_at: db.updated_at,
+            version: db.version,
         })
     }
 }
@@ -248,16 +369,31 @@ impl TryFrom<DbPayment> for Payment {
             member_id: db.member_id,
             cycle_id: db.cycle_id,
             amount: db.amount,
-            currency: db
-                .currency
-                .parse()
-                .map_err(|e: String| AppError::Internal(e))?,
+            currency: db.currency.parse().map_err(|e: String| AppError::Internal(e))?,
             payment_date: db.payment_date,
+            payment_method: db.payment_method,
+            reference: db.reference,
+            confirmed_at: db.confirmed_at,
+            confirmed_by: db.confirmed_by,
+            created_at: db.created_at,
+            updated_at: db.updated_at,
+            deleted_at: db.deleted_at,
         })
     }
 }
 
-// ── DB-side insert structs (no id — SurrealDB owns the record ID) ─────────────
+// ── DB-side insert structs (no id — SurrealDB owns the record ID) ───────────
+
+#[derive(Debug, Clone, Serialize, SurrealValue)]
+pub struct GroupContent {
+    pub name: String,
+    pub status: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+    pub version: i64,
+}
 
 #[derive(Debug, Clone, Serialize, SurrealValue)]
 pub struct MemberContent {
@@ -265,6 +401,13 @@ pub struct MemberContent {
     pub phone: String,
     pub position: i64,
     pub status: String,
+    pub group_id: i64,
+    pub notes: Option<String>,
+    pub joined_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+    pub version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, SurrealValue)]
@@ -276,6 +419,11 @@ pub struct CycleContent {
     pub total_amount: i64,
     pub recipient_member_id: i64,
     pub status: String,
+    pub group_id: i64,
+    pub notes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, SurrealValue)]
@@ -285,9 +433,235 @@ pub struct PaymentContent {
     pub amount: i64,
     pub currency: String,
     pub payment_date: String,
+    pub payment_method: Option<String>,
+    pub reference: Option<String>,
+    pub confirmed_at: Option<String>,
+    pub confirmed_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
 }
 
-// ── Request body ──────────────────────────────────────────────────────────────
+// ── Request bodies ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct CreateGroupRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl CreateGroupRequest {
+    pub fn validate(&self) -> Result<(), AppError> {
+        let trimmed = self.name.trim();
+        if trimmed.is_empty() || trimmed.len() > 100 {
+            return Err(AppError::BadRequest(
+                "name must be between 1 and 100 characters".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateGroupRequest {
+    pub name: Option<String>,
+    pub status: Option<String>,
+    pub description: Option<String>,
+    pub version: i64,
+}
+
+impl UpdateGroupRequest {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if let Some(name) = &self.name {
+            let trimmed = name.trim();
+            if trimmed.is_empty() || trimmed.len() > 100 {
+                return Err(AppError::BadRequest(
+                    "name must be between 1 and 100 characters".into(),
+                ));
+            }
+        }
+        if let Some(status) = &self.status {
+            status.parse::<GroupStatus>().map_err(AppError::BadRequest)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateMemberRequest {
+    pub name: String,
+    pub phone: String,
+    pub position: i64,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(rename = "joinedAt", default)]
+    pub joined_at: Option<String>,
+}
+
+impl CreateMemberRequest {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.name.trim().is_empty() {
+            return Err(AppError::BadRequest("name must not be empty".into()));
+        }
+        if self.phone.trim().is_empty() {
+            return Err(AppError::BadRequest("phone must not be empty".into()));
+        }
+        if self.position <= 0 {
+            return Err(AppError::BadRequest(
+                "position must be a positive integer".into(),
+            ));
+        }
+        if let Some(date) = &self.joined_at {
+            if !is_valid_date(date) {
+                return Err(AppError::BadRequest(
+                    "joinedAt must be a valid YYYY-MM-DD date".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMemberRequest {
+    pub name: Option<String>,
+    pub phone: Option<String>,
+    pub position: Option<i64>,
+    pub status: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(rename = "joinedAt", default)]
+    pub joined_at: Option<String>,
+    pub version: i64,
+}
+
+impl UpdateMemberRequest {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if let Some(name) = &self.name {
+            if name.trim().is_empty() {
+                return Err(AppError::BadRequest("name must not be empty".into()));
+            }
+        }
+        if let Some(phone) = &self.phone {
+            if phone.trim().is_empty() {
+                return Err(AppError::BadRequest("phone must not be empty".into()));
+            }
+        }
+        if let Some(pos) = self.position {
+            if pos <= 0 {
+                return Err(AppError::BadRequest(
+                    "position must be a positive integer".into(),
+                ));
+            }
+        }
+        if let Some(status) = &self.status {
+            status.parse::<MemberStatus>().map_err(AppError::BadRequest)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateCycleRequest {
+    #[serde(rename = "cycleNumber")]
+    pub cycle_number: i64,
+    #[serde(rename = "startDate")]
+    pub start_date: String,
+    #[serde(rename = "endDate")]
+    pub end_date: String,
+    #[serde(rename = "contributionPerMember")]
+    pub contribution_per_member: i64,
+    #[serde(rename = "recipientMemberId")]
+    pub recipient_member_id: i64,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl CreateCycleRequest {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.cycle_number <= 0 {
+            return Err(AppError::BadRequest(
+                "cycleNumber must be a positive integer".into(),
+            ));
+        }
+        if !is_valid_date(&self.start_date) {
+            return Err(AppError::BadRequest(
+                "startDate must be a valid YYYY-MM-DD date".into(),
+            ));
+        }
+        if !is_valid_date(&self.end_date) {
+            return Err(AppError::BadRequest(
+                "endDate must be a valid YYYY-MM-DD date".into(),
+            ));
+        }
+        // Both dates already validated as parseable above.
+        let start = chrono::NaiveDate::parse_from_str(&self.start_date, "%Y-%m-%d").unwrap();
+        let end = chrono::NaiveDate::parse_from_str(&self.end_date, "%Y-%m-%d").unwrap();
+        if start > end {
+            return Err(AppError::BadRequest(
+                "startDate must be before or equal to endDate".into(),
+            ));
+        }
+        if self.contribution_per_member <= 0 {
+            return Err(AppError::BadRequest(
+                "contributionPerMember must be a positive integer (in kobo)".into(),
+            ));
+        }
+        if self.recipient_member_id <= 0 {
+            return Err(AppError::BadRequest(
+                "recipientMemberId must be a positive integer".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateCycleRequest {
+    #[serde(rename = "startDate")]
+    pub start_date: Option<String>,
+    #[serde(rename = "endDate")]
+    pub end_date: Option<String>,
+    #[serde(rename = "contributionPerMember")]
+    pub contribution_per_member: Option<i64>,
+    #[serde(rename = "recipientMemberId")]
+    pub recipient_member_id: Option<i64>,
+    pub status: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    pub version: i64,
+}
+
+impl UpdateCycleRequest {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if let Some(date) = &self.start_date {
+            if !is_valid_date(date) {
+                return Err(AppError::BadRequest(
+                    "startDate must be a valid YYYY-MM-DD date".into(),
+                ));
+            }
+        }
+        if let Some(date) = &self.end_date {
+            if !is_valid_date(date) {
+                return Err(AppError::BadRequest(
+                    "endDate must be a valid YYYY-MM-DD date".into(),
+                ));
+            }
+        }
+        if let Some(amount) = self.contribution_per_member {
+            if amount <= 0 {
+                return Err(AppError::BadRequest(
+                    "contributionPerMember must be a positive integer (in kobo)".into(),
+                ));
+            }
+        }
+        if let Some(status) = &self.status {
+            status.parse::<CycleStatus>().map_err(AppError::BadRequest)?;
+        }
+        Ok(())
+    }
+}
 
 /// Request body for POST /api/payments.
 #[derive(Debug, Deserialize)]
@@ -303,7 +677,6 @@ pub struct CreatePaymentRequest {
 }
 
 impl CreatePaymentRequest {
-    /// Validate all fields before writing to the database.
     pub fn validate(&self) -> Result<(), AppError> {
         if self.member_id <= 0 {
             return Err(AppError::BadRequest(
@@ -335,4 +708,9 @@ impl CreatePaymentRequest {
 /// Validate that a string is a valid YYYY-MM-DD calendar date.
 fn is_valid_date(s: &str) -> bool {
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
+}
+
+/// Return the current UTC timestamp as an ISO 8601 string.
+pub fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339()
 }

@@ -41,6 +41,9 @@ surrealdb-types = "3"
 # Timestamp-based payment ID generation
 chrono = { version = "0.4", features = ["serde"] }
 
+# Constant-time comparison for auth tokens
+subtle = "2"
+
 [dev-dependencies]
 # HTTP service test utilities — used in API integration tests
 tower = { version = "0.5", features = ["util"] }
