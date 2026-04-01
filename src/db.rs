@@ -123,8 +123,64 @@ fn fixture_members() -> Vec<(i64, MemberContent)> {
 
 fn fixture_cycles() -> Vec<(i64, CycleContent)> {
     vec![
-        (1, CycleContent {
+        // Round 1: Jul–Dec 2025 (cycles 1–6, full rotation of all 6 members)
+        (4, CycleContent {
             cycle_number: 1,
+            start_date: "2025-07-01".into(),
+            end_date: "2025-07-31".into(),
+            contribution_per_member: 1_000_000,
+            total_amount: 6_000_000,
+            recipient_member_id: 1,
+            status: "closed".into(),
+        }),
+        (5, CycleContent {
+            cycle_number: 2,
+            start_date: "2025-08-01".into(),
+            end_date: "2025-08-31".into(),
+            contribution_per_member: 1_000_000,
+            total_amount: 6_000_000,
+            recipient_member_id: 2,
+            status: "closed".into(),
+        }),
+        (6, CycleContent {
+            cycle_number: 3,
+            start_date: "2025-09-01".into(),
+            end_date: "2025-09-30".into(),
+            contribution_per_member: 1_000_000,
+            total_amount: 6_000_000,
+            recipient_member_id: 3,
+            status: "closed".into(),
+        }),
+        (7, CycleContent {
+            cycle_number: 4,
+            start_date: "2025-10-01".into(),
+            end_date: "2025-10-31".into(),
+            contribution_per_member: 1_000_000,
+            total_amount: 6_000_000,
+            recipient_member_id: 4,
+            status: "closed".into(),
+        }),
+        (8, CycleContent {
+            cycle_number: 5,
+            start_date: "2025-11-01".into(),
+            end_date: "2025-11-30".into(),
+            contribution_per_member: 1_000_000,
+            total_amount: 6_000_000,
+            recipient_member_id: 5,
+            status: "closed".into(),
+        }),
+        (9, CycleContent {
+            cycle_number: 6,
+            start_date: "2025-12-01".into(),
+            end_date: "2025-12-31".into(),
+            contribution_per_member: 1_000_000,
+            total_amount: 6_000_000,
+            recipient_member_id: 6,
+            status: "closed".into(),
+        }),
+        // Round 2: Jan–Mar 2026 (cycles 7–9, second rotation begins)
+        (1, CycleContent {
+            cycle_number: 7,
             start_date: "2026-01-01".into(),
             end_date: "2026-01-31".into(),
             contribution_per_member: 1_000_000,
@@ -133,7 +189,7 @@ fn fixture_cycles() -> Vec<(i64, CycleContent)> {
             status: "closed".into(),
         }),
         (2, CycleContent {
-            cycle_number: 2,
+            cycle_number: 8,
             start_date: "2026-02-01".into(),
             end_date: "2026-02-28".into(),
             contribution_per_member: 1_000_000,
@@ -142,7 +198,7 @@ fn fixture_cycles() -> Vec<(i64, CycleContent)> {
             status: "closed".into(),
         }),
         (3, CycleContent {
-            cycle_number: 3,
+            cycle_number: 9,
             start_date: "2026-03-01".into(),
             end_date: "2026-03-31".into(),
             contribution_per_member: 1_000_000,
@@ -156,9 +212,15 @@ fn fixture_cycles() -> Vec<(i64, CycleContent)> {
 /// The canonical fixture payment set.
 ///
 /// IDs:
-///   1, 2, 4   → cycle 3 payments (March 2026, 3 of 5 contributing members paid)
-///   5–10      → cycle 1 payments (January 2026, all 6 members paid)
-///   11–16     → cycle 2 payments (February 2026, all 6 members paid)
+///   1, 2, 4     → cycle 3 payments (March 2026, 3 of 5 contributing members paid)
+///   5–10        → cycle 1 payments (January 2026, all 6 members paid)
+///   11–16       → cycle 2 payments (February 2026, all 6 members paid)
+///   17–22       → cycle 4 payments (July 2025, all 6 members paid)
+///   23–27       → cycle 5 payments (August 2025, 5 of 6 paid — member 3 missed)
+///   28–33       → cycle 6 payments (September 2025, all 6 members paid)
+///   34–38       → cycle 7 payments (October 2025, 5 of 6 paid — member 4 missed)
+///   39–44       → cycle 8 payments (November 2025, all 6 members paid)
+///   45–50       → cycle 9 payments (December 2025, all 6 members paid)
 ///
 /// Non-sequential ordering is intentional: cycle-3 records were inserted first
 /// during development. Timestamp-based IDs from create_payment (ms since epoch,
@@ -183,5 +245,45 @@ fn fixture_payments() -> Vec<(i64, PaymentContent)> {
         (14, PaymentContent { member_id: 4, cycle_id: 2, amount: 1_000_000, currency: "NGN".into(), payment_date: "2026-02-06".into() }),
         (15, PaymentContent { member_id: 5, cycle_id: 2, amount: 1_000_000, currency: "NGN".into(), payment_date: "2026-02-07".into() }),
         (16, PaymentContent { member_id: 6, cycle_id: 2, amount: 1_000_000, currency: "NGN".into(), payment_date: "2026-02-09".into() }),
+        // Cycle 4 — July 2025 (all 6 members paid)
+        (17, PaymentContent { member_id: 1, cycle_id: 4, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-07-03".into() }),
+        (18, PaymentContent { member_id: 2, cycle_id: 4, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-07-04".into() }),
+        (19, PaymentContent { member_id: 3, cycle_id: 4, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-07-05".into() }),
+        (20, PaymentContent { member_id: 4, cycle_id: 4, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-07-07".into() }),
+        (21, PaymentContent { member_id: 5, cycle_id: 4, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-07-08".into() }),
+        (22, PaymentContent { member_id: 6, cycle_id: 4, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-07-09".into() }),
+        // Cycle 5 — August 2025 (5 of 6 paid; member 3 missed)
+        (23, PaymentContent { member_id: 1, cycle_id: 5, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-08-02".into() }),
+        (24, PaymentContent { member_id: 2, cycle_id: 5, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-08-04".into() }),
+        (25, PaymentContent { member_id: 4, cycle_id: 5, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-08-05".into() }),
+        (26, PaymentContent { member_id: 5, cycle_id: 5, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-08-06".into() }),
+        (27, PaymentContent { member_id: 6, cycle_id: 5, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-08-08".into() }),
+        // Cycle 6 — September 2025 (all 6 members paid)
+        (28, PaymentContent { member_id: 1, cycle_id: 6, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-09-02".into() }),
+        (29, PaymentContent { member_id: 2, cycle_id: 6, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-09-03".into() }),
+        (30, PaymentContent { member_id: 3, cycle_id: 6, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-09-04".into() }),
+        (31, PaymentContent { member_id: 4, cycle_id: 6, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-09-05".into() }),
+        (32, PaymentContent { member_id: 5, cycle_id: 6, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-09-06".into() }),
+        (33, PaymentContent { member_id: 6, cycle_id: 6, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-09-08".into() }),
+        // Cycle 7 — October 2025 (5 of 6 paid; member 4 missed)
+        (34, PaymentContent { member_id: 1, cycle_id: 7, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-10-03".into() }),
+        (35, PaymentContent { member_id: 2, cycle_id: 7, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-10-04".into() }),
+        (36, PaymentContent { member_id: 3, cycle_id: 7, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-10-05".into() }),
+        (37, PaymentContent { member_id: 5, cycle_id: 7, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-10-06".into() }),
+        (38, PaymentContent { member_id: 6, cycle_id: 7, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-10-07".into() }),
+        // Cycle 8 — November 2025 (all 6 members paid)
+        (39, PaymentContent { member_id: 1, cycle_id: 8, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-11-03".into() }),
+        (40, PaymentContent { member_id: 2, cycle_id: 8, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-11-04".into() }),
+        (41, PaymentContent { member_id: 3, cycle_id: 8, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-11-05".into() }),
+        (42, PaymentContent { member_id: 4, cycle_id: 8, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-11-06".into() }),
+        (43, PaymentContent { member_id: 5, cycle_id: 8, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-11-07".into() }),
+        (44, PaymentContent { member_id: 6, cycle_id: 8, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-11-09".into() }),
+        // Cycle 9 — December 2025 (all 6 members paid)
+        (45, PaymentContent { member_id: 1, cycle_id: 9, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-12-03".into() }),
+        (46, PaymentContent { member_id: 2, cycle_id: 9, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-12-04".into() }),
+        (47, PaymentContent { member_id: 3, cycle_id: 9, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-12-05".into() }),
+        (48, PaymentContent { member_id: 4, cycle_id: 9, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-12-06".into() }),
+        (49, PaymentContent { member_id: 5, cycle_id: 9, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-12-07".into() }),
+        (50, PaymentContent { member_id: 6, cycle_id: 9, amount: 1_000_000, currency: "NGN".into(), payment_date: "2025-12-09".into() }),
     ]
 }

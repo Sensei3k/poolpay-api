@@ -119,10 +119,10 @@ async fn get_cycles_returns_200() {
 }
 
 #[tokio::test]
-async fn get_cycles_returns_three_cycles() {
+async fn get_cycles_returns_nine_cycles() {
     let resp = call(test_app().await, get("/api/cycles")).await;
     let cycles: Vec<serde_json::Value> = json_body(resp).await;
-    assert_eq!(cycles.len(), 3);
+    assert_eq!(cycles.len(), 9);
 }
 
 #[tokio::test]
@@ -170,10 +170,10 @@ async fn get_payments_returns_200() {
 }
 
 #[tokio::test]
-async fn get_payments_returns_fifteen_total() {
+async fn get_payments_returns_forty_nine_total() {
     let resp = call(test_app().await, get("/api/payments")).await;
     let payments: Vec<serde_json::Value> = json_body(resp).await;
-    assert_eq!(payments.len(), 15);
+    assert_eq!(payments.len(), 49);
 }
 
 #[tokio::test]
@@ -492,10 +492,10 @@ async fn reset_restores_payments_to_fixture_count() {
     // Reset to fixture state.
     call(app.clone(), post_empty("/api/test/reset")).await;
 
-    // Back to 15.
+    // Back to 49.
     let payments: Vec<serde_json::Value> =
         json_body(call(app, get("/api/payments")).await).await;
-    assert_eq!(payments.len(), 15, "reset should restore 15 fixture payments");
+    assert_eq!(payments.len(), 49, "reset should restore 49 fixture payments");
 }
 
 #[tokio::test]
@@ -513,7 +513,7 @@ async fn reset_restores_cycles() {
     call(app.clone(), post_empty("/api/test/reset")).await;
     let cycles: Vec<serde_json::Value> =
         json_body(call(app, get("/api/cycles")).await).await;
-    assert_eq!(cycles.len(), 3);
+    assert_eq!(cycles.len(), 9);
 }
 
 // ── Error response contract ───────────────────────────────────────────────────

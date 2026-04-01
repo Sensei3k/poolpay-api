@@ -100,7 +100,7 @@ async fn main() {
 
                                 match ocr_result {
                                     Ok(text) => {
-                                        info!(ocr_text = %text, "OCR complete");
+                                        info!(ocr_chars = text.len(), "OCR complete");
                                         let parsed = parser::parse_receipt(&text);
                                         parser::print_parsed(&parsed);
 

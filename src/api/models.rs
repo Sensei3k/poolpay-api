@@ -332,18 +332,7 @@ impl CreatePaymentRequest {
     }
 }
 
-/// Validate that a string is a plausible YYYY-MM-DD date.
-///
-/// Checks format and digit positions only — does not validate calendar
-/// semantics (e.g. month ≤ 12). Sufficient as an API boundary check.
+/// Validate that a string is a valid YYYY-MM-DD calendar date.
 fn is_valid_date(s: &str) -> bool {
-    if s.len() != 10 {
-        return false;
-    }
-    let b = s.as_bytes();
-    b[4] == b'-'
-        && b[7] == b'-'
-        && b[..4].iter().all(|c| c.is_ascii_digit())
-        && b[5..7].iter().all(|c| c.is_ascii_digit())
-        && b[8..10].iter().all(|c| c.is_ascii_digit())
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
 }
