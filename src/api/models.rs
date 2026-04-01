@@ -561,6 +561,13 @@ impl UpdateMemberRequest {
         if let Some(status) = &self.status {
             status.parse::<MemberStatus>().map_err(AppError::BadRequest)?;
         }
+        if let Some(joined_at) = &self.joined_at {
+            if !is_valid_date(joined_at) {
+                return Err(AppError::BadRequest(
+                    "joinedAt must be a valid YYYY-MM-DD date".into(),
+                ));
+            }
+        }
         Ok(())
     }
 }

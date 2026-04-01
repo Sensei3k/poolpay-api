@@ -27,8 +27,16 @@ async fn test_app() -> Router {
 }
 
 /// Build a fresh app with ADMIN_TOKEN set for admin endpoint tests.
+///
+/// Uses `OnceLock` so the env var is written exactly once across all tests,
+/// avoiding the data race that `set_var` would introduce under parallel
+/// test execution.
 async fn test_app_with_auth() -> Router {
-    std::env::set_var("ADMIN_TOKEN", "test-secret-token");
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        // Safety: called once before any test that reads ADMIN_TOKEN runs.
+        unsafe { std::env::set_var("ADMIN_TOKEN", "test-secret-token") };
+    });
     test_app().await
 }
 
