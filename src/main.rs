@@ -25,7 +25,11 @@ async fn main() {
     let api_token = env::var("GREEN_API_TOKEN")
         .expect("GREEN_API_TOKEN must be set in .env");
 
-    // Initialise embedded SurrealDB and seed fixture data if the DB is empty.
+    if env::var("ADMIN_TOKEN").unwrap_or_default().is_empty() {
+        warn!("ADMIN_TOKEN is not set — all admin endpoints will return 401");
+    }
+
+    // Initialise embedded SurrealDB and, if SEED_ON_EMPTY=true and the DB is empty, seed fixture data.
     let surreal_db = db::init()
         .await
         .expect("Failed to initialise SurrealDB");

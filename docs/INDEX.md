@@ -1,6 +1,6 @@
 # Documentation Index
 
-Last Updated: 2026-03-27
+Last Updated: 2026-04-01
 
 Quick reference to all documentation for the Rust Receipt Engine project.
 
@@ -34,8 +34,7 @@ Start here if you're deploying, running, or troubleshooting the service in produ
 - **[README.md](../README.md)** (in root) — Project overview
   - What the service does
   - Architecture and structure
-  - Google Sheets integration details
-  - Testing overview
+  - Testing overview (106 tests)
   - Known limitations
 
 ## Key Topics at a Glance
@@ -104,22 +103,17 @@ APP_ENV=production DASHBOARD_ORIGIN=https://dashboard.example.com \
 
 ## Architecture Overview
 
-Three concurrent tasks:
+Two concurrent tasks:
 
 1. **Receipt Loop** (5-second polling)
    - Monitors Green API for incoming messages
    - Extracts text via Tesseract OCR
-   - Parses receipt details
-   - Replies and writes to Google Sheet
+   - Parses receipt details and replies to WhatsApp
 
-2. **Confirmation Loop** (30-second polling)
-   - Checks Google Sheet for confirmed entries
-   - Sends "Acknowledged" replies
-   - Updates sheet with timestamp
-
-3. **API Server** (port 8080)
-   - Serves REST endpoints
-   - Manages members, cycles, and payments
+2. **API Server** (port 8080)
+   - Public read endpoints for groups, members, cycles, payments
+   - Admin write endpoints (bearer token auth) for CRUD operations
+   - Manages multi-group ajo circles with soft delete and version control
    - Development-only database reset endpoint
 
 See [RUNBOOK.md - Service Architecture](./RUNBOOK.md#service-architecture) for details.
@@ -130,7 +124,7 @@ See [RUNBOOK.md - Service Architecture](./RUNBOOK.md#service-architecture) for d
 - **Web Framework:** Axum
 - **Database:** SurrealDB (RocksDB storage)
 - **OCR:** Tesseract
-- **Integrations:** Green API (WhatsApp), Google Sheets API
+- **Integrations:** Green API (WhatsApp)
 - **Testing:** Rust built-in test framework with in-memory SurrealDB
 
 ## Support

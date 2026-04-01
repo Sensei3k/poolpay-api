@@ -1,6 +1,6 @@
 # Runbook: Receipt Engine Service
 
-Last Updated: 2026-03-27
+Last Updated: 2026-04-01
 
 Operational guide for running and troubleshooting the Receipt Engine service in development and production.
 
@@ -26,7 +26,7 @@ RUST_LOG=debug cargo run
 Service will be ready when you see:
 ```
 INFO receipt_engine: API server listening addr=0.0.0.0:8080
-INFO receipt_engine: Receipt engine started receipt_poll_secs=5 confirm_poll_secs=30
+INFO receipt_engine: Receipt engine started receipt_poll_secs=5
 ```
 
 ### Production
@@ -49,9 +49,9 @@ APP_ENV=production DASHBOARD_ORIGIN=https://dashboard.example.com \
 GREEN_API_INSTANCE_ID=7103538567
 GREEN_API_TOKEN=68e409f84c9f47549a370f0ca1ba5bd01122559cdfce45a180
 
-# Google Cloud (service account credentials and spreadsheet)
-GOOGLE_SERVICE_ACCOUNT_KEY_PATH=/path/to/service-account.json
-GOOGLE_SPREADSHEET_ID=1U5Dgh6F_p5LwYzV4DXmiZDLkRGy9cN271suEcrZj83E
+# Admin bearer token for all /api/admin/* endpoints
+# Generate with: openssl rand -hex 32
+ADMIN_TOKEN=your_admin_token_here
 ```
 
 ### Optional Variables
@@ -67,6 +67,9 @@ DASHBOARD_ORIGIN=https://dashboard.example.com
 # HTTP server binding (default: 0.0.0.0:8080)
 API_BIND_ADDR=0.0.0.0:8080
 
+# Seed fixture data when all database tables are empty (default: false)
+SEED_ON_EMPTY=true
+
 # Temporary receipt file storage (default: OS temp directory)
 RECEIPT_DOWNLOAD_DIR=/tmp/receipts
 
@@ -79,13 +82,13 @@ RUST_LOG=info
 
 - Set `APP_ENV=production` to enable CORS restrictions
 - Set `DASHBOARD_ORIGIN` to the dashboard URL
+- Set a strong `ADMIN_TOKEN` (at least 32 hex characters)
 - The `/api/test/reset` endpoint is disabled in production
 - Never commit `.env` with real credentials
-- Store `GOOGLE_SERVICE_ACCOUNT_KEY_PATH` securely (not in git)
 
 ## Service Architecture
 
-The service runs three concurrent tasks:
+The service runs two concurrent tasks:
 
 ### Receipt Loop (Main Task)
 - Polls Green API every 5 seconds
@@ -93,22 +96,16 @@ The service runs three concurrent tasks:
 - Runs Tesseract OCR to extract text
 - Parses extracted text for sender, bank, and amount
 - Sends formatted reply back to WhatsApp
-- Writes row to Google Sheet
 - Acknowledges and deletes notification
-
-### Confirmation Loop (Async Task)
-- Polls Google Sheet every 30 seconds
-- Checks for rows marked "Confirmed" (checkbox = TRUE) in column D
-- Sends "✅ Acknowledged" reply as quoted message to original chat
-- Writes RFC 3339 timestamp to column F when acknowledged
 
 ### API Server (Async Task)
 - Serves HTTP API on port 8080
-- Routes for members, cycles, and payments management
+- Public read endpoints for groups, members, cycles, and payments
+- Admin write endpoints (behind `ADMIN_TOKEN` bearer auth) for CRUD operations
 - Dev-only `/api/test/reset` endpoint to reset database to fixture state
 - CORS configured based on `APP_ENV`
 
-All three tasks are monitored — if any fails, the process exits rather than silently degrading.
+Both tasks are monitored — if either fails, the process exits rather than silently degrading.
 
 ## Database
 
@@ -117,14 +114,13 @@ All three tasks are monitored — if any fails, the process exits rather than si
 The service uses SurrealDB with RocksDB storage, persisting to `./data.surreal/`.
 
 **Initialization:**
-- On startup, checks if database is empty
-- If empty, seeds with fixture data (members, cycles, payments)
-- Creates namespace `circle` and database `main`
+- On startup, creates namespace `circle` and database `main`
+- If `SEED_ON_EMPTY=true` and all tables are empty, seeds with fixture data (groups, members, cycles, payments)
 
 **Resetting the Database (Development Only):**
 
 ```bash
-# Delete the local database (will reinitialize on next run)
+# Delete the local database (will reinitialize on next run with SEED_ON_EMPTY=true)
 rm -rf ./data.surreal
 
 # Or use the API endpoint (only available when APP_ENV != production)
@@ -133,155 +129,223 @@ curl -X POST http://localhost:8080/api/test/reset
 
 ### Data Model
 
-**Members** — Ajo circle participants
+All IDs are SurrealDB-generated strings (not integers). The `EntityId` type alias (`String`) is the single point of control for ID representation across the codebase.
+
+**Groups** — Ajo savings circles
 ```json
 {
-  "id": 1,
-  "name": "Adaeze Okonkwo",
-  "phone": "2348101234567",
-  "position": 1,
-  "status": "active"
+  "id": "abc123",
+  "name": "Family Circle",
+  "status": "active",
+  "description": "Monthly family ajo",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "updatedAt": "2026-01-01T00:00:00Z",
+  "version": 1
 }
 ```
 
-**Cycles** — Payment rounds (monthly)
+**Members** — Circle participants (scoped to a group)
 ```json
 {
-  "id": 1,
-  "cycle_number": 1,
-  "start_date": "2026-01-01",
-  "end_date": "2026-01-31",
-  "contribution_per_member": 1000000,
-  "total_amount": 6000000,
-  "recipient_member_id": 1,
-  "status": "closed"
+  "id": "def456",
+  "name": "Adaeze Okonkwo",
+  "phone": "2348101234567",
+  "position": 1,
+  "status": "active",
+  "groupId": "abc123",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "updatedAt": "2026-01-01T00:00:00Z",
+  "version": 1
+}
+```
+
+**Cycles** — Payment rounds (monthly, scoped to a group)
+```json
+{
+  "id": "ghi789",
+  "cycleNumber": 1,
+  "startDate": "2026-01-01",
+  "endDate": "2026-01-31",
+  "contributionPerMember": 1000000,
+  "totalAmount": 6000000,
+  "recipientMemberId": "def456",
+  "status": "closed",
+  "groupId": "abc123",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "updatedAt": "2026-01-01T00:00:00Z",
+  "version": 1
 }
 ```
 
 **Payments** — Individual contributions
 ```json
 {
-  "id": 1234567890,
-  "member_id": 1,
-  "cycle_id": 3,
+  "id": "jkl012",
+  "memberId": "def456",
+  "cycleId": "ghi789",
   "amount": 1000000,
   "currency": "NGN",
-  "payment_date": "2026-03-02"
+  "paymentDate": "2026-03-02",
+  "createdAt": "2026-01-15T00:00:00Z",
+  "updatedAt": "2026-01-15T00:00:00Z"
 }
 ```
 
+**Soft delete:** Groups, members, and payments use soft delete (`deletedAt` timestamp). Cycles use hard delete (but only when they have no payments).
+
 ## API Routes
 
-All routes return JSON.
+All routes return JSON. Admin endpoints require `Authorization: Bearer <ADMIN_TOKEN>` header.
 
-### GET /api/members
+### Public Read Endpoints
 
-List all ajo circle members.
+#### GET /api/groups
 
-**Response:**
-```json
-[
-  {
-    "id": 1,
-    "name": "Adaeze Okonkwo",
-    "phone": "2348101234567",
-    "position": 1,
-    "status": "active"
-  }
-]
-```
+List all active groups (soft-deleted groups are excluded).
 
-### GET /api/cycles
+#### GET /api/members?groupId={id}
 
-List all payment cycles.
+List all active members. Optional `groupId` query parameter filters by group.
 
-**Response:**
-```json
-[
-  {
-    "id": 1,
-    "cycleNumber": 1,
-    "startDate": "2026-01-01",
-    "endDate": "2026-01-31",
-    "contributionPerMember": 1000000,
-    "totalAmount": 6000000,
-    "recipientMemberId": 1,
-    "status": "closed"
-  }
-]
-```
+#### GET /api/cycles?groupId={id}
 
-### GET /api/payments?cycleId=3
+List all cycles. Optional `groupId` query parameter filters by group.
 
-List all payments, optionally filtered by cycle.
+#### GET /api/payments?cycleId={id}
 
-**Query Parameters:**
-- `cycleId` (optional, integer) — filter by cycle ID
+List all active payments. Optional `cycleId` query parameter filters by cycle.
 
-**Response:**
-```json
-[
-  {
-    "id": 1234567890,
-    "memberId": 1,
-    "cycleId": 3,
-    "amount": 1000000,
-    "currency": "NGN",
-    "paymentDate": "2026-03-02"
-  }
-]
-```
+### Admin Group Endpoints
 
-### POST /api/payments
+All require `Authorization: Bearer <ADMIN_TOKEN>`.
 
-Create a new payment record.
+#### POST /api/admin/groups
+
+Create a new group.
 
 **Request:**
 ```json
 {
-  "member_id": 1,
-  "cycle_id": 3,
-  "amount": 1000000,
-  "currency": "NGN",
-  "payment_date": "2026-03-02"
+  "name": "Family Circle",
+  "description": "Optional description"
 }
 ```
 
-**Response:**
+Returns `201 Created`.
+
+#### PATCH /api/admin/groups/{id}
+
+Update a group. Requires `version` for optimistic concurrency control.
+
+**Request:**
 ```json
 {
-  "id": 1234567891,
-  "memberId": 1,
-  "cycleId": 3,
+  "name": "New Name",
+  "status": "closed",
+  "description": "Updated description",
+  "version": 1
+}
+```
+
+Returns `409 Conflict` on version mismatch.
+
+#### DELETE /api/admin/groups/{id}
+
+Soft-delete a group. Fails if the group still has active members or cycles.
+
+Returns `204 No Content`.
+
+### Admin Member Endpoints
+
+#### POST /api/admin/groups/{gid}/members
+
+Create a member in a group. Phone number must be unique within the group.
+
+**Request:**
+```json
+{
+  "name": "Adaeze Okonkwo",
+  "phone": "2348101234567",
+  "position": 1,
+  "notes": "Optional notes",
+  "joinedAt": "2026-01-01"
+}
+```
+
+Returns `201 Created`.
+
+#### PATCH /api/admin/members/{id}
+
+Update a member. Requires `version` for optimistic concurrency control.
+
+#### DELETE /api/admin/members/{id}
+
+Soft-delete a member. Fails if the member is the recipient of an active cycle.
+
+Returns `204 No Content`.
+
+### Admin Cycle Endpoints
+
+#### POST /api/admin/groups/{gid}/cycles
+
+Create a cycle in a group. `totalAmount` is auto-calculated from `contributionPerMember` and active member count.
+
+**Request:**
+```json
+{
+  "cycleNumber": 1,
+  "startDate": "2026-01-01",
+  "endDate": "2026-01-31",
+  "contributionPerMember": 1000000,
+  "recipientMemberId": "def456",
+  "notes": "Optional notes"
+}
+```
+
+Returns `201 Created`.
+
+#### PATCH /api/admin/cycles/{id}
+
+Update a cycle. Requires `version` for optimistic concurrency control.
+
+#### DELETE /api/admin/cycles/{id}
+
+Hard-delete a cycle. Fails if the cycle has any payments.
+
+Returns `204 No Content`.
+
+### Payment Endpoints
+
+#### POST /api/payments
+
+Create a new payment. Requires admin auth. Member and cycle must belong to the same group.
+
+**Request:**
+```json
+{
+  "memberId": "def456",
+  "cycleId": "ghi789",
   "amount": 1000000,
   "currency": "NGN",
   "paymentDate": "2026-03-02"
 }
 ```
 
-Returns `201 Created` on success, `400` on validation error, `404` if member/cycle doesn't exist.
+Returns `201 Created`.
 
-### DELETE /api/payments/{member_id}/{cycle_id}
+#### DELETE /api/payments/{member_id}/{cycle_id}
 
-Delete all payments for a member in a cycle.
+Soft-delete all payments for a member in a cycle. Requires admin auth.
 
-**Response:**
-```json
-{
-  "deleted": 3
-}
-```
+Returns `204 No Content`.
 
-### POST /api/test/reset (Development Only)
+### Dev-Only Endpoint
+
+#### POST /api/test/reset
 
 Reset the database to fixture state. Only available when `APP_ENV != production`.
 
-**Response:**
-```json
-{
-  "message": "Database reset to fixture state"
-}
-```
+Returns `200 OK`.
 
 ## Health Check
 
@@ -299,7 +363,7 @@ Log output includes structured fields for debugging:
 
 ```
 INFO receipt_engine: API server listening addr=0.0.0.0:8080
-INFO receipt_engine: Receipt engine started receipt_poll_secs=5 confirm_poll_secs=30
+INFO receipt_engine: Receipt engine started receipt_poll_secs=5
 INFO receipt_engine::whatsapp: Message sent chat_id=120363023024259121@g.us
 INFO receipt_engine::parser: Parsed receipt sender="John Doe" bank="GTBank" amount="₦50,000.00"
 ```
@@ -313,7 +377,7 @@ RUST_LOG=debug cargo run
 Or target specific modules:
 
 ```bash
-RUST_LOG=receipt_engine::sheets=debug,receipt_engine::parser=debug cargo run
+RUST_LOG=receipt_engine::parser=debug,receipt_engine::api=debug cargo run
 ```
 
 ## Common Issues & Fixes
@@ -331,22 +395,6 @@ cp .env.example .env
 # Edit .env with your actual values
 ```
 
-**Error: "Failed to initialise SheetsClient"**
-
-Causes:
-1. `GOOGLE_SERVICE_ACCOUNT_KEY_PATH` file doesn't exist or isn't readable
-2. Service account email not shared with the spreadsheet
-3. Key file is corrupted or has wrong format
-
-Fix:
-```bash
-# Verify key file exists
-ls -la /path/to/service-account.json
-
-# Re-share spreadsheet with service account (Editor access required)
-# Service account email is in the JSON key file under "client_email"
-```
-
 **Error: "tesseract not found"**
 
 ```bash
@@ -362,7 +410,7 @@ tesseract --version
 
 ### Service Crashes or Exits
 
-The service monitors three concurrent tasks. If any crashes, the entire process exits (fail-fast design).
+The service monitors two concurrent tasks. If either crashes, the entire process exits (fail-fast design).
 
 Check logs for the failing task:
 ```bash
@@ -371,7 +419,6 @@ RUST_LOG=debug cargo run 2>&1 | grep -i error
 
 Common causes:
 - Green API credentials invalid or instance has no balance
-- Google Sheet quota exceeded or service account revoked
 - Tesseract missing or corrupted
 - Disk full (for `./data.surreal`)
 
@@ -386,17 +433,10 @@ Look for:
 - "No new messages" — Green API queue is empty (normal)
 - "Error polling Green API" — credential or network issue
 - "OCR failed" — Tesseract error or unsupported image format
-- "Failed to write row to sheet" — spreadsheet permissions or quota
 
 **Check Green API balance:**
 
 Visit https://green-api.com/ and verify your instance has available credits.
-
-**Check Google Sheets permissions:**
-
-1. Verify service account email has Editor access to the spreadsheet
-2. Verify sheet has correct column headers in row 1:
-   `Sender | Bank | Amount | Confirmed | MessageID | AcknowledgedAt | ChatID`
 
 ### Database Corruption
 
@@ -405,7 +445,7 @@ If `./data.surreal` becomes corrupted:
 ```bash
 # Delete and reinitialize
 rm -rf ./data.surreal
-cargo run  # Will seed with fixture data on startup
+SEED_ON_EMPTY=true cargo run  # Will seed with fixture data on startup
 ```
 
 **Warning:** This deletes all stored payment records. Back up important data first.
@@ -442,10 +482,9 @@ API_BIND_ADDR=0.0.0.0:9000 cargo run
 
 ### Reducing Poll Frequency
 
-In `src/main.rs`, modify the constants:
+In `src/main.rs`, modify the constant:
 ```rust
 const RECEIPT_POLL_SECS: u64 = 5;      // Receipt polling (default: 5s)
-const CONFIRM_POLL_SECS: u64 = 30;     // Confirmation polling (default: 30s)
 ```
 
 Longer intervals reduce API calls and network bandwidth, but increase latency.
@@ -468,9 +507,8 @@ Advise users to:
 
 1. **API latency** — Should be < 100ms for GET endpoints
 2. **Receipt processing time** — Typically 2-10s (OCR is the bottleneck)
-3. **Google Sheets write errors** — Check quota usage in GCP console
-4. **Green API errors** — Check instance balance and plan limits
-5. **Database size** — Monitor `./data.surreal` growth
+3. **Green API errors** — Check instance balance and plan limits
+4. **Database size** — Monitor `./data.surreal` growth
 
 ### Deployment
 
@@ -515,28 +553,6 @@ sudo systemctl status receipt-engine
 Add detailed logging in `src/whatsapp.rs`:
 ```bash
 RUST_LOG=receipt_engine::whatsapp=debug cargo run
-```
-
-### Test Google Sheets Connection
-
-```bash
-# Create a small test script
-cat > test_sheets.rs << 'EOF'
-use receipt_engine::sheets::SheetsClient;
-
-#[tokio::main]
-async fn main() {
-    let client = SheetsClient::new(
-        "/path/to/service-account.json",
-        "your-spreadsheet-id"
-    ).await.expect("Failed to initialize");
-
-    let rows = client.fetch_rows().await.expect("Failed to fetch");
-    println!("Fetched {} rows", rows.len());
-}
-EOF
-
-rustc test_sheets.rs && ./test_sheets
 ```
 
 ### Test Tesseract OCR

@@ -1,6 +1,6 @@
 # Contributing to Receipt Engine
 
-Last Updated: 2026-03-27
+Last Updated: 2026-04-01
 
 ## Prerequisites
 
@@ -64,8 +64,7 @@ pdftoppm -v
    ```env
    GREEN_API_INSTANCE_ID=<your_instance_id>
    GREEN_API_TOKEN=<your_api_token>
-   GOOGLE_SERVICE_ACCOUNT_KEY_PATH=/path/to/service-account.json
-   GOOGLE_SPREADSHEET_ID=<spreadsheet_id_or_full_url>
+   ADMIN_TOKEN=<generate with: openssl rand -hex 32>
    ```
 
    See [Environment Variables](#environment-variables) below for all options.
@@ -96,8 +95,8 @@ cargo run
 The service will:
 - Start the Axum API server on `0.0.0.0:8080` (configurable via `API_BIND_ADDR`)
 - Initialize SurrealDB at `./data.surreal`
+- Seed fixture data if `SEED_ON_EMPTY=true` and all tables are empty
 - Begin polling Green API for incoming messages every 5 seconds
-- Poll Google Sheets for confirmations every 30 seconds
 
 The API becomes available at `http://localhost:8080`.
 
@@ -110,7 +109,7 @@ RUST_LOG=debug cargo run
 Or set a specific module:
 
 ```bash
-RUST_LOG=receipt_engine::parser=debug,receipt_engine::sheets=debug cargo run
+RUST_LOG=receipt_engine::parser=debug,receipt_engine::api=debug cargo run
 ```
 
 Supported log levels: `debug`, `info`, `warn`, `error`.
@@ -123,11 +122,10 @@ Supported log levels: `debug`, `info`, `warn`, `error`.
 cargo test
 ```
 
-Runs 65 tests across:
+Runs 106 tests across:
 - **Models** (3 tests) — JSON deserialization, idMessage placement
-- **Sheets** (20 tests) — spreadsheet ID parsing, row extraction, pending confirmation logic
 - **Parser** (28 tests) — amount extraction, sender detection, bank matching
-- **API Integration** (14 tests) — route handlers, SurrealDB operations, error handling
+- **API Integration** (75 tests) — admin CRUD, auth, validation, soft delete, version conflicts, route handlers
 
 Tests use an in-memory SurrealDB instance and do not touch the filesystem or call external APIs.
 
@@ -136,9 +134,6 @@ Tests use an in-memory SurrealDB instance and do not touch the filesystem or cal
 ```bash
 # Run only parser tests
 cargo test parser_
-
-# Run only sheets tests
-cargo test sheets::
 
 # Run only API integration tests
 cargo test api_integration
@@ -185,17 +180,17 @@ Both must pass before committing. The pre-commit hook will enforce this.
 ```
 src/
 ├── lib.rs              — crate root; declares all modules
-├── main.rs             — entry point; receipt loop (5s) + confirmation loop (30s)
+├── main.rs             — entry point; receipt loop (5s) + API server
 ├── models.rs           — core structs: ReceiptRow, ParsedReceipt, etc.
 ├── parser.rs           — OCR text parsing (sender, bank, amount extraction)
 ├── extractor.rs        — Tesseract OCR bindings for images and PDFs
 ├── whatsapp.rs         — Green API client (send, receive, delete, download)
-├── sheets.rs           — Google Sheets v4 REST client
 ├── db.rs               — SurrealDB initialization and seeding
 ├── api/
 │   ├── mod.rs          — router setup, CORS configuration
-│   ├── handlers.rs     — HTTP handlers (GET/POST/DELETE)
-│   └── models.rs       — API request/response types
+│   ├── auth.rs         — AdminToken extractor (Bearer token via ADMIN_TOKEN)
+│   ├── handlers.rs     — HTTP handlers (GET/POST/PATCH/DELETE)
+│   └── models.rs       — API request/response types, EntityId alias, DB/API structs
 
 tests/
 ├── parser_tests.rs     — parser module integration tests
@@ -236,11 +231,11 @@ tests/
 |----------|----------|---------|-------------|
 | `GREEN_API_INSTANCE_ID` | Yes | — | Green API instance ID from dashboard |
 | `GREEN_API_TOKEN` | Yes | — | Green API authentication token |
-| `GOOGLE_SERVICE_ACCOUNT_KEY_PATH` | Yes | — | Path to GCP service account JSON key (credentials file) |
-| `GOOGLE_SPREADSHEET_ID` | Yes | — | Google Sheets spreadsheet ID or full URL |
+| `ADMIN_TOKEN` | Yes | — | Bearer token for all `/api/admin/*` endpoints. Generate with `openssl rand -hex 32` |
 | `APP_ENV` | No | `development` | Environment mode: `development` or `production` (controls CORS and `/api/test/reset` availability) |
 | `DASHBOARD_ORIGIN` | No (required if `APP_ENV=production`) | — | CORS origin for production (e.g., `https://dashboard.example.com`) |
 | `API_BIND_ADDR` | No | `0.0.0.0:8080` | Socket address for the HTTP server |
+| `SEED_ON_EMPTY` | No | `false` | Set to `true` to seed fixture data when all database tables are empty |
 | `RECEIPT_DOWNLOAD_DIR` | No | OS temp dir | Directory for temporary receipt files during OCR |
 | `RUST_LOG` | No | `info` | Log level filter: `debug`, `info`, `warn`, `error` |
 
@@ -296,12 +291,6 @@ tests/
 2. Add tests in `tests/parser_tests.rs`
 3. Test against real receipts before merging
 
-### Extending the Google Sheets Integration
-
-1. Modify `src/sheets.rs`
-2. Add unit tests in the `#[cfg(test)]` module within the same file
-3. Test with a real Google Sheet
-
 ### Adding an API Endpoint
 
 1. Add handler to `src/api/handlers.rs`
@@ -346,9 +335,6 @@ brew install pkgconf  # macOS
 sudo apt-get install pkg-config  # Linux
 ```
 
-**"Failed to initialise SheetsClient":**
-Check that `GOOGLE_SERVICE_ACCOUNT_KEY_PATH` exists and is readable, and that the service account has been shared with the spreadsheet.
-
 ### Test Failures
 
 Run with verbose output:
@@ -365,7 +351,7 @@ If the local SurrealDB gets corrupted:
 
 ```bash
 rm -rf data.surreal
-cargo run  # Will reinitialize with fixture data
+SEED_ON_EMPTY=true cargo run  # Will reinitialize with fixture data
 ```
 
 ## Pre-Commit Hook
@@ -389,4 +375,3 @@ Then re-stage and commit.
 - [SurrealDB Docs](https://surrealdb.com/docs)
 - [Tesseract OCR](https://github.com/tesseract-ocr/tesseract/wiki)
 - [Green API Documentation](https://green-api.com/docs)
-- [Google Sheets API](https://developers.google.com/sheets/api)
