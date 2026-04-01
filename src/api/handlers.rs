@@ -138,7 +138,7 @@ pub async fn update_group(
     }
 
     let content = GroupContent {
-        name: body.name.unwrap_or(existing.name),
+        name: body.name.map(|n| n.trim().to_string()).unwrap_or(existing.name),
         status: body.status.unwrap_or(existing.status),
         description: body.description.or(existing.description),
         created_at: existing.created_at,
@@ -223,11 +223,13 @@ pub async fn create_member(
         _ => {}
     }
 
-    // Check phone uniqueness within this group.
+    // Check phone uniqueness within this group. Trim first so the query
+    // matches the canonicalized value that will be stored.
+    let phone_trimmed = body.phone.trim().to_string();
     let dupes: Vec<DbMember> = db
         .query("SELECT * FROM member WHERE group_id = $gid AND phone = $phone AND deleted_at IS NONE")
         .bind(("gid", group_id))
-        .bind(("phone", body.phone.clone()))
+        .bind(("phone", phone_trimmed))
         .await?
         .take(0)?;
 
@@ -374,19 +376,24 @@ pub async fn create_cycle(
         _ => {}
     }
 
-    // Verify recipient is in the same group.
+    // Verify recipient is in the same group and is not soft-deleted.
     let recipient: Option<DbMember> = db.select(("member", body.recipient_member_id)).await?;
     match recipient {
-        Some(m) if m.group_id != group_id => {
-            return Err(AppError::BadRequest(
-                "recipientMemberId must belong to the same group".into(),
-            ));
-        }
         None => {
             return Err(AppError::NotFound(format!(
                 "member {} does not exist",
                 body.recipient_member_id
             )));
+        }
+        Some(m) if m.deleted_at.is_some() => {
+            return Err(AppError::BadRequest(
+                "recipientMemberId refers to a deleted member".into(),
+            ));
+        }
+        Some(m) if m.group_id != group_id => {
+            return Err(AppError::BadRequest(
+                "recipientMemberId must belong to the same group".into(),
+            ));
         }
         _ => {}
     }
@@ -440,19 +447,24 @@ pub async fn update_cycle(
         ));
     }
 
-    // Validate new recipient belongs to the same group.
+    // Validate new recipient belongs to the same group and is not soft-deleted.
     if let Some(new_rid) = body.recipient_member_id {
         let recipient: Option<DbMember> = db.select(("member", new_rid)).await?;
         match recipient {
-            Some(m) if m.group_id != existing.group_id => {
-                return Err(AppError::BadRequest(
-                    "recipientMemberId must belong to the same group".into(),
-                ));
-            }
             None => {
                 return Err(AppError::NotFound(format!(
                     "member {new_rid} does not exist"
                 )));
+            }
+            Some(m) if m.deleted_at.is_some() => {
+                return Err(AppError::BadRequest(
+                    "recipientMemberId refers to a deleted member".into(),
+                ));
+            }
+            Some(m) if m.group_id != existing.group_id => {
+                return Err(AppError::BadRequest(
+                    "recipientMemberId must belong to the same group".into(),
+                ));
             }
             _ => {}
         }
@@ -535,6 +547,12 @@ pub async fn create_payment(
     let member = member.ok_or_else(|| {
         AppError::NotFound(format!("member {} does not exist", body.member_id))
     })?;
+    if member.deleted_at.is_some() {
+        return Err(AppError::BadRequest(format!(
+            "member {} has been deleted",
+            body.member_id
+        )));
+    }
     let cycle: Option<DbCycle> = db.select(("cycle", body.cycle_id)).await?;
     let cycle = cycle.ok_or_else(|| {
         AppError::NotFound(format!("cycle {} does not exist", body.cycle_id))

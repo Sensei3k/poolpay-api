@@ -659,6 +659,16 @@ impl UpdateCycleRequest {
         if let Some(status) = &self.status {
             status.parse::<CycleStatus>().map_err(AppError::BadRequest)?;
         }
+        // When both dates are provided, enforce ordering.
+        if let (Some(start), Some(end)) = (&self.start_date, &self.end_date) {
+            let s = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d").unwrap();
+            let e = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d").unwrap();
+            if s > e {
+                return Err(AppError::BadRequest(
+                    "startDate must be before or equal to endDate".into(),
+                ));
+            }
+        }
         Ok(())
     }
 }

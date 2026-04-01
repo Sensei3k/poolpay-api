@@ -495,7 +495,7 @@ async fn delete_member_not_recipient_returns_204() {
 }
 
 #[tokio::test]
-async fn delete_already_deleted_member_returns_404() {
+async fn delete_already_deleted_member_returns_204() {
     let app = test_app_with_auth().await;
 
     // Delete member 6.
@@ -1025,21 +1025,10 @@ async fn create_payment_nonexistent_cycle_returns_404() {
 }
 
 #[tokio::test]
-async fn create_payment_cross_group_returns_400() {
+async fn create_payment_same_group_returns_201() {
     let app = test_app_with_auth().await;
 
-    // Create a second group with a member.
-    call(
-        app.clone(),
-        post_json_authed("/api/admin/groups", serde_json::json!({"name": "Group B"})),
-    )
-    .await;
-
-    // Cycle 3 is in group 1; try to pay with a member from group 1 but
-    // using a cycle that doesn't exist in this group would be caught by
-    // the cross-group check if we had cross-group data. For now, verify
-    // the validation logic works with the existing fixtures.
-    // Member 1 is in group 1, cycle 3 is in group 1 — this should succeed.
+    // Member 1 and cycle 3 are both in group 1 — payment should be accepted.
     let resp = call(
         app,
         post_json_authed(
