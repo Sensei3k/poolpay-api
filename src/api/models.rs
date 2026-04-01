@@ -303,7 +303,7 @@ pub(crate) fn record_id_to_string(rid: RecordId) -> String {
     match rid.key {
         RecordIdKey::Number(n) => n.to_string(),
         RecordIdKey::String(s) => s,
-        other => format!("{other:?}"),
+        other => unreachable!("unexpected RecordIdKey variant: {other:?}"),
     }
 }
 
@@ -668,6 +668,13 @@ impl UpdateCycleRequest {
         }
         if let Some(status) = &self.status {
             status.parse::<CycleStatus>().map_err(AppError::BadRequest)?;
+        }
+        if let Some(recipient_id) = &self.recipient_member_id {
+            if recipient_id.trim().is_empty() {
+                return Err(AppError::BadRequest(
+                    "recipientMemberId must not be empty".into(),
+                ));
+            }
         }
         // When both dates are provided, enforce ordering.
         if let (Some(start), Some(end)) = (&self.start_date, &self.end_date) {
