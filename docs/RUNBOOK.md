@@ -1,8 +1,8 @@
-# Runbook: Receipt Engine Service
+# Runbook: PoolPay Service
 
 Last Updated: 2026-04-01
 
-Operational guide for running and troubleshooting the Receipt Engine service in development and production.
+Operational guide for running and troubleshooting the PoolPay service in development and production.
 
 ## Quick Start
 
@@ -25,8 +25,8 @@ RUST_LOG=debug cargo run
 
 Service will be ready when you see:
 ```
-INFO receipt_engine: API server listening addr=0.0.0.0:8080
-INFO receipt_engine: Receipt engine started receipt_poll_secs=5
+INFO poolpay: API server listening addr=0.0.0.0:8080
+INFO poolpay: Receipt engine started receipt_poll_secs=5
 ```
 
 ### Production
@@ -37,7 +37,7 @@ cargo build --release
 
 # Run in production (set APP_ENV=production and DASHBOARD_ORIGIN)
 APP_ENV=production DASHBOARD_ORIGIN=https://dashboard.example.com \
-  ./target/release/receipt-engine
+  ./target/release/poolpay
 ```
 
 ## Environment Configuration
@@ -362,10 +362,10 @@ If it responds with JSON, the service is healthy.
 Log output includes structured fields for debugging:
 
 ```
-INFO receipt_engine: API server listening addr=0.0.0.0:8080
-INFO receipt_engine: Receipt engine started receipt_poll_secs=5
-INFO receipt_engine::whatsapp: Message sent chat_id=120363023024259121@g.us
-INFO receipt_engine::parser: Parsed receipt sender="John Doe" bank="GTBank" amount="₦50,000.00"
+INFO poolpay: API server listening addr=0.0.0.0:8080
+INFO poolpay: Receipt engine started receipt_poll_secs=5
+INFO poolpay::whatsapp: Message sent chat_id=120363023024259121@g.us
+INFO poolpay::parser: Parsed receipt sender="John Doe" bank="GTBank" amount="₦50,000.00"
 ```
 
 Enable debug logging with `RUST_LOG=debug`:
@@ -377,7 +377,7 @@ RUST_LOG=debug cargo run
 Or target specific modules:
 
 ```bash
-RUST_LOG=receipt_engine::parser=debug,receipt_engine::api=debug cargo run
+RUST_LOG=poolpay::parser=debug,poolpay::api=debug cargo run
 ```
 
 ## Common Issues & Fixes
@@ -455,7 +455,7 @@ SEED_ON_EMPTY=true cargo run  # Will seed with fixture data on startup
 SurrealDB with RocksDB may use more RAM as the dataset grows. Monitor with:
 
 ```bash
-ps aux | grep receipt-engine
+ps aux | grep poolpay
 ```
 
 To reduce memory overhead:
@@ -523,15 +523,15 @@ Example systemd service file:
 
 ```ini
 [Unit]
-Description=Receipt Engine
+Description=PoolPay
 After=network.target
 
 [Service]
 Type=simple
-User=receipt-engine
-WorkingDirectory=/opt/receipt-engine
-EnvironmentFile=/opt/receipt-engine/.env
-ExecStart=/opt/receipt-engine/receipt-engine
+User=poolpay
+WorkingDirectory=/opt/poolpay
+EnvironmentFile=/opt/poolpay/.env
+ExecStart=/opt/poolpay/poolpay
 Restart=always
 RestartSec=10
 
@@ -541,9 +541,9 @@ WantedBy=multi-user.target
 
 Enable and start:
 ```bash
-sudo systemctl enable receipt-engine
-sudo systemctl start receipt-engine
-sudo systemctl status receipt-engine
+sudo systemctl enable poolpay
+sudo systemctl start poolpay
+sudo systemctl status poolpay
 ```
 
 ## Troubleshooting Tools
@@ -552,7 +552,7 @@ sudo systemctl status receipt-engine
 
 Add detailed logging in `src/whatsapp.rs`:
 ```bash
-RUST_LOG=receipt_engine::whatsapp=debug cargo run
+RUST_LOG=poolpay::whatsapp=debug cargo run
 ```
 
 ### Test Tesseract OCR
@@ -582,7 +582,7 @@ State is persisted to `./data.surreal`, so the database is preserved.
 If the process is hung:
 
 ```bash
-pkill -f receipt-engine
+pkill -f poolpay
 ```
 
 This forcefully terminates all matching processes. Data in `./data.surreal` is safe (persisted to disk).

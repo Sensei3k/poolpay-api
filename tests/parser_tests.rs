@@ -1,4 +1,4 @@
-use receipt_engine::parser::parse_receipt;
+use poolpay::parser::parse_receipt;
 
 // ── Amount extraction ─────────────────────────────────────────────────────────
 
