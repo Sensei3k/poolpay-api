@@ -67,7 +67,8 @@ async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
          DEFINE FIELD IF NOT EXISTS email ON user TYPE string;
          DEFINE FIELD IF NOT EXISTS email_normalised ON user TYPE string;
          DEFINE FIELD IF NOT EXISTS password_hash ON user TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS role ON user TYPE string ASSERT $value IN ['admin', 'member'];
+         DEFINE FIELD IF NOT EXISTS role ON user TYPE string
+             ASSERT $value IN ['super_admin', 'admin', 'member'];
          DEFINE FIELD IF NOT EXISTS status ON user TYPE string ASSERT $value IN ['active', 'disabled'];
          DEFINE FIELD IF NOT EXISTS token_version ON user TYPE int;
          DEFINE FIELD IF NOT EXISTS must_reset_password ON user TYPE bool;
