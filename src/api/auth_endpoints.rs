@@ -66,8 +66,18 @@ pub async fn verify_credentials(
     // user has exactly one ('credentials', email_normalised) identity row,
     // enforced by the UNIQUE index on user_identity.
     let identity = find_identity(&db, CREDENTIALS_PROVIDER, &email_normalised).await?;
-    let user = match identity {
-        Some(i) => find_user_by_id(&db, &i.user_id).await?,
+    let user = match &identity {
+        Some(i) => {
+            let u = find_user_by_id(&db, &i.user_id).await?;
+            if u.is_none() {
+                // Orphaned identity — row exists but its user is gone. This
+                // indicates DB corruption, not a user-facing auth failure.
+                return Err(AppError::Internal(
+                    "identity references missing user".into(),
+                ));
+            }
+            u
+        }
         None => None,
     };
 
@@ -111,10 +121,6 @@ pub struct EnsureUserRequest {
     pub provider: String,
     pub provider_subject: String,
     pub email: String,
-    /// Recorded on the identity row for audit only. Never used as a linking
-    /// signal — see module-level doc and Plan 3 social edge cases.
-    #[serde(default)]
-    pub email_verified: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +160,7 @@ pub async fn ensure_user(
         let user = find_user_by_id(&db, &identity.user_id)
             .await?
             .ok_or_else(|| AppError::Internal("identity references missing user".into()))?;
+        reject_if_not_active(&user)?;
         return Ok(Json(EnsureUserResponse {
             user_id: identity.user_id,
             email: user.email,
@@ -168,19 +175,62 @@ pub async fn ensure_user(
 
     let identity = UserIdentityContent {
         user_id: user_id.clone(),
-        provider: req.provider,
-        provider_subject: req.provider_subject,
+        provider: req.provider.clone(),
+        provider_subject: req.provider_subject.clone(),
         email_at_link: req.email,
         created_at: now_iso(),
     };
-    let _: Option<DbUserIdentity> = db.create("user_identity").content(identity).await?;
 
-    Ok(Json(EnsureUserResponse {
-        user_id,
-        email: user_email,
-        role,
-        created: true,
-    }))
+    match db
+        .create::<Option<DbUserIdentity>>("user_identity")
+        .content(identity)
+        .await
+    {
+        Ok(_) => Ok(Json(EnsureUserResponse {
+            user_id,
+            email: user_email,
+            role,
+            created: true,
+        })),
+        Err(err) if is_unique_constraint_error(&err.to_string()) => {
+            // A concurrent ensure_user for the same (provider, subject) won the
+            // identity insert race. Reuse the existing row and clean up the
+            // user we just created so it doesn't remain orphaned.
+            let existing = find_identity(&db, &req.provider, &req.provider_subject)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Internal(
+                        "user_identity insert raced but identity was not found".into(),
+                    )
+                })?;
+            let existing_user = find_user_by_id(&db, &existing.user_id)
+                .await?
+                .ok_or_else(|| AppError::Internal("identity references missing user".into()))?;
+            reject_if_not_active(&existing_user)?;
+
+            let _: Option<DbUser> = db.delete(("user", user_id.as_str())).await.unwrap_or(None);
+
+            Ok(Json(EnsureUserResponse {
+                user_id: existing.user_id,
+                email: existing_user.email,
+                role: existing_user.role,
+                created: false,
+            }))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn reject_if_not_active(user: &DbUser) -> Result<(), AppError> {
+    if user.status != "active" || user.deleted_at.is_some() {
+        return Err(AppError::Forbidden("user is not active".into()));
+    }
+    Ok(())
+}
+
+fn is_unique_constraint_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("already contains") || lower.contains("unique") || lower.contains("duplicate")
 }
 
 async fn create_social_user(
@@ -246,15 +296,16 @@ async fn record_auth_event(
         reason: reason.map(str::to_string),
         created_at: now_iso(),
     };
-    // auth_event writes are fire-and-forget at every callsite (we don't want
-    // telemetry failure to block a login), but a silent swallow would hide a
-    // regression that stops populating the audit trail. Warn here so ops can
-    // alert on "auth_event insert failed" without affecting the request path.
-    match db.create::<Option<DbAuthEvent>>("auth_event").content(content).await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            tracing::warn!(error = %e, event_type, "auth_event insert failed");
-            Err(e.into())
-        }
+    // auth_event writes are fire-and-forget at every callsite: telemetry
+    // failure must never block a login. We still warn so ops can alert on
+    // "auth_event insert failed" without the error propagating into the
+    // request path. Always return Ok to make misuse impossible.
+    if let Err(e) = db
+        .create::<Option<DbAuthEvent>>("auth_event")
+        .content(content)
+        .await
+    {
+        tracing::warn!(error = %e, event_type, "auth_event insert failed");
     }
+    Ok(())
 }
