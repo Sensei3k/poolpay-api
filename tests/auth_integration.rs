@@ -178,9 +178,12 @@ async fn ensure_user_creates_and_reuses_on_verified_email() {
 }
 
 #[tokio::test]
-async fn ensure_user_verified_email_links_to_existing_account() {
+async fn ensure_user_second_provider_does_not_auto_link_on_email() {
+    // Industry best practice (Cognito / Auth0 / OAuth BCP): never auto-link
+    // accounts on email match, even when both providers report the email as
+    // verified. A second provider must produce a NEW user — linking is an
+    // explicit FE flow for a signed-in user (deferred to post-BE-6 work).
     let (app, _db) = test_app().await;
-    // First: create account via Google.
     let first = serde_json::json!({
         "provider": "google",
         "providerSubject": "sub-google-1",
@@ -189,9 +192,8 @@ async fn ensure_user_verified_email_links_to_existing_account() {
     });
     let r1 = call(app.clone(), hmac_request("/api/auth/ensure-user", &first)).await;
     let v1: serde_json::Value = json_body(r1).await;
-    let user_id = v1["userId"].as_str().unwrap().to_string();
+    let google_user_id = v1["userId"].as_str().unwrap().to_string();
 
-    // Second: GitHub with same verified email should reuse that user.
     let second = serde_json::json!({
         "provider": "github",
         "providerSubject": "sub-github-1",
@@ -201,8 +203,8 @@ async fn ensure_user_verified_email_links_to_existing_account() {
     let r2 = call(app, hmac_request("/api/auth/ensure-user", &second)).await;
     assert_eq!(r2.status(), StatusCode::OK);
     let v2: serde_json::Value = json_body(r2).await;
-    assert_eq!(v2["created"], false);
-    assert_eq!(v2["userId"].as_str().unwrap(), user_id);
+    assert_eq!(v2["created"], true);
+    assert_ne!(v2["userId"].as_str().unwrap(), google_user_id);
 }
 
 #[tokio::test]

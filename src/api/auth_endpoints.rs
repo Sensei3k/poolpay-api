@@ -1,7 +1,12 @@
 //! HMAC-gated endpoints called by NextAuth to authenticate users and to
-//! provision / link social identities. Rust never mints user-facing tokens
-//! here — these endpoints only answer "is this password valid?" and
-//! "make sure a user row exists for this social identity".
+//! provision social identities. Rust never mints user-facing tokens here —
+//! these endpoints only answer "is this password valid?" and "make sure a
+//! user row exists for this social identity".
+//!
+//! Identity model: uniqueness lives on `user_identity(provider, provider_subject)`.
+//! `user.email_normalised` is a non-unique lookup attribute — accounts are
+//! never auto-linked on email match. A second provider for the same person
+//! becomes a deliberate, authenticated FE linking flow (not in BE-1).
 
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
@@ -13,6 +18,8 @@ use crate::api::models::{
 use crate::auth::hmac::HmacVerifiedJson;
 use crate::auth::password;
 use crate::db::DbConn;
+
+const CREDENTIALS_PROVIDER: &str = "credentials";
 
 // ── verify-credentials ────────────────────────────────────────────────────────
 
@@ -42,7 +49,15 @@ pub async fn verify_credentials(
         return Err(AppError::Unauthorized);
     }
 
-    let user = find_user_by_email_normalised(&db, &email_normalised).await?;
+    // Lookup via user_identity — the canonical identity key. Every credentials
+    // user has exactly one ('credentials', email_normalised) identity row,
+    // enforced by the UNIQUE index on user_identity.
+    let identity = find_identity(&db, CREDENTIALS_PROVIDER, &email_normalised).await?;
+    let user = match identity {
+        Some(i) => find_user_by_id(&db, &i.user_id).await?,
+        None => None,
+    };
+
     let stored_hash = user.as_ref().and_then(|u| u.password_hash.as_deref());
     let matches = password::verify_or_dummy(&req.password, stored_hash)?;
 
@@ -83,6 +98,9 @@ pub struct EnsureUserRequest {
     pub provider: String,
     pub provider_subject: String,
     pub email: String,
+    /// Recorded on the identity row for audit only. Never used as a linking
+    /// signal — see module-level doc and Plan 3 social edge cases.
+    #[serde(default)]
     pub email_verified: bool,
 }
 
@@ -108,14 +126,12 @@ pub async fn ensure_user(
     if req.provider_subject.trim().is_empty() {
         return Err(AppError::BadRequest("providerSubject required".into()));
     }
-    let email_normalised = req.email.trim().to_lowercase();
-    if email_normalised.is_empty() {
+    if req.email.trim().is_empty() {
         return Err(AppError::BadRequest("email required".into()));
     }
 
-    if let Some(identity) =
-        find_identity(&db, &req.provider, &req.provider_subject).await?
-    {
+    // Same subject twice → idempotent reuse.
+    if let Some(identity) = find_identity(&db, &req.provider, &req.provider_subject).await? {
         let user = find_user_by_id(&db, &identity.user_id)
             .await?
             .ok_or_else(|| AppError::Internal("identity references missing user".into()))?;
@@ -127,24 +143,9 @@ pub async fn ensure_user(
         }));
     }
 
-    let (user_id, user_email, role, created) = if req.email_verified {
-        match find_user_by_email_normalised(&db, &email_normalised).await? {
-            Some(u) => {
-                let id = record_id_to_string(u.id);
-                (id, u.email, u.role, false)
-            }
-            None => create_social_user(&db, &req.email, &email_normalised).await?,
-        }
-    } else {
-        // Unverified provider email → never link to an existing account.
-        // Use a provider-scoped normalised key so we don't collide with
-        // (or squat on) a legitimate verified signup of the same address.
-        let scoped = format!(
-            "unverified:{}:{}",
-            req.provider, req.provider_subject
-        );
-        create_social_user(&db, &req.email, &scoped).await?
-    };
+    // New subject → always a new user. We deliberately do NOT look up by
+    // email. Account linking is an explicit FE flow for a signed-in user.
+    let (user_id, user_email, role) = create_social_user(&db, &req.email).await?;
 
     let identity = UserIdentityContent {
         user_id: user_id.clone(),
@@ -159,19 +160,18 @@ pub async fn ensure_user(
         user_id,
         email: user_email,
         role,
-        created,
+        created: true,
     }))
 }
 
 async fn create_social_user(
     db: &DbConn,
     email: &str,
-    email_normalised: &str,
-) -> Result<(String, String, String, bool), AppError> {
+) -> Result<(String, String, String), AppError> {
     let now = now_iso();
     let content = UserContent {
         email: email.to_string(),
-        email_normalised: email_normalised.to_string(),
+        email_normalised: email.trim().to_lowercase(),
         password_hash: None,
         role: "member".into(),
         status: "active".into(),
@@ -183,28 +183,10 @@ async fn create_social_user(
     };
     let created: Option<DbUser> = db.create("user").content(content).await?;
     let created = created.ok_or_else(|| AppError::Internal("user insert returned none".into()))?;
-    Ok((
-        record_id_to_string(created.id),
-        created.email,
-        created.role,
-        true,
-    ))
+    Ok((record_id_to_string(created.id), created.email, created.role))
 }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
-
-async fn find_user_by_email_normalised(
-    db: &DbConn,
-    email_normalised: &str,
-) -> Result<Option<DbUser>, AppError> {
-    let mut resp = db
-        .query("SELECT * FROM user WHERE email_normalised = $email LIMIT 1")
-        .bind(("email", email_normalised.to_string()))
-        .await?
-        .check()?;
-    let rows: Vec<DbUser> = resp.take(0)?;
-    Ok(rows.into_iter().next())
-}
 
 async fn find_user_by_id(db: &DbConn, id: &str) -> Result<Option<DbUser>, AppError> {
     let row: Option<DbUser> = db.select(("user", id)).await?;
