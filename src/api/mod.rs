@@ -11,10 +11,10 @@ use tower_http::cors::CorsLayer;
 
 use crate::db::DbConn;
 use handlers::{
-    create_cycle, create_group, create_member, create_payment, create_whatsapp_link, delete_cycle,
-    delete_group, delete_member, delete_payment, delete_whatsapp_link, get_cycles, get_groups,
-    get_members, get_payments, get_receipts, get_whatsapp_links, reset_db, update_cycle,
-    update_group, update_member,
+    confirm_receipt, create_cycle, create_group, create_member, create_payment,
+    create_whatsapp_link, delete_cycle, delete_group, delete_member, delete_payment,
+    delete_whatsapp_link, get_cycles, get_groups, get_members, get_payments, get_receipts,
+    get_whatsapp_links, reject_receipt, reset_db, update_cycle, update_group, update_member,
 };
 
 /// Build the Axum router with all API routes and CORS middleware.
@@ -42,6 +42,9 @@ pub fn router(db: DbConn) -> Router {
         .route("/api/admin/groups/{gid}/cycles", post(create_cycle))
         .route("/api/admin/cycles/{id}", patch(update_cycle))
         .route("/api/admin/cycles/{id}", delete(delete_cycle))
+        // Admin Receipt endpoints
+        .route("/api/admin/receipts/{id}/confirm", post(confirm_receipt))
+        .route("/api/admin/receipts/{id}/reject", post(reject_receipt))
         // Admin WhatsApp link endpoints
         .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
         .route("/api/admin/whatsapp-links", post(create_whatsapp_link))

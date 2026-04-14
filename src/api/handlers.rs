@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use surrealdb_types::SurrealValue;
 use tracing::error;
 
 use super::auth::AdminToken;
@@ -11,8 +12,8 @@ use crate::api::models::{
     AppError, CreateCycleRequest, CreateGroupRequest, CreateMemberRequest, CreatePaymentRequest,
     CreateWhatsappLinkRequest, Cycle, CycleContent, DbCycle, DbGroup, DbGroupLink, DbMember,
     DbPayment, DbReceipt, EntityId, Group, GroupContent, GroupLink, GroupLinkContent, Member,
-    MemberContent, Payment, PaymentContent, Receipt, ReceiptStatus, UpdateCycleRequest,
-    UpdateGroupRequest, UpdateMemberRequest, now_iso, record_id_to_string,
+    MemberContent, Payment, PaymentContent, Receipt, ReceiptContent, ReceiptStatus,
+    UpdateCycleRequest, UpdateGroupRequest, UpdateMemberRequest, now_iso, record_id_to_string,
 };
 use crate::db::{DbConn, reseed};
 
@@ -659,6 +660,159 @@ pub async fn delete_payment(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Admin Receipt handlers ───────────────────────────────────────────────────
+
+/// Load a receipt by id, rejecting soft-deleted rows as 404.
+async fn load_active_receipt(db: &DbConn, id: &str) -> Result<DbReceipt, AppError> {
+    let row: Option<DbReceipt> = db.select(("receipt", id)).await?;
+    let row = row.ok_or_else(|| AppError::NotFound(format!("receipt {id} does not exist")))?;
+    if row.deleted_at.is_some() {
+        return Err(AppError::NotFound(format!("receipt {id} does not exist")));
+    }
+    Ok(row)
+}
+
+fn receipt_content_from(row: &DbReceipt, status: &str, updated_at: String) -> ReceiptContent {
+    ReceiptContent {
+        whatsapp_message_id: row.whatsapp_message_id.clone(),
+        group_id: row.group_id.clone(),
+        chat_id: row.chat_id.clone(),
+        sender_phone: row.sender_phone.clone(),
+        member_id: row.member_id.clone(),
+        cycle_id: row.cycle_id.clone(),
+        extracted_amount: row.extracted_amount,
+        expected_amount: row.expected_amount,
+        amount_matches: row.amount_matches,
+        status: status.into(),
+        ocr_text: row.ocr_text.clone(),
+        sender_label: row.sender_label.clone(),
+        bank_label: row.bank_label.clone(),
+        received_at: row.received_at.clone(),
+        created_at: row.created_at.clone(),
+        updated_at,
+        deleted_at: row.deleted_at.clone(),
+    }
+}
+
+pub async fn confirm_receipt(
+    _auth: AdminToken,
+    State(db): State<DbConn>,
+    Path(id): Path<EntityId>,
+) -> Result<Json<Receipt>, AppError> {
+    let receipt = load_active_receipt(&db, id.as_str()).await?;
+
+    if receipt.status != "pending" {
+        return Err(AppError::Conflict(format!(
+            "receipt {id} is already {}",
+            receipt.status
+        )));
+    }
+
+    let member_id = receipt
+        .member_id
+        .clone()
+        .ok_or_else(|| AppError::Conflict("receipt has no linked member".into()))?;
+    let cycle_id = receipt
+        .cycle_id
+        .clone()
+        .ok_or_else(|| AppError::Conflict("receipt has no linked cycle".into()))?;
+    let amount = receipt
+        .extracted_amount
+        .ok_or_else(|| AppError::Conflict("receipt has no extracted amount".into()))?;
+
+    // Verify member and cycle still exist and belong to the same group.
+    let member: Option<DbMember> = db.select(("member", member_id.as_str())).await?;
+    let member = member
+        .ok_or_else(|| AppError::Conflict(format!("linked member {member_id} no longer exists")))?;
+    if member.deleted_at.is_some() {
+        return Err(AppError::Conflict(format!(
+            "linked member {member_id} has been deleted"
+        )));
+    }
+    let cycle: Option<DbCycle> = db.select(("cycle", cycle_id.as_str())).await?;
+    let cycle = cycle
+        .ok_or_else(|| AppError::Conflict(format!("linked cycle {cycle_id} no longer exists")))?;
+    if member.group_id != cycle.group_id {
+        return Err(AppError::Conflict(
+            "linked member and cycle belong to different groups".into(),
+        ));
+    }
+
+    // Reject duplicate confirmations for the same member+cycle.
+    #[derive(Debug, Deserialize, SurrealValue)]
+    struct ExistingPaymentId {
+        #[allow(dead_code)]
+        id: surrealdb::types::RecordId,
+    }
+    let existing: Vec<ExistingPaymentId> = db
+        .query(
+            "SELECT id FROM payment WHERE member_id = $mid AND cycle_id = $cid AND deleted_at IS NONE LIMIT 1",
+        )
+        .bind(("mid", member_id.clone()))
+        .bind(("cid", cycle_id.clone()))
+        .await?
+        .take(0)?;
+    if !existing.is_empty() {
+        return Err(AppError::Conflict(
+            "a payment already exists for this member and cycle".into(),
+        ));
+    }
+
+    let now = now_iso();
+    let payment_date = chrono::DateTime::parse_from_rfc3339(&receipt.received_at)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .map_err(|_| {
+            AppError::Conflict(format!(
+                "receipt {id} has an invalid received_at timestamp"
+            ))
+        })?;
+
+    let payment_content = PaymentContent {
+        member_id: member_id.clone(),
+        cycle_id: cycle_id.clone(),
+        amount,
+        currency: "NGN".into(),
+        payment_date,
+        payment_method: Some("whatsapp_receipt".into()),
+        reference: Some(receipt.whatsapp_message_id.clone()),
+        confirmed_at: Some(now.clone()),
+        confirmed_by: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        deleted_at: None,
+    };
+
+    let created: Option<DbPayment> = db.create("payment").content(payment_content).await?;
+    created.ok_or_else(|| AppError::Internal("payment was not created".into()))?;
+
+    let content = receipt_content_from(&receipt, "confirmed", now);
+    let updated: Option<DbReceipt> = db.upsert(("receipt", id.as_str())).content(content).await?;
+    let updated = updated.ok_or_else(|| AppError::Internal("receipt update failed".into()))?;
+
+    Ok(Json(Receipt::try_from(updated)?))
+}
+
+pub async fn reject_receipt(
+    _auth: AdminToken,
+    State(db): State<DbConn>,
+    Path(id): Path<EntityId>,
+) -> Result<Json<Receipt>, AppError> {
+    let receipt = load_active_receipt(&db, id.as_str()).await?;
+
+    if receipt.status != "pending" {
+        return Err(AppError::Conflict(format!(
+            "receipt {id} is already {}",
+            receipt.status
+        )));
+    }
+
+    let content = receipt_content_from(&receipt, "rejected", now_iso());
+    let updated: Option<DbReceipt> = db.upsert(("receipt", id.as_str())).content(content).await?;
+    let updated = updated.ok_or_else(|| AppError::Internal("receipt update failed".into()))?;
+
+    Ok(Json(Receipt::try_from(updated)?))
 }
 
 // ── Admin WhatsApp link handlers ─────────────────────────────────────────────
