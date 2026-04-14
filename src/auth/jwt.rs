@@ -152,29 +152,41 @@ impl JwtConfig {
 }
 
 impl StaticKeyVerifier {
-    /// Build from `JWT_KEYS` (JSON array) + `JwtConfig`. In production the
-    /// caller must supply a populated `JWT_KEYS`; outside production we mint
-    /// an ephemeral keypair if the env is missing so local dev and tests do
-    /// not need an extra setup step.
+    /// Build from `JWT_KEYS` (JSON array) + `JwtConfig`. In `development` and
+    /// `test`, we mint an ephemeral keypair when `JWT_KEYS` is missing so
+    /// local runs and tests do not need an extra setup step. In `production`,
+    /// and when `APP_ENV` is missing or unrecognized, the caller must supply
+    /// a populated `JWT_KEYS` — fail-closed on misconfigured environments so
+    /// a staging/preview box cannot silently run with ephemeral keys.
     pub fn from_env(config: JwtConfig) -> Result<Self, String> {
-        let is_prod = std::env::var("APP_ENV").as_deref() == Ok("production");
+        let app_env = std::env::var("APP_ENV");
 
         match std::env::var("JWT_KEYS") {
             Ok(raw) if !raw.trim().is_empty() => Self::from_json(&raw, config),
-            _ => {
-                if is_prod {
-                    return Err(
-                        "JWT_KEYS must be set in production (JSON array with at least one \
-                         active RS256 keypair)"
-                            .to_string(),
+            _ => match app_env.as_deref() {
+                Ok("development") | Ok("test") => {
+                    warn!(
+                        "JWT_KEYS is not set — generating an ephemeral RSA-2048 keypair for \
+                         this process. Set JWT_KEYS in any real environment."
                     );
+                    Self::from_ephemeral(config)
                 }
-                warn!(
-                    "JWT_KEYS is not set — generating an ephemeral RSA-2048 keypair for this \
-                     process. Set JWT_KEYS in any real environment."
-                );
-                Self::from_ephemeral(config)
-            }
+                Ok("production") => Err(
+                    "JWT_KEYS must be set in production (JSON array with at least one active \
+                     RS256 keypair)"
+                        .to_string(),
+                ),
+                Err(_) => Err(
+                    "APP_ENV must be set to `development`, `test`, or `production`; refusing \
+                     to generate ephemeral JWT keys when APP_ENV is missing. Set JWT_KEYS for \
+                     non-local environments."
+                        .to_string(),
+                ),
+                Ok(other) => Err(format!(
+                    "JWT_KEYS must be set when APP_ENV={other}; ephemeral JWT keys are only \
+                     allowed in `development` or `test`"
+                )),
+            },
         }
     }
 
@@ -328,6 +340,16 @@ impl TokenVerifier for StaticKeyVerifier {
 
         let data = decode::<AccessClaims>(token, &entry.decoding, &validation)
             .map_err(|_| JwtError::Invalid)?;
+
+        // `jsonwebtoken` does not validate `iat` itself; it only applies
+        // `leeway` to exp/nbf. Reject tokens whose `iat` is further in the
+        // future than the configured leeway — a small belt to catch clock
+        // skew abuse and tokens minted with a bogus forward-dated iat.
+        let now = chrono::Utc::now().timestamp();
+        if data.claims.iat > now.saturating_add(self.leeway_secs as i64) {
+            return Err(JwtError::Invalid);
+        }
+
         Ok(data.claims)
     }
 }
@@ -458,6 +480,19 @@ mod tests {
         *last = if *last == 'A' { 'B' } else { 'A' };
         let tampered: String = bytes.into_iter().collect();
         assert!(matches!(v.verify_access(&tampered), Err(JwtError::Invalid)));
+    }
+
+    #[test]
+    fn future_iat_outside_leeway_rejected() {
+        let v = build_verifier();
+        let mut c = base_claims();
+        // `iat` 10 minutes in the future — well beyond the 60s leeway.
+        let future = chrono::Utc::now().timestamp() + 600;
+        c.iat = future;
+        c.nbf = chrono::Utc::now().timestamp();
+        c.exp = future + 900;
+        let token = mint_with_claims(&v, &c);
+        assert!(matches!(v.verify_access(&token), Err(JwtError::Invalid)));
     }
 
     #[test]
