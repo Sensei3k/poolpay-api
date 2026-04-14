@@ -29,7 +29,7 @@ use poolpay::{
     },
     db,
 };
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tower::ServiceExt;
 
 // ── Shared env setup ──────────────────────────────────────────────────────────
@@ -38,11 +38,23 @@ const HMAC_SECRET: &str = "test-hmac-secret-for-integration-only";
 const BOOTSTRAP_EMAIL: &str = "seed-admin@example.com";
 const BOOTSTRAP_PASSWORD: &str = "correct-horse-battery-staple";
 
+/// Single global lock serializing every `std::env::set_var`/`remove_var`
+/// call in this integration binary. Each test helper has its own `OnceLock`
+/// so it only mutates the env once, but those first-time initializers can
+/// still execute concurrently across helpers under parallel tests — which
+/// violates `set_var`'s safety precondition. Taking this mutex before any
+/// mutation makes the writer window mutually exclusive across helpers.
+fn env_lock() -> &'static Mutex<()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn init_env() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
-        // Safety: written once before any test reads these vars. Parallel
-        // tests may then read them freely.
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: serialized by `env_lock()` above; written once before any
+        // test reads these vars. Parallel tests may then read them freely.
         unsafe {
             std::env::set_var("NEXTAUTH_BACKEND_SECRET", HMAC_SECRET);
             std::env::set_var("BOOTSTRAP_ADMIN_EMAIL", BOOTSTRAP_EMAIL);
@@ -975,7 +987,9 @@ const LEGACY_ADMIN_TOKEN: &str = "legacy-admin-token-for-shim-tests";
 fn init_legacy_admin_token() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
-        // Safety: written once before any shim test reads ADMIN_TOKEN.
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: serialized by `env_lock()` with every other env mutator
+        // in this binary; written once before any shim test reads ADMIN_TOKEN.
         unsafe {
             std::env::set_var("ADMIN_TOKEN", LEGACY_ADMIN_TOKEN);
         }

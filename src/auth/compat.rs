@@ -67,11 +67,13 @@ where
             return Ok(Self::Legacy);
         }
 
-        // Legacy didn't match — fall through to JWT verification. The
-        // `AuthenticatedUser` extractor handles signature, audience, exp,
+        // Legacy didn't match — fall through to JWT verification. Reuse
+        // the already-parsed bearer via `from_token` so we don't re-parse
+        // the `Authorization` header and re-allocate the token string a
+        // second time. `from_token` handles signature, audience, exp,
         // token_version, status and `deleted_at` checks; we only have to
         // narrow the role here.
-        let user = AuthenticatedUser::from_request_parts(parts, state).await?;
+        let user = AuthenticatedUser::from_token(&bearer, parts, state).await?;
 
         match user.role.as_str() {
             "super_admin" | "admin" => Ok(Self::Jwt(user)),
@@ -86,10 +88,29 @@ where
 /// accidentally-blank deployment cannot be unlocked with a blank bearer.
 fn legacy_token_matches(presented: &str) -> bool {
     let expected = std::env::var("ADMIN_TOKEN").unwrap_or_default();
-    if expected.is_empty() || expected.len() != presented.len() {
+    if expected.is_empty() {
         return false;
     }
-    expected.as_bytes().ct_eq(presented.as_bytes()).into()
+
+    // Compute both length and content checks unconditionally (mirroring the
+    // pattern in `src/api/auth.rs`) so the comparison stays constant-time
+    // with respect to the presented token — a short-circuit on length would
+    // leak the expected token length through timing. When lengths differ we
+    // hash against a zero-filled buffer sized to `expected` so `ct_eq` still
+    // sees a consistent workload.
+    let expected_bytes = expected.as_bytes();
+    let presented_bytes = presented.as_bytes();
+    let length_ok = expected_bytes.len() == presented_bytes.len();
+    let zero_pad;
+    let compare_bytes: &[u8] = if length_ok {
+        presented_bytes
+    } else {
+        zero_pad = vec![0u8; expected_bytes.len()];
+        &zero_pad
+    };
+    let content_ok: bool = expected_bytes.ct_eq(compare_bytes).into();
+
+    length_ok && content_ok
 }
 
 #[cfg(test)]

@@ -20,13 +20,26 @@ use tower::ServiceExt;
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
+/// Single global lock serializing every `std::env::set_var`/`remove_var`
+/// call in this integration binary. Per-helper `OnceLock`s stop each helper
+/// from mutating the env more than once, but distinct helpers' first-time
+/// initializers can still race under parallel tests — which violates
+/// `set_var`'s safety precondition. Taking this mutex before any mutation
+/// makes the writer window mutually exclusive across helpers.
+fn env_lock() -> &'static std::sync::Mutex<()> {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Build a fresh app backed by an isolated in-memory DB.
 async fn test_app() -> Router {
     // The /api/test/reset endpoint is only mounted when APP_ENV is "test" or
     // "development" (fail-closed). Set it once for the whole suite.
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
-        // Safety: called once before any test reads APP_ENV.
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: serialized by `env_lock()`; called once before any test
+        // reads APP_ENV.
         unsafe { std::env::set_var("APP_ENV", "test") };
     });
     let conn = db::init_memory().await.expect("failed to init test DB");
@@ -41,7 +54,9 @@ async fn test_app() -> Router {
 async fn test_app_with_auth() -> Router {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
-        // Safety: called once before any test that reads ADMIN_TOKEN runs.
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: serialized by `env_lock()`; called once before any test
+        // that reads ADMIN_TOKEN runs.
         unsafe { std::env::set_var("ADMIN_TOKEN", "test-secret-token") };
     });
     test_app().await
@@ -107,8 +122,10 @@ fn mint_admin_jwt(role: &str) -> String {
     // the env init here to keep ordering-independent.
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
-        // Safety: called once before any caller reads APP_ENV through
-        // the verifier; other suite helpers set the same value.
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: serialized by `env_lock()` with every other env mutator
+        // in this binary; called once before any caller reads APP_ENV
+        // through the verifier; other suite helpers set the same value.
         unsafe { std::env::set_var("APP_ENV", "test") };
     });
     poolpay::api::shared_verifier()
