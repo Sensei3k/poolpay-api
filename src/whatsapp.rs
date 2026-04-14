@@ -90,6 +90,36 @@ pub async fn send_message(
     Ok(())
 }
 
+/// Sends a text message as a quoted reply to an existing WhatsApp message.
+///
+/// Mirrors `send_message` but adds Green API's `quotedMessageId` field so the
+/// reply is threaded under the original receipt. `message_id_to_quote` must be
+/// the `idMessage` value from the notification that prompted this reply.
+pub async fn send_quoted_message(
+    client: &Client,
+    instance_id: &str,
+    api_token: &str,
+    chat_id: &str,
+    message_id_to_quote: &str,
+    message: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let url = api_url(instance_id, "sendMessage", api_token);
+
+    let body = serde_json::json!({
+        "chatId": chat_id,
+        "message": message,
+        "quotedMessageId": message_id_to_quote,
+    });
+
+    let response = client.post(&url).json(&body).send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await?;
+        return Err(format!("Green API error {}: {}", status, text).into());
+    }
+    Ok(())
+}
+
 /// Downloads a file from the URL in the given FileMessageData and saves it to DOWNLOAD_DIR.
 /// The filename is derived from the receipt ID to ensure uniqueness across messages.
 pub async fn download_file(

@@ -1,4 +1,4 @@
-use poolpay::{api, db, extractor, ingestion, parser, whatsapp};
+use poolpay::{api, db, extractor, ingestion, parser, replies, whatsapp};
 use poolpay::api::models::now_iso;
 
 use dotenv::dotenv;
@@ -132,7 +132,29 @@ async fn main() {
                                                     received_at: now_iso(),
                                                 };
                                                 match ingestion::ingest_receipt(&surreal_db, input).await {
-                                                    Ok(outcome) => info!(?outcome, "Ingestion outcome"),
+                                                    Ok(outcome) => {
+                                                        info!(?outcome, "Ingestion outcome");
+                                                        if let Some(reply) =
+                                                            replies::format_reply(&outcome, &parsed)
+                                                        {
+                                                            match whatsapp::send_quoted_message(
+                                                                &client,
+                                                                &instance_id,
+                                                                &api_token,
+                                                                cid,
+                                                                mid,
+                                                                &reply,
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(_) => info!(chat_id = cid, "Reply sent"),
+                                                                Err(e) => {
+                                                                    error!(error = %e, "Failed to send reply");
+                                                                    processing_ok = false;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                     Err(e) => {
                                                         error!(error = ?e, "Ingestion failed");
                                                         processing_ok = false;
@@ -145,36 +167,6 @@ async fn main() {
                                                 has_message_id = message_id.is_some(),
                                                 "Skipping ingestion — notification missing required ids"
                                             ),
-                                        }
-
-                                        if let Some(chat_id) = chat_id {
-                                            let sender = parsed.sender.unwrap_or_else(|| "unknown".to_string());
-                                            let bank = parsed.bank.unwrap_or_else(|| "unknown".to_string());
-                                            let amount = parsed.amount.unwrap_or_else(|| "unknown".to_string());
-
-                                            let reply = format!(
-                                                "✅ Sender: {}\nBank: {}\nAmount: {}",
-                                                sender, bank, amount,
-                                            );
-
-                                            match whatsapp::send_message(
-                                                &client,
-                                                &instance_id,
-                                                &api_token,
-                                                chat_id,
-                                                &reply,
-                                            )
-                                            .await
-                                            {
-                                                Ok(_) => info!(chat_id, "Reply sent"),
-                                                Err(e) => {
-                                                    error!(error = %e, "Failed to send reply");
-                                                    processing_ok = false;
-                                                }
-                                            }
-                                        } else {
-                                            error!("No chat_id found — cannot send reply");
-                                            processing_ok = false;
                                         }
                                     }
                                     Err(e) => {
