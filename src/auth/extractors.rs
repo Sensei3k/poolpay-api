@@ -67,22 +67,16 @@ impl GroupScopedAdmin {
     }
 }
 
-impl AuthenticatedUser {
-    /// Build an `AuthenticatedUser` from an already-parsed bearer token.
-    ///
-    /// Factored out of `from_request_parts` so extractors that need to make
-    /// a legacy-vs-JWT decision (see `auth::compat::AdminOrLegacyToken`) can
-    /// parse the `Authorization` header once and reuse the token string
-    /// rather than re-parsing and re-allocating it.
-    pub(crate) async fn from_token<S>(
-        token: &str,
-        parts: &mut Parts,
-        state: &S,
-    ) -> Result<Self, AppError>
-    where
-        S: Send + Sync,
-        DbConn: FromRef<S>,
-    {
+impl<S> FromRequestParts<S> for AuthenticatedUser
+where
+    S: Send + Sync,
+    DbConn: FromRef<S>,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let token = extract_bearer(parts)?;
+
         // The verifier is injected via Extension so it can be shared across
         // handlers without forcing every existing route onto a new state
         // type. Missing extension = misconfigured router = refuse.
@@ -91,7 +85,7 @@ impl AuthenticatedUser {
                 .await
                 .map_err(|_| AppError::Unauthorized)?;
 
-        let claims = verifier.verify_access(token).map_err(|e| {
+        let claims = verifier.verify_access(&token).map_err(|e| {
             // Attacker-controlled input; keep at debug to avoid log-amplification.
             // Reserve `warn!` for unexpected internal failures (e.g., DB errors).
             debug!(error = %e, "JWT verification failed");
@@ -120,19 +114,6 @@ impl AuthenticatedUser {
         }
 
         Ok(Self { user_id: claims.sub, role: user.role, token_version: user.token_version })
-    }
-}
-
-impl<S> FromRequestParts<S> for AuthenticatedUser
-where
-    S: Send + Sync,
-    DbConn: FromRef<S>,
-{
-    type Rejection = AppError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let token = extract_bearer(parts)?;
-        Self::from_token(&token, parts, state).await
     }
 }
 
@@ -173,7 +154,7 @@ pub async fn require_group_scope(
     }
 }
 
-pub(crate) fn extract_bearer(parts: &Parts) -> Result<String, AppError> {
+fn extract_bearer(parts: &Parts) -> Result<String, AppError> {
     let header = parts
         .headers
         .get(axum::http::header::AUTHORIZATION)
