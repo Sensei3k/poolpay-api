@@ -71,6 +71,11 @@ rsa = { version = "0.9", features = ["pem"] }
 # Base64url encoding for opaque refresh tokens
 base64 = "0.22"
 
+# Random bytes — ephemeral JWT key generation in dev/test and opaque refresh
+# token material. `rsa` already depends on `rand`, listing it explicitly keeps
+# the dependency intentional.
+rand = "0.8"
+
 [dev-dependencies]
 # HTTP service test utilities — used in API integration tests
 tower = { version = "0.5", features = ["util"] }
