@@ -306,5 +306,14 @@ impl CredentialFailureLimiter {
 }
 
 fn retry_after_secs(neg: &NotUntil<governor::clock::QuantaInstant>) -> u64 {
-    neg.wait_time_from(DefaultClock::default().now()).as_secs()
+    // Round up and floor at 1s: `Duration::as_secs()` truncates, so a sub-second
+    // wait would surface as `Retry-After: 0` and invite immediate retry loops.
+    let wait = neg.wait_time_from(DefaultClock::default().now());
+    let secs = wait.as_secs();
+    let rounded = if wait.subsec_nanos() > 0 {
+        secs.saturating_add(1)
+    } else {
+        secs
+    };
+    rounded.max(1)
 }
