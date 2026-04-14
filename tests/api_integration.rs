@@ -46,20 +46,69 @@ async fn test_app() -> Router {
     api::router(conn)
 }
 
-/// Build a fresh app with ADMIN_TOKEN set for admin endpoint tests.
+/// Build a fresh app with `ADMIN_TOKEN` set and two pre-seeded admin users
+/// (`TEST_SUPER_ADMIN_SUB` as `super_admin`, `TEST_ADMIN_SUB` as `admin`).
 ///
-/// Uses `OnceLock` so the env var is written exactly once across all tests,
-/// avoiding the data race that `set_var` would introduce under parallel
-/// test execution.
+/// `ADMIN_TOKEN` keeps every still-legacy admin handler reachable via
+/// `Bearer test-secret-token`. The seeded users let the BE-5 swap targets
+/// (currently `groups` and WhatsApp links) authenticate via JWTs minted by
+/// `mint_admin_jwt`, since `SuperAdminUser` re-reads `user.role` from the
+/// DB on every request — so the 403 test needs a real `admin` row, not just
+/// a JWT claiming `role: admin`.
+///
+/// `OnceLock` keeps `set_var` to a single mutation per process; `env_lock()`
+/// serialises that mutation against every other env writer in this binary.
 async fn test_app_with_auth() -> Router {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
         let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
         // Safety: serialized by `env_lock()`; called once before any test
-        // that reads ADMIN_TOKEN runs.
-        unsafe { std::env::set_var("ADMIN_TOKEN", "test-secret-token") };
+        // that reads ADMIN_TOKEN or APP_ENV runs. APP_ENV must be set
+        // before the first `api::router()` call so the JWT verifier can
+        // generate ephemeral RSA keys (prod fail-closed gate).
+        unsafe {
+            std::env::set_var("ADMIN_TOKEN", "test-secret-token");
+            std::env::set_var("APP_ENV", "test");
+        }
     });
-    test_app().await
+    let conn = db::init_memory().await.expect("failed to init test DB");
+    seed_test_admin_users(&conn).await;
+    api::router(conn)
+}
+
+const TEST_SUPER_ADMIN_SUB: &str = "test-super-admin";
+const TEST_ADMIN_SUB: &str = "test-admin";
+
+/// Insert two pre-baked admin user rows so JWT-gated handlers find a
+/// matching `user` record on the `claims.sub → user` lookup. Roles are
+/// fixed: `TEST_SUPER_ADMIN_SUB` is the only sub that should pass
+/// `SuperAdminUser`; `TEST_ADMIN_SUB` is the canonical 403 fixture.
+async fn seed_test_admin_users(db: &poolpay::db::DbConn) {
+    use poolpay::api::models::{DbUser, UserContent, now_iso};
+
+    for (sub, role) in [
+        (TEST_SUPER_ADMIN_SUB, "super_admin"),
+        (TEST_ADMIN_SUB, "admin"),
+    ] {
+        let now = now_iso();
+        let content = UserContent {
+            email: format!("{sub}@test.local"),
+            email_normalised: format!("{sub}@test.local"),
+            password_hash: None,
+            role: role.into(),
+            status: "active".into(),
+            token_version: 0,
+            must_reset_password: false,
+            created_at: now.clone(),
+            updated_at: now,
+            deleted_at: None,
+        };
+        let _: Option<DbUser> = db
+            .upsert(("user", sub))
+            .content(content)
+            .await
+            .expect("seed admin user");
+    }
 }
 
 async fn call(app: Router, req: Request<Body>) -> Response {
@@ -98,28 +147,24 @@ fn post_json_authed(uri: &str, body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
-/// Mint an admin access token signed by the same verifier the app uses,
-/// for the requested role (`super_admin` or `admin`). Per Plan 3 / BE-4:
-/// the helper is here so that BE-5's per-resource swap PRs can migrate
-/// tests off the legacy `Bearer test-secret-token` one resource at a
-/// time without having to thread the verifier through every call site.
+/// Mint an admin access token signed by the same verifier the app uses.
+/// Caller passes both `sub` (must match a seeded `user` row) and `role`
+/// (`super_admin` or `admin`) so a single test can sign tokens for
+/// distinct user fixtures — needed for the `SuperAdminUser` 403 case,
+/// which has to present a JWT for a real `admin`-role user.
 ///
-/// The minted token references a synthetic `test-admin-user` subject with
-/// `token_version=0`. BE-5 sub-PRs that exercise the JWT path through the
-/// real `SuperAdminUser` / `GroupScopedAdmin` extractors are responsible
-/// for seeding a matching `user` row before calling this helper —
-/// `AdminOrLegacyToken` is the only consumer in BE-4 itself, and its
-/// integration coverage seeds its own users.
-#[allow(dead_code)]
-fn mint_admin_jwt(role: &str) -> String {
+/// `SuperAdminUser` re-reads the role from the DB row (not the JWT
+/// claim), so the role argument here only populates the claim for
+/// signing; it is not currently used for authorisation or consistency
+/// checks against the DB user.
+fn mint_admin_jwt(sub: &str, role: &str) -> String {
     assert!(
         matches!(role, "super_admin" | "admin"),
         "mint_admin_jwt only mints admin-tier roles; got {role}"
     );
     // `shared_verifier()` fails closed if `APP_ENV` is not `test` /
-    // `development` and `JWT_KEYS` is absent. Callers in BE-5 may use
-    // this helper without going through `test_app()` first, so mirror
-    // the env init here to keep ordering-independent.
+    // `development` and `JWT_KEYS` is absent. Mirror the env init here
+    // so callers can use the helper without going through `test_app()`.
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
         let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
@@ -129,8 +174,58 @@ fn mint_admin_jwt(role: &str) -> String {
         unsafe { std::env::set_var("APP_ENV", "test") };
     });
     poolpay::api::shared_verifier()
-        .mint_access("test-admin-user", role, 0)
+        .mint_access(sub, role, 0)
         .expect("shared verifier must mint")
+}
+
+fn super_admin_bearer() -> String {
+    format!("Bearer {}", mint_admin_jwt(TEST_SUPER_ADMIN_SUB, "super_admin"))
+}
+
+fn admin_bearer() -> String {
+    format!("Bearer {}", mint_admin_jwt(TEST_ADMIN_SUB, "admin"))
+}
+
+fn post_json_jwt(uri: &str, body: serde_json::Value) -> Request<Body> {
+    post_json_jwt_with(uri, body, &super_admin_bearer())
+}
+
+fn post_json_jwt_with(uri: &str, body: serde_json::Value, bearer: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", bearer)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn patch_json_jwt(uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::PATCH)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", super_admin_bearer())
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn delete_req_jwt(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::DELETE)
+        .uri(uri)
+        .header("authorization", super_admin_bearer())
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn get_jwt(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("authorization", super_admin_bearer())
+        .body(Body::empty())
+        .unwrap()
 }
 
 fn patch_json_authed(uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -207,14 +302,30 @@ async fn admin_wrong_token_returns_401() {
 }
 
 #[tokio::test]
-async fn admin_correct_token_proceeds() {
+async fn create_group_super_admin_jwt_proceeds() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed("/api/admin/groups", serde_json::json!({"name": "New Group"})),
+        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "New Group"})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+/// BE-5a guard: groups endpoints are `SuperAdminUser`-gated, so a valid
+/// JWT for a real `admin`-role user must be rejected with 403. Pairs
+/// with `create_group_super_admin_jwt_proceeds` above (the 200/super-admin
+/// half) and the legacy `admin_*_returns_401` cases (the no-token /
+/// garbage-token half).
+#[tokio::test]
+async fn create_group_admin_role_jwt_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_jwt_with("/api/admin/groups", serde_json::json!({"name": "x"}), &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
 // ── GET /api/groups ──────────────────────────────────────────────────────────
@@ -253,10 +364,7 @@ async fn create_group_returns_201_with_body() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
-            "/api/admin/groups",
-            serde_json::json!({"name": "Beta Circle"}),
-        ),
+        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "Beta Circle"})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -272,10 +380,7 @@ async fn create_group_name_too_long_returns_400() {
     let long_name = "a".repeat(101);
     let resp = call(
         app,
-        post_json_authed(
-            "/api/admin/groups",
-            serde_json::json!({"name": long_name}),
-        ),
+        post_json_jwt("/api/admin/groups", serde_json::json!({"name": long_name})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -286,7 +391,7 @@ async fn create_group_empty_name_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed("/api/admin/groups", serde_json::json!({"name": "  "})),
+        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "  "})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -299,7 +404,7 @@ async fn update_group_name_only() {
     let app = test_app_with_auth().await;
     let resp = call(
         app.clone(),
-        patch_json_authed(
+        patch_json_jwt(
             "/api/admin/groups/1",
             serde_json::json!({"name": "Renamed Circle", "version": 1}),
         ),
@@ -316,7 +421,7 @@ async fn update_group_version_mismatch_returns_409() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        patch_json_authed(
+        patch_json_jwt(
             "/api/admin/groups/1",
             serde_json::json!({"name": "X", "version": 999}),
         ),
@@ -330,7 +435,7 @@ async fn update_group_version_mismatch_returns_409() {
 #[tokio::test]
 async fn delete_group_with_members_returns_409() {
     let app = test_app_with_auth().await;
-    let resp = call(app, delete_req_authed("/api/admin/groups/1")).await;
+    let resp = call(app, delete_req_jwt("/api/admin/groups/1")).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
 
@@ -444,10 +549,7 @@ async fn create_member_same_phone_different_group_allowed() {
     // Create a second group first.
     let resp = call(
         app.clone(),
-        post_json_authed(
-            "/api/admin/groups",
-            serde_json::json!({"name": "Second Group"}),
-        ),
+        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "Second Group"})),
     )
     .await;
     let new_group: serde_json::Value = json_body(resp).await;
@@ -688,10 +790,7 @@ async fn create_cycle_recipient_wrong_group_returns_400() {
     // Create a second group.
     let resp = call(
         app.clone(),
-        post_json_authed(
-            "/api/admin/groups",
-            serde_json::json!({"name": "Other Group"}),
-        ),
+        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "Other Group"})),
     )
     .await;
     let other_group: serde_json::Value = json_body(resp).await;
@@ -1280,22 +1379,13 @@ async fn unauthorized_error_has_json_error_field() {
 #[tokio::test]
 async fn conflict_error_has_json_error_field() {
     let app = test_app_with_auth().await;
-    let resp = call(app, delete_req_authed("/api/admin/groups/1")).await;
+    let resp = call(app, delete_req_jwt("/api/admin/groups/1")).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: serde_json::Value = json_body(resp).await;
     assert!(body.get("error").is_some(), "409 must have an 'error' field");
 }
 
 // ── WhatsApp links (admin CRUD) ─────────────────────────────────────────────
-
-fn get_authed(uri: &str) -> Request<Body> {
-    Request::builder()
-        .method(Method::GET)
-        .uri(uri)
-        .header("authorization", "Bearer test-secret-token")
-        .body(Body::empty())
-        .unwrap()
-}
 
 #[tokio::test]
 async fn create_whatsapp_link_no_auth_returns_401() {
@@ -1325,12 +1415,30 @@ async fn delete_whatsapp_link_no_auth_returns_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// BE-5f guard: WhatsApp link endpoints are `SuperAdminUser`-gated, so a
+/// JWT for a real `admin`-role user (no `super_admin` privilege) must
+/// be rejected with 403. Mirrors `create_group_admin_role_jwt_returns_403`.
+#[tokio::test]
+async fn create_whatsapp_link_admin_role_jwt_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_jwt_with(
+            "/api/admin/whatsapp-links",
+            serde_json::json!({"chatId": "2349000099999@g.us", "groupId": "1"}),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn create_whatsapp_link_returns_201_with_body() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/whatsapp-links",
             serde_json::json!({"chatId": "2349000000001@g.us", "groupId": "1"}),
         ),
@@ -1350,7 +1458,7 @@ async fn create_whatsapp_link_missing_group_returns_404() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/whatsapp-links",
             serde_json::json!({"chatId": "2349000000001@g.us", "groupId": "999"}),
         ),
@@ -1366,21 +1474,21 @@ async fn create_whatsapp_link_deleted_group_returns_404() {
     // Create a group, then soft-delete it.
     let resp = call(
         app.clone(),
-        post_json_authed("/api/admin/groups", serde_json::json!({"name": "Doomed"})),
+        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "Doomed"})),
     )
     .await;
     let group: serde_json::Value = json_body(resp).await;
     let gid = group["id"].as_str().unwrap().to_string();
     let del = call(
         app.clone(),
-        delete_req_authed(&format!("/api/admin/groups/{gid}")),
+        delete_req_jwt(&format!("/api/admin/groups/{gid}")),
     )
     .await;
     assert_eq!(del.status(), StatusCode::NO_CONTENT);
 
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/whatsapp-links",
             serde_json::json!({"chatId": "2349000000002@g.us", "groupId": gid}),
         ),
@@ -1394,10 +1502,10 @@ async fn create_whatsapp_link_duplicate_chat_id_returns_409() {
     let app = test_app_with_auth().await;
     let body = serde_json::json!({"chatId": "2349000000003@g.us", "groupId": "1"});
 
-    let first = call(app.clone(), post_json_authed("/api/admin/whatsapp-links", body.clone())).await;
+    let first = call(app.clone(), post_json_jwt("/api/admin/whatsapp-links", body.clone())).await;
     assert_eq!(first.status(), StatusCode::CREATED);
 
-    let second = call(app, post_json_authed("/api/admin/whatsapp-links", body)).await;
+    let second = call(app, post_json_jwt("/api/admin/whatsapp-links", body)).await;
     assert_eq!(second.status(), StatusCode::CONFLICT);
 }
 
@@ -1406,7 +1514,7 @@ async fn create_whatsapp_link_empty_chat_id_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/whatsapp-links",
             serde_json::json!({"chatId": "   ", "groupId": "1"}),
         ),
@@ -1420,7 +1528,7 @@ async fn create_whatsapp_link_empty_group_id_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/whatsapp-links",
             serde_json::json!({"chatId": "2349000000004@g.us", "groupId": ""}),
         ),
@@ -1432,7 +1540,7 @@ async fn create_whatsapp_link_empty_group_id_returns_400() {
 #[tokio::test]
 async fn get_whatsapp_links_returns_200_empty_on_fresh_db() {
     let app = test_app_with_auth().await;
-    let resp = call(app, get_authed("/api/admin/whatsapp-links")).await;
+    let resp = call(app, get_jwt("/api/admin/whatsapp-links")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let links: Vec<serde_json::Value> = json_body(resp).await;
     assert_eq!(links.len(), 0);
@@ -1444,7 +1552,7 @@ async fn get_whatsapp_links_excludes_soft_deleted() {
 
     let created = call(
         app.clone(),
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/whatsapp-links",
             serde_json::json!({"chatId": "2349000000005@g.us", "groupId": "1"}),
         ),
@@ -1454,18 +1562,18 @@ async fn get_whatsapp_links_excludes_soft_deleted() {
     let id = link["id"].as_str().unwrap().to_string();
 
     let before: Vec<serde_json::Value> =
-        json_body(call(app.clone(), get_authed("/api/admin/whatsapp-links")).await).await;
+        json_body(call(app.clone(), get_jwt("/api/admin/whatsapp-links")).await).await;
     assert_eq!(before.len(), 1);
 
     let del = call(
         app.clone(),
-        delete_req_authed(&format!("/api/admin/whatsapp-links/{id}")),
+        delete_req_jwt(&format!("/api/admin/whatsapp-links/{id}")),
     )
     .await;
     assert_eq!(del.status(), StatusCode::NO_CONTENT);
 
     let after: Vec<serde_json::Value> =
-        json_body(call(app, get_authed("/api/admin/whatsapp-links")).await).await;
+        json_body(call(app, get_jwt("/api/admin/whatsapp-links")).await).await;
     assert_eq!(after.len(), 0, "soft-deleted links must be excluded");
 }
 
@@ -1474,7 +1582,7 @@ async fn delete_whatsapp_link_returns_204() {
     let app = test_app_with_auth().await;
     let created = call(
         app.clone(),
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/whatsapp-links",
             serde_json::json!({"chatId": "2349000000006@g.us", "groupId": "1"}),
         ),
@@ -1485,7 +1593,7 @@ async fn delete_whatsapp_link_returns_204() {
 
     let resp = call(
         app,
-        delete_req_authed(&format!("/api/admin/whatsapp-links/{id}")),
+        delete_req_jwt(&format!("/api/admin/whatsapp-links/{id}")),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -1496,7 +1604,7 @@ async fn delete_whatsapp_link_nonexistent_returns_404() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        delete_req_authed("/api/admin/whatsapp-links/does-not-exist"),
+        delete_req_jwt("/api/admin/whatsapp-links/does-not-exist"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -1509,7 +1617,7 @@ async fn delete_whatsapp_link_allows_relinking_same_chat_id() {
 
     let first = call(
         app.clone(),
-        post_json_authed("/api/admin/whatsapp-links", body.clone()),
+        post_json_jwt("/api/admin/whatsapp-links", body.clone()),
     )
     .await;
     let link: serde_json::Value = json_body(first).await;
@@ -1517,12 +1625,12 @@ async fn delete_whatsapp_link_allows_relinking_same_chat_id() {
 
     call(
         app.clone(),
-        delete_req_authed(&format!("/api/admin/whatsapp-links/{id}")),
+        delete_req_jwt(&format!("/api/admin/whatsapp-links/{id}")),
     )
     .await;
 
     // Recreate the same chat_id — should succeed because previous row is soft-deleted.
-    let second = call(app, post_json_authed("/api/admin/whatsapp-links", body)).await;
+    let second = call(app, post_json_jwt("/api/admin/whatsapp-links", body)).await;
     assert_eq!(second.status(), StatusCode::CREATED);
 }
 
