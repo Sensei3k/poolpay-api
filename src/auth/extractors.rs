@@ -34,7 +34,6 @@ pub struct SuperAdminUser(pub AuthenticatedUser);
 /// Wraps an `AuthenticatedUser` whose access to a specific `group_id` has
 /// been verified. Built via `ensure()` so handlers can resolve `group_id`
 /// from the path or a parent record before running the check.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct GroupScopedAdmin(pub AuthenticatedUser);
 

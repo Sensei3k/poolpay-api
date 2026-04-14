@@ -2061,7 +2061,7 @@ async fn create_payment_admin_without_group_admin_returns_403() {
 #[tokio::test]
 async fn create_payment_scoped_admin_proceeds() {
     let app = test_app_with_auth().await;
-    // Fixture cycle 3 has no payments yet; member 4 belongs to group 1.
+    // Member 4 has no payment in fixture cycle 3 yet; member 4 belongs to group 1.
     let resp = call(
         app,
         post_json_jwt_with(
