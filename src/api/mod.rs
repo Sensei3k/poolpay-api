@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod auth_endpoints;
 pub mod handlers;
 pub mod models;
 
@@ -48,7 +49,10 @@ pub fn router(db: DbConn) -> Router {
         // Admin WhatsApp link endpoints
         .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
         .route("/api/admin/whatsapp-links", post(create_whatsapp_link))
-        .route("/api/admin/whatsapp-links/{id}", delete(delete_whatsapp_link));
+        .route("/api/admin/whatsapp-links/{id}", delete(delete_whatsapp_link))
+        // HMAC-gated auth endpoints (called by NextAuth)
+        .route("/api/auth/verify-credentials", post(auth_endpoints::verify_credentials))
+        .route("/api/auth/ensure-user", post(auth_endpoints::ensure_user));
 
     if std::env::var("APP_ENV").as_deref() != Ok("production") {
         router = router.route("/api/test/reset", post(reset_db));

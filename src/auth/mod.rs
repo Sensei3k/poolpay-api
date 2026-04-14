@@ -1,0 +1,8 @@
+//! Authentication primitives — password hashing, HMAC signing, bootstrap.
+//!
+//! This module is the foundation layer of the auth stack (Plan 3, BE-1).
+//! JWT, refresh tokens, and request extractors land in subsequent increments.
+
+pub mod bootstrap;
+pub mod hmac;
+pub mod password;

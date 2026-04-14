@@ -3007,14 +3007,19 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 name = "poolpay"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "axum",
  "chrono",
  "dotenv",
+ "hex",
+ "hmac",
  "http-body-util",
+ "password-hash",
  "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "surrealdb",
  "surrealdb-types",

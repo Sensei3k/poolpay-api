@@ -1,4 +1,4 @@
-use poolpay::{api, db, extractor, ingestion, parser, replies, whatsapp};
+use poolpay::{api, auth, db, extractor, ingestion, parser, replies, whatsapp};
 use poolpay::api::models::now_iso;
 
 use dotenv::dotenv;
@@ -34,6 +34,10 @@ async fn main() {
     let surreal_db = db::init()
         .await
         .expect("Failed to initialise SurrealDB");
+
+    if let Err(e) = auth::bootstrap::ensure_admin_user(&surreal_db).await {
+        error!(error = %e, "Bootstrap admin seeding failed");
+    }
 
     // Spawn the Axum HTTP server.
     // Monitored below — if the server dies the process exits rather than

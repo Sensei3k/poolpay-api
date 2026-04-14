@@ -55,6 +55,48 @@ async fn define_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
     )
     .await?
     .check()?;
+    define_auth_tables(db).await?;
+    Ok(())
+}
+
+/// Auth-specific tables are SCHEMAFULL so the security-critical shape is
+/// enforced at the DB layer rather than relying on application checks alone.
+async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+    db.query(
+        "DEFINE TABLE IF NOT EXISTS user SCHEMAFULL;
+         DEFINE FIELD IF NOT EXISTS email ON user TYPE string;
+         DEFINE FIELD IF NOT EXISTS email_normalised ON user TYPE string;
+         DEFINE FIELD IF NOT EXISTS password_hash ON user TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS role ON user TYPE string ASSERT $value IN ['admin', 'member'];
+         DEFINE FIELD IF NOT EXISTS status ON user TYPE string ASSERT $value IN ['active', 'disabled'];
+         DEFINE FIELD IF NOT EXISTS token_version ON user TYPE int;
+         DEFINE FIELD IF NOT EXISTS must_reset_password ON user TYPE bool;
+         DEFINE FIELD IF NOT EXISTS created_at ON user TYPE string;
+         DEFINE FIELD IF NOT EXISTS updated_at ON user TYPE string;
+         DEFINE FIELD IF NOT EXISTS deleted_at ON user TYPE option<string>;
+         DEFINE INDEX IF NOT EXISTS user_email_normalised ON user FIELDS email_normalised UNIQUE;
+
+         DEFINE TABLE IF NOT EXISTS user_identity SCHEMAFULL;
+         DEFINE FIELD IF NOT EXISTS user_id ON user_identity TYPE string;
+         DEFINE FIELD IF NOT EXISTS provider ON user_identity TYPE string
+             ASSERT $value IN ['google', 'github', 'apple', 'credentials'];
+         DEFINE FIELD IF NOT EXISTS provider_subject ON user_identity TYPE string;
+         DEFINE FIELD IF NOT EXISTS email_at_link ON user_identity TYPE string;
+         DEFINE FIELD IF NOT EXISTS created_at ON user_identity TYPE string;
+         DEFINE INDEX IF NOT EXISTS user_identity_provider_subject
+             ON user_identity FIELDS provider, provider_subject UNIQUE;
+
+         DEFINE TABLE IF NOT EXISTS auth_event SCHEMAFULL;
+         DEFINE FIELD IF NOT EXISTS user_id ON auth_event TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS event_type ON auth_event TYPE string;
+         DEFINE FIELD IF NOT EXISTS ip ON auth_event TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS user_agent ON auth_event TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS success ON auth_event TYPE bool;
+         DEFINE FIELD IF NOT EXISTS reason ON auth_event TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS created_at ON auth_event TYPE string;",
+    )
+    .await?
+    .check()?;
     Ok(())
 }
 
