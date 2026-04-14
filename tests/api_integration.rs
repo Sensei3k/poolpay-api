@@ -154,8 +154,9 @@ fn post_json_authed(uri: &str, body: serde_json::Value) -> Request<Body> {
 /// which has to present a JWT for a real `admin`-role user.
 ///
 /// `SuperAdminUser` re-reads the role from the DB row (not the JWT
-/// claim), so the role argument here only feeds the claim and is checked
-/// at decode-time consistency, not authorisation.
+/// claim), so the role argument here only populates the claim for
+/// signing; it is not currently used for authorisation or consistency
+/// checks against the DB user.
 fn mint_admin_jwt(sub: &str, role: &str) -> String {
     assert!(
         matches!(role, "super_admin" | "admin"),
