@@ -699,10 +699,10 @@ pub async fn delete_whatsapp_link(
     let existing =
         existing.ok_or_else(|| AppError::NotFound(format!("whatsapp link {id} does not exist")))?;
 
+    // Idempotent: if already soft-deleted, return 204 without mutating.
+    // Matches the semantics of `delete_group` / `delete_member`.
     if existing.deleted_at.is_some() {
-        return Err(AppError::NotFound(format!(
-            "whatsapp link {id} does not exist"
-        )));
+        return Ok(StatusCode::NO_CONTENT);
     }
 
     let now = now_iso();
