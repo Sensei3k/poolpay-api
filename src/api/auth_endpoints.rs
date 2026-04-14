@@ -227,6 +227,15 @@ async fn record_auth_event(
         reason: reason.map(str::to_string),
         created_at: now_iso(),
     };
-    let _: Option<DbAuthEvent> = db.create("auth_event").content(content).await?;
-    Ok(())
+    // auth_event writes are fire-and-forget at every callsite (we don't want
+    // telemetry failure to block a login), but a silent swallow would hide a
+    // regression that stops populating the audit trail. Warn here so ops can
+    // alert on "auth_event insert failed" without affecting the request path.
+    match db.create::<Option<DbAuthEvent>>("auth_event").content(content).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            tracing::warn!(error = %e, event_type, "auth_event insert failed");
+            Err(e.into())
+        }
+    }
 }
