@@ -290,7 +290,8 @@ fn is_expired(expires_at: &str) -> bool {
 fn refresh_ttl_secs() -> i64 {
     std::env::var("JWT_REFRESH_TTL_SECS")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|v| *v > 0)
         .unwrap_or(DEFAULT_REFRESH_TTL_SECS)
 }
 
