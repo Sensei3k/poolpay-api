@@ -53,6 +53,13 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 
+# Rate limiting — tower-governor mounts a per-IP limiter on the auth endpoints;
+# governor + dashmap back the composite (ip, email) failure limiter that blunts
+# credential brute-force on /api/auth/verify-credentials
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+governor = "0.10"
+dashmap = "6"
+
 [dev-dependencies]
 # HTTP service test utilities — used in API integration tests
 tower = { version = "0.5", features = ["util"] }
