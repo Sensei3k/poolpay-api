@@ -131,13 +131,13 @@ curl -X POST http://localhost:8080/api/test/reset
 
 All IDs are SurrealDB-generated strings (not integers). The `EntityId` type alias (`String`) is the single point of control for ID representation across the codebase.
 
-**Groups** — Ajo savings circles
+**Groups** — PoolPay savings groups
 ```json
 {
   "id": "abc123",
   "name": "Family Circle",
   "status": "active",
-  "description": "Monthly family ajo",
+  "description": "Monthly family pool",
   "createdAt": "2026-01-01T00:00:00Z",
   "updatedAt": "2026-01-01T00:00:00Z",
   "version": 1

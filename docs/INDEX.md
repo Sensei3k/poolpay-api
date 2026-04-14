@@ -113,7 +113,7 @@ Two concurrent tasks:
 2. **API Server** (port 8080)
    - Public read endpoints for groups, members, cycles, payments
    - Admin write endpoints (bearer token auth) for CRUD operations
-   - Manages multi-group ajo circles with soft delete and version control
+   - Manages multi-group PoolPay savings groups with soft delete and version control
    - Development-only database reset endpoint
 
 See [RUNBOOK.md - Service Architecture](./RUNBOOK.md#service-architecture) for details.
