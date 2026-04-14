@@ -235,6 +235,43 @@ async fn ensure_user_unverified_email_never_links_to_existing_account() {
     assert_ne!(v2["userId"].as_str().unwrap(), verified_id);
 }
 
+// ── Field length caps (H-2) ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn verify_credentials_rejects_oversized_email() {
+    let (app, _db) = test_app().await;
+    let body = serde_json::json!({
+        "email": format!("{}@example.com", "a".repeat(400)),
+        "password": BOOTSTRAP_PASSWORD,
+    });
+    let resp = call(app, hmac_request("/api/auth/verify-credentials", &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn verify_credentials_rejects_oversized_password() {
+    let (app, _db) = test_app().await;
+    let body = serde_json::json!({
+        "email": BOOTSTRAP_EMAIL,
+        "password": "x".repeat(2000),
+    });
+    let resp = call(app, hmac_request("/api/auth/verify-credentials", &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn ensure_user_rejects_oversized_provider_subject() {
+    let (app, _db) = test_app().await;
+    let body = serde_json::json!({
+        "provider": "google",
+        "providerSubject": "s".repeat(300),
+        "email": "long-sub@example.com",
+        "emailVerified": true,
+    });
+    let resp = call(app, hmac_request("/api/auth/ensure-user", &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]

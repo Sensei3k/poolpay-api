@@ -21,6 +21,13 @@ use crate::db::DbConn;
 
 const CREDENTIALS_PROVIDER: &str = "credentials";
 
+// Per-field length caps. HMAC already caps the whole body at 1 MiB, but within
+// that budget a multi-hundred-KB password would burn Argon2 CPU and a
+// pathological provider_subject would bloat the DB. Reject at the edge.
+const MAX_EMAIL_LEN: usize = 320; // RFC 5321 local+domain max
+const MAX_PASSWORD_LEN: usize = 1024;
+const MAX_PROVIDER_SUBJECT_LEN: usize = 255;
+
 // ── verify-credentials ────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -43,6 +50,12 @@ pub async fn verify_credentials(
     State(db): State<DbConn>,
     HmacVerifiedJson(req): HmacVerifiedJson<VerifyCredentialsRequest>,
 ) -> Result<Json<VerifyCredentialsResponse>, AppError> {
+    if req.email.len() > MAX_EMAIL_LEN {
+        return Err(AppError::BadRequest("email too long".into()));
+    }
+    if req.password.len() > MAX_PASSWORD_LEN {
+        return Err(AppError::BadRequest("password too long".into()));
+    }
     let email_normalised = req.email.trim().to_lowercase();
     if email_normalised.is_empty() || req.password.is_empty() {
         let _ = record_auth_event(&db, None, "login_failure", false, Some("missing_fields")).await;
@@ -126,8 +139,14 @@ pub async fn ensure_user(
     if req.provider_subject.trim().is_empty() {
         return Err(AppError::BadRequest("providerSubject required".into()));
     }
+    if req.provider_subject.len() > MAX_PROVIDER_SUBJECT_LEN {
+        return Err(AppError::BadRequest("providerSubject too long".into()));
+    }
     if req.email.trim().is_empty() {
         return Err(AppError::BadRequest("email required".into()));
+    }
+    if req.email.len() > MAX_EMAIL_LEN {
+        return Err(AppError::BadRequest("email too long".into()));
     }
 
     // Same subject twice → idempotent reuse.
