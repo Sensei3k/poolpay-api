@@ -11,7 +11,12 @@ use axum::{
 use http_body_util::BodyExt;
 use poolpay::{
     api,
-    auth::{bootstrap, hmac::sign_for_testing, password},
+    auth::{
+        bootstrap,
+        hmac::sign_for_testing,
+        password,
+        rate_limit::{RateLimitConfig, TEST_PEER_IP_HEADER},
+    },
     db,
 };
 use std::sync::OnceLock;
@@ -37,13 +42,39 @@ fn init_env() {
 }
 
 async fn test_app() -> (Router, poolpay::db::DbConn) {
+    build_app(lax_rate_cfg()).await
+}
+
+async fn build_app(rate_cfg: RateLimitConfig) -> (Router, poolpay::db::DbConn) {
     init_env();
     let conn = db::init_memory().await.expect("failed to init test DB");
     bootstrap::ensure_admin_user(&conn)
         .await
         .expect("bootstrap seed must succeed");
-    let router = api::router(conn.clone());
+    let router = api::router_with_config(conn.clone(), rate_cfg);
     (router, conn)
+}
+
+/// Non-restrictive config used by every non-rate-limit test. Large buckets so
+/// the existing tests cannot trip a 429 by accident.
+fn lax_rate_cfg() -> RateLimitConfig {
+    RateLimitConfig {
+        per_ip_per_minute: 60,
+        per_ip_burst: 1000,
+        credential_failure_limit: 1000,
+        credential_failure_window_secs: 900,
+        trust_proxy_headers: false,
+        test_mode: true,
+    }
+}
+
+fn hmac_request_with_ip(uri: &str, body: &serde_json::Value, peer_ip: &str) -> Request<Body> {
+    let mut req = hmac_request(uri, body);
+    req.headers_mut().insert(
+        TEST_PEER_IP_HEADER,
+        peer_ip.parse().expect("valid header value"),
+    );
+    req
 }
 
 fn hmac_request(uri: &str, body: &serde_json::Value) -> Request<Body> {
@@ -284,6 +315,233 @@ async fn bootstrap_is_idempotent() {
         .unwrap();
     let counts: Vec<i64> = resp.take("count").unwrap_or_default();
     assert_eq!(counts.first().copied().unwrap_or(0), 1);
+}
+
+// ── Rate limiting (Plan 3 / BE-2) ─────────────────────────────────────────────
+
+fn strict_credential_cfg() -> RateLimitConfig {
+    // Composite limiter: 5 failures per 900s. Per-IP stays generous so it
+    // doesn't overshadow the composite limit in these tests.
+    RateLimitConfig {
+        per_ip_per_minute: 60,
+        per_ip_burst: 1000,
+        credential_failure_limit: 5,
+        credential_failure_window_secs: 900,
+        trust_proxy_headers: false,
+        test_mode: true,
+    }
+}
+
+fn strict_per_ip_cfg() -> RateLimitConfig {
+    // Per-IP limiter with a tiny burst so tests can exhaust it in-process.
+    // `per_ip_per_minute=60` → one replenish per second; burst=2 means the
+    // third consecutive hit gets 429.
+    RateLimitConfig {
+        per_ip_per_minute: 60,
+        per_ip_burst: 2,
+        credential_failure_limit: 1000,
+        credential_failure_window_secs: 900,
+        trust_proxy_headers: false,
+        test_mode: true,
+    }
+}
+
+#[tokio::test]
+async fn credential_failure_limit_returns_429_after_limit() {
+    let (app, _db) = build_app(strict_credential_cfg()).await;
+    let body = serde_json::json!({
+        "email": BOOTSTRAP_EMAIL,
+        "password": "wrong",
+    });
+
+    for _ in 0..5 {
+        let resp = call(
+            app.clone(),
+            hmac_request_with_ip("/api/auth/verify-credentials", &body, "10.0.0.1"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // 6th failure from the same (ip, email) exhausts the bucket → 429.
+    let resp = call(
+        app,
+        hmac_request_with_ip("/api/auth/verify-credentials", &body, "10.0.0.1"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        resp.headers().contains_key("retry-after"),
+        "429 must carry a Retry-After header"
+    );
+}
+
+#[tokio::test]
+async fn credential_failure_limit_isolates_by_email() {
+    let (app, _db) = build_app(strict_credential_cfg()).await;
+
+    // Exhaust the bucket for ghost-a@.
+    let body_a = serde_json::json!({ "email": "ghost-a@example.com", "password": "x" });
+    for _ in 0..5 {
+        let resp = call(
+            app.clone(),
+            hmac_request_with_ip("/api/auth/verify-credentials", &body_a, "10.0.0.2"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // Same IP, different email → still 401, not 429.
+    let body_b = serde_json::json!({ "email": "ghost-b@example.com", "password": "x" });
+    let resp = call(
+        app,
+        hmac_request_with_ip("/api/auth/verify-credentials", &body_b, "10.0.0.2"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn credential_failure_limit_isolates_by_ip() {
+    let (app, _db) = build_app(strict_credential_cfg()).await;
+    let body = serde_json::json!({ "email": "ghost@example.com", "password": "x" });
+
+    for _ in 0..5 {
+        let resp = call(
+            app.clone(),
+            hmac_request_with_ip("/api/auth/verify-credentials", &body, "10.0.0.3"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // Different IP, same email → still 401, not 429.
+    let resp = call(
+        app,
+        hmac_request_with_ip("/api/auth/verify-credentials", &body, "10.0.0.99"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn credential_failure_limit_is_not_consumed_by_success() {
+    let (app, _db) = build_app(strict_credential_cfg()).await;
+
+    // Burn 4 failures against the real admin account.
+    let bad = serde_json::json!({
+        "email": BOOTSTRAP_EMAIL,
+        "password": "wrong",
+    });
+    for _ in 0..4 {
+        let resp = call(
+            app.clone(),
+            hmac_request_with_ip("/api/auth/verify-credentials", &bad, "10.0.0.4"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // A correct password must not consume the remaining slot.
+    let good = serde_json::json!({
+        "email": BOOTSTRAP_EMAIL,
+        "password": BOOTSTRAP_PASSWORD,
+    });
+    let ok = call(
+        app.clone(),
+        hmac_request_with_ip("/api/auth/verify-credentials", &good, "10.0.0.4"),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    // Hence one more failure is still allowed (5th failure total, still 401).
+    let resp5 = call(
+        app.clone(),
+        hmac_request_with_ip("/api/auth/verify-credentials", &bad, "10.0.0.4"),
+    )
+    .await;
+    assert_eq!(resp5.status(), StatusCode::UNAUTHORIZED);
+
+    // The 6th failure finally exhausts the bucket.
+    let resp6 = call(
+        app,
+        hmac_request_with_ip("/api/auth/verify-credentials", &bad, "10.0.0.4"),
+    )
+    .await;
+    assert_eq!(resp6.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn per_ip_limit_returns_429_after_burst() {
+    let (app, _db) = build_app(strict_per_ip_cfg()).await;
+    let body = serde_json::json!({
+        "provider": "google",
+        "providerSubject": "sub-rate-1",
+        "email": "rate@example.com",
+    });
+
+    // First two requests fit the burst.
+    for _ in 0..2 {
+        let resp = call(
+            app.clone(),
+            hmac_request_with_ip("/api/auth/ensure-user", &body, "10.0.1.1"),
+        )
+        .await;
+        // Either 200 (first) or 200 (second idempotent); never 429 yet.
+        assert!(
+            resp.status() == StatusCode::OK,
+            "first burst hits must succeed, got {}",
+            resp.status()
+        );
+    }
+
+    // Third consecutive hit from the same IP exceeds the burst → 429. Tower
+    // governor replies 429 before the handler runs, so HMAC validity is
+    // irrelevant.
+    let resp = call(
+        app,
+        hmac_request_with_ip("/api/auth/ensure-user", &body, "10.0.1.1"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn per_ip_limit_isolates_by_ip() {
+    let (app, _db) = build_app(strict_per_ip_cfg()).await;
+    let body = serde_json::json!({
+        "provider": "google",
+        "providerSubject": "sub-rate-2",
+        "email": "rate2@example.com",
+    });
+
+    // Exhaust the bucket from one IP.
+    for _ in 0..2 {
+        let _ = call(
+            app.clone(),
+            hmac_request_with_ip("/api/auth/ensure-user", &body, "10.0.2.1"),
+        )
+        .await;
+    }
+    let blocked = call(
+        app.clone(),
+        hmac_request_with_ip("/api/auth/ensure-user", &body, "10.0.2.1"),
+    )
+    .await;
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // A fresh IP must not inherit the neighbour's empty bucket.
+    let other = serde_json::json!({
+        "provider": "google",
+        "providerSubject": "sub-rate-2",
+        "email": "rate2@example.com",
+    });
+    let ok = call(
+        app,
+        hmac_request_with_ip("/api/auth/ensure-user", &other, "10.0.2.99"),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
 }
 
 // ── Password primitives sanity check ──────────────────────────────────────────

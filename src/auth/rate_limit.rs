@@ -278,9 +278,12 @@ impl CredentialFailureLimiter {
         let window = cfg.credential_failure_window_secs.max(1);
 
         // Bucket of size `limit` that replenishes one cell every
-        // `window / limit` seconds — a continuous-refill analogue of
-        // "N failures per window". E.g. 5 per 900s → one slot every 180s.
-        let replenish = Duration::from_secs(window / u64::from(limit.get()));
+        // `window / limit` — a continuous-refill analogue of "N failures per
+        // window". E.g. 5 per 900s → one slot every 180s. Computed in
+        // milliseconds so very high limits (large default in tests) still
+        // produce a non-zero period.
+        let replenish_ms = (window * 1000 / u64::from(limit.get())).max(1);
+        let replenish = Duration::from_millis(replenish_ms);
         let quota = Quota::with_period(replenish)
             .expect("credential-failure replenish period must be non-zero")
             .allow_burst(limit);
