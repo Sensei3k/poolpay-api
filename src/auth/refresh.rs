@@ -106,8 +106,15 @@ pub async fn rotate(
     // revoke below is — but they short-circuit the obvious cases without
     // writing a new row first.
     if row.revoked_at.is_some() {
-        handle_reuse(db, &row).await;
-        return Err(RefreshError::ReuseDetected);
+        // A revoked row with `replaced_by` set means a rotation already
+        // consumed this token — presenting it again is the theft signal.
+        // A revoked row with `replaced_by` still None is a family revocation
+        // (e.g. /logout), which is expected post-logout use, not reuse.
+        if row.replaced_by.is_some() {
+            handle_reuse(db, &row).await;
+            return Err(RefreshError::ReuseDetected);
+        }
+        return Err(RefreshError::NotFound);
     }
     if is_expired(&row.expires_at) {
         return Err(RefreshError::Expired);
