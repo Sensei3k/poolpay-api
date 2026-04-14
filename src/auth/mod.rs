@@ -6,3 +6,4 @@
 pub mod bootstrap;
 pub mod hmac;
 pub mod password;
+pub mod rate_limit;

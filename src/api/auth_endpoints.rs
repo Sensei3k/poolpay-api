@@ -8,7 +8,7 @@
 //! never auto-linked on email match. A second provider for the same person
 //! becomes a deliberate, authenticated FE linking flow (not in BE-1).
 
-use axum::{Json, extract::State};
+use axum::{Extension, Json, extract::State};
 use serde::{Deserialize, Serialize};
 
 use crate::api::models::{
@@ -17,6 +17,7 @@ use crate::api::models::{
 };
 use crate::auth::hmac::HmacVerifiedJson;
 use crate::auth::password;
+use crate::auth::rate_limit::{ClientIp, CredentialFailureLimiter};
 use crate::db::DbConn;
 
 const CREDENTIALS_PROVIDER: &str = "credentials";
@@ -48,6 +49,8 @@ pub struct VerifyCredentialsResponse {
 
 pub async fn verify_credentials(
     State(db): State<DbConn>,
+    Extension(limiter): Extension<CredentialFailureLimiter>,
+    ClientIp(client_ip): ClientIp,
     HmacVerifiedJson(req): HmacVerifiedJson<VerifyCredentialsRequest>,
 ) -> Result<Json<VerifyCredentialsResponse>, AppError> {
     if req.email.len() > MAX_EMAIL_LEN {
@@ -57,24 +60,113 @@ pub async fn verify_credentials(
         return Err(AppError::BadRequest("password too long".into()));
     }
     let email_normalised = req.email.trim().to_lowercase();
-    if email_normalised.is_empty() || req.password.is_empty() {
-        let _ = record_auth_event(&db, None, "login_failure", false, Some("missing_fields")).await;
-        return Err(AppError::Unauthorized);
+
+    // Run the actual credential check. Success and failure produce identical
+    // error shapes to the caller (`AppError::Unauthorized` — mapped to 401),
+    // but failure carries the `user_id` (if any) and a reason tag so we can
+    // emit a precise `auth_event` and charge the composite limiter.
+    let result = authenticate_credentials(&db, &email_normalised, &req.password).await;
+
+    let client_ip_str = client_ip.to_string();
+    match result {
+        Ok(user) => {
+            let user_id = record_id_to_string(user.id);
+            record_auth_event(
+                &db,
+                Some(user_id.clone()),
+                "login_success",
+                true,
+                None,
+                Some(&client_ip_str),
+            )
+            .await;
+            Ok(Json(VerifyCredentialsResponse {
+                user_id,
+                email: user.email,
+                role: user.role,
+                must_reset_password: user.must_reset_password,
+            }))
+        }
+        Err(AuthFailure::Internal(e)) => Err(e),
+        Err(AuthFailure::Rejected { user_id, reason }) => {
+            // Charge the (ip, email) bucket. If the caller has already
+            // exhausted their budget, upgrade 401 → 429 so a brute-force
+            // client visibly backs off instead of silently grinding.
+            let key = (client_ip, email_normalised.clone());
+            match limiter.charge_failure(&key) {
+                Ok(()) => {
+                    record_auth_event(
+                        &db,
+                        user_id,
+                        "login_failure",
+                        false,
+                        Some(reason),
+                        Some(&client_ip_str),
+                    )
+                    .await;
+                    Err(AppError::Unauthorized)
+                }
+                Err(retry_after_secs) => {
+                    record_auth_event(
+                        &db,
+                        user_id,
+                        "login_failure",
+                        false,
+                        Some("rate_limited"),
+                        Some(&client_ip_str),
+                    )
+                    .await;
+                    Err(AppError::TooManyRequests {
+                        retry_after_secs: Some(retry_after_secs),
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Outcome of `authenticate_credentials` — either the verified active user or
+/// a tagged failure. `Internal` covers DB-level surprises that must not be
+/// masked as a 401.
+enum AuthFailure {
+    Rejected {
+        user_id: Option<String>,
+        reason: &'static str,
+    },
+    Internal(AppError),
+}
+
+impl From<AppError> for AuthFailure {
+    fn from(e: AppError) -> Self {
+        AuthFailure::Internal(e)
+    }
+}
+
+async fn authenticate_credentials(
+    db: &DbConn,
+    email_normalised: &str,
+    password: &str,
+) -> Result<DbUser, AuthFailure> {
+    if email_normalised.is_empty() || password.is_empty() {
+        return Err(AuthFailure::Rejected {
+            user_id: None,
+            reason: "missing_fields",
+        });
     }
 
     // Lookup via user_identity — the canonical identity key. Every credentials
     // user has exactly one ('credentials', email_normalised) identity row,
     // enforced by the UNIQUE index on user_identity.
-    let identity = find_identity(&db, CREDENTIALS_PROVIDER, &email_normalised).await?;
+    let identity = find_identity(db, CREDENTIALS_PROVIDER, email_normalised).await?;
     let user = match &identity {
         Some(i) => {
-            let u = find_user_by_id(&db, &i.user_id).await?;
+            let u = find_user_by_id(db, &i.user_id).await?;
             if u.is_none() {
                 // Orphaned identity — row exists but its user is gone. This
                 // indicates DB corruption, not a user-facing auth failure.
-                return Err(AppError::Internal(
+                return Err(AuthFailure::Internal(AppError::Internal(
                     "identity references missing user".into(),
-                ));
+                )));
             }
             u
         }
@@ -82,35 +174,32 @@ pub async fn verify_credentials(
     };
 
     let stored_hash = user.as_ref().and_then(|u| u.password_hash.as_deref());
-    let matches = password::verify_or_dummy(&req.password, stored_hash)?;
+    let matches = password::verify_or_dummy(password, stored_hash)?;
 
     let Some(user) = user else {
-        let _ = record_auth_event(&db, None, "login_failure", false, Some("unknown_email")).await;
-        return Err(AppError::Unauthorized);
+        return Err(AuthFailure::Rejected {
+            user_id: None,
+            reason: "unknown_email",
+        });
     };
 
     if !matches {
         let uid = record_id_to_string(user.id.clone());
-        let _ = record_auth_event(&db, Some(uid), "login_failure", false, Some("bad_password"))
-            .await;
-        return Err(AppError::Unauthorized);
+        return Err(AuthFailure::Rejected {
+            user_id: Some(uid),
+            reason: "bad_password",
+        });
     }
 
     if user.status != "active" || user.deleted_at.is_some() {
         let uid = record_id_to_string(user.id.clone());
-        let _ = record_auth_event(&db, Some(uid), "login_failure", false, Some("disabled")).await;
-        return Err(AppError::Unauthorized);
+        return Err(AuthFailure::Rejected {
+            user_id: Some(uid),
+            reason: "disabled",
+        });
     }
 
-    let user_id = record_id_to_string(user.id);
-    let _ = record_auth_event(&db, Some(user_id.clone()), "login_success", true, None).await;
-
-    Ok(Json(VerifyCredentialsResponse {
-        user_id,
-        email: user.email,
-        role: user.role,
-        must_reset_password: user.must_reset_password,
-    }))
+    Ok(user)
 }
 
 // ── ensure-user (social JIT provisioning) ─────────────────────────────────────
@@ -287,11 +376,12 @@ async fn record_auth_event(
     event_type: &str,
     success: bool,
     reason: Option<&str>,
-) -> Result<(), AppError> {
+    ip: Option<&str>,
+) {
     let content = AuthEventContent {
         user_id,
         event_type: event_type.into(),
-        ip: None,
+        ip: ip.map(str::to_string),
         user_agent: None,
         success,
         reason: reason.map(str::to_string),
@@ -300,7 +390,8 @@ async fn record_auth_event(
     // auth_event writes are fire-and-forget at every callsite: telemetry
     // failure must never block a login. We still warn so ops can alert on
     // "auth_event insert failed" without the error propagating into the
-    // request path. Always return Ok to make misuse impossible.
+    // request path. Returning `()` makes that contract explicit — callers
+    // cannot mistake this for a fallible operation worth handling.
     if let Err(e) = db
         .create::<Option<DbAuthEvent>>("auth_event")
         .content(content)
@@ -308,5 +399,4 @@ async fn record_auth_event(
     {
         tracing::warn!(error = %e, event_type, "auth_event insert failed");
     }
-    Ok(())
 }
