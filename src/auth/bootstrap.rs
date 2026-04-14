@@ -5,7 +5,10 @@
 
 use tracing::{info, warn};
 
-use crate::api::models::{AuthEventContent, DbAuthEvent, DbUser, UserContent, now_iso};
+use crate::api::models::{
+    AuthEventContent, DbAuthEvent, DbUser, DbUserIdentity, UserContent, UserIdentityContent,
+    now_iso, record_id_to_string,
+};
 use crate::auth::password;
 use crate::db::DbConn;
 
@@ -35,9 +38,10 @@ pub async fn ensure_admin_user(db: &DbConn) -> Result<(), surrealdb::Error> {
     };
 
     let now = now_iso();
+    let email_normalised = email.to_lowercase();
     let content = UserContent {
         email: email.clone(),
-        email_normalised: email.to_lowercase(),
+        email_normalised: email_normalised.clone(),
         password_hash: Some(password_hash),
         role: "admin".into(),
         status: "active".into(),
@@ -48,8 +52,21 @@ pub async fn ensure_admin_user(db: &DbConn) -> Result<(), surrealdb::Error> {
         deleted_at: None,
     };
     let created: Option<DbUser> = db.create("user").content(content).await?;
+    let user_id = created.map(|u| record_id_to_string(u.id));
 
-    let user_id = created.map(|u| crate::api::models::record_id_to_string(u.id));
+    // Identity row keyed on ('credentials', email_normalised) — this is how
+    // verify-credentials finds the admin. Without it, login would 401.
+    if let Some(uid) = user_id.as_deref() {
+        let identity = UserIdentityContent {
+            user_id: uid.to_string(),
+            provider: "credentials".into(),
+            provider_subject: email_normalised,
+            email_at_link: email.clone(),
+            created_at: now.clone(),
+        };
+        let _: Option<DbUserIdentity> = db.create("user_identity").content(identity).await?;
+    }
+
     let event = AuthEventContent {
         user_id,
         event_type: BOOTSTRAP_EVENT_TYPE.into(),
