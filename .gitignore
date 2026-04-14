@@ -35,3 +35,6 @@ data.surreal/
 # Rust coverage reports
 tarpaulin-report.html
 lcov.info
+
+# Personal brain-sync state (not for sharing)
+.brain-sync
