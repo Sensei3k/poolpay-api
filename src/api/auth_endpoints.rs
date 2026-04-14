@@ -8,7 +8,7 @@
 //! never auto-linked on email match. A second provider for the same person
 //! becomes a deliberate, authenticated FE linking flow (not in BE-1).
 
-use axum::{Extension, Json, extract::State};
+use axum::{Extension, Json, extract::State, extract::rejection::JsonRejection};
 use serde::{Deserialize, Serialize};
 
 use crate::api::models::{
@@ -400,8 +400,12 @@ pub async fn refresh_token_endpoint(
     State(db): State<DbConn>,
     Extension(verifier): Extension<SharedVerifier>,
     ClientIp(client_ip): ClientIp,
-    Json(req): Json<RefreshRequest>,
+    req: Result<Json<RefreshRequest>, JsonRejection>,
 ) -> Result<Json<RefreshResponse>, AppError> {
+    // Malformed JSON / wrong content-type must not leak a distinguishing
+    // 400/415 — collapse every decode failure to the same 401 the rest of
+    // this handler returns.
+    let Json(req) = req.map_err(|_| AppError::Unauthorized)?;
     if req.refresh_token.is_empty() || req.refresh_token.len() > MAX_REFRESH_TOKEN_LEN {
         return Err(AppError::Unauthorized);
     }
@@ -471,8 +475,15 @@ pub struct LogoutRequest {
 pub async fn logout_endpoint(
     State(db): State<DbConn>,
     ClientIp(client_ip): ClientIp,
-    Json(req): Json<LogoutRequest>,
+    req: Result<Json<LogoutRequest>, JsonRejection>,
 ) -> Result<axum::http::StatusCode, AppError> {
+    // Strict "always 204" contract: malformed JSON / wrong content-type
+    // must not surface Axum's default 400/415 — silently return 204 so
+    // logout cannot be probed as an oracle.
+    let Json(req) = match req {
+        Ok(j) => j,
+        Err(_) => return Ok(axum::http::StatusCode::NO_CONTENT),
+    };
     if req.refresh_token.is_empty() || req.refresh_token.len() > MAX_REFRESH_TOKEN_LEN {
         return Ok(axum::http::StatusCode::NO_CONTENT);
     }
