@@ -60,9 +60,12 @@ pub struct RateLimitConfig {
 }
 
 impl RateLimitConfig {
-    /// Load config from env with documented defaults. Invalid values fall back
-    /// to the default and emit a warning rather than panic — misconfiguring
-    /// rate limits should not take the whole service down.
+    /// Load config from env with documented defaults. Non-numeric values fall
+    /// back to the default and emit a warning rather than panic. Zero values
+    /// (e.g. `AUTH_RATE_LIMIT_BURST=0`) are a fatal misconfig and will panic
+    /// at startup in `build_per_ip_config` / `CredentialFailureLimiter::new`
+    /// — we'd rather fail loudly at boot than silently ship an un-limited
+    /// auth surface.
     pub fn from_env() -> Self {
         Self {
             per_ip_per_minute: parse_u32(ENV_PER_IP_PER_MINUTE, DEFAULT_PER_IP_PER_MINUTE),
@@ -106,7 +109,14 @@ fn parse_u64(key: &str, default: u64) -> u64 {
 
 fn parse_bool(key: &str, default: bool) -> bool {
     match std::env::var(key) {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" => true,
+            "false" | "0" | "no" => false,
+            _ => {
+                tracing::warn!(env = key, value = %v, "invalid bool — using default");
+                default
+            }
+        },
         Err(_) => default,
     }
 }
