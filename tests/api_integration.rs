@@ -1459,3 +1459,104 @@ async fn delete_whatsapp_link_allows_relinking_same_chat_id() {
     let second = call(app, post_json_authed("/api/admin/whatsapp-links", body)).await;
     assert_eq!(second.status(), StatusCode::CREATED);
 }
+
+// ── GET /api/receipts ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_receipts_returns_200() {
+    let resp = call(test_app().await, get("/api/receipts")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn get_receipts_no_auth_header_is_public() {
+    // No Authorization header — endpoint must still succeed (public read).
+    let resp = call(test_app().await, get("/api/receipts")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn get_receipts_returns_seeded_fixtures() {
+    let resp = call(test_app().await, get("/api/receipts")).await;
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    assert!(
+        !receipts.is_empty(),
+        "expected at least one seeded receipt fixture"
+    );
+}
+
+#[tokio::test]
+async fn get_receipts_response_shape() {
+    let resp = call(test_app().await, get("/api/receipts")).await;
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    let r = &receipts[0];
+    for field in [
+        "id",
+        "whatsappMessageId",
+        "groupId",
+        "chatId",
+        "senderPhone",
+        "status",
+        "receivedAt",
+        "createdAt",
+        "updatedAt",
+    ] {
+        assert!(r.get(field).is_some(), "missing field: {field}");
+    }
+}
+
+#[tokio::test]
+async fn get_receipts_filter_by_group_id() {
+    let app = test_app().await;
+    let resp = call(app, get("/api/receipts?groupId=1")).await;
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    assert!(receipts.iter().all(|r| r["groupId"] == "1"));
+}
+
+#[tokio::test]
+async fn get_receipts_filter_by_group_id_unknown_returns_empty() {
+    let app = test_app().await;
+    let resp = call(app, get("/api/receipts?groupId=does-not-exist")).await;
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    assert_eq!(receipts.len(), 0);
+}
+
+#[tokio::test]
+async fn get_receipts_filter_by_status_pending() {
+    let app = test_app().await;
+    let resp = call(app, get("/api/receipts?status=pending")).await;
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    assert!(receipts.iter().all(|r| r["status"] == "pending"));
+}
+
+#[tokio::test]
+async fn get_receipts_invalid_status_returns_400() {
+    let app = test_app().await;
+    let resp = call(app, get("/api/receipts?status=weird")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn get_receipts_excludes_soft_deleted() {
+    // At least one fixture receipt has deleted_at set — ensure it's filtered out.
+    let app = test_app().await;
+    let resp = call(app, get("/api/receipts")).await;
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    assert!(
+        receipts.iter().all(|r| r.get("deletedAt").is_none()
+            || r["deletedAt"].is_null()),
+        "soft-deleted receipts must not be returned"
+    );
+}
+
+#[tokio::test]
+async fn reset_restores_receipts_to_fixture_count() {
+    let app = test_app().await;
+    let before: Vec<serde_json::Value> =
+        json_body(call(app.clone(), get("/api/receipts")).await).await;
+    let baseline = before.len();
+    call(app.clone(), post_empty("/api/test/reset")).await;
+    let after: Vec<serde_json::Value> =
+        json_body(call(app, get("/api/receipts")).await).await;
+    assert_eq!(after.len(), baseline);
+}

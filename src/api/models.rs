@@ -112,6 +112,26 @@ impl std::str::FromStr for CycleStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReceiptStatus {
+    Pending,
+    Confirmed,
+    Rejected,
+}
+
+impl std::str::FromStr for ReceiptStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "confirmed" => Ok(Self::Confirmed),
+            "rejected" => Ok(Self::Rejected),
+            _ => Err(format!("unknown receipt status: {s}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Currency {
     NGN,
 }
@@ -181,6 +201,28 @@ pub struct DbCycle {
     pub created_at: String,
     pub updated_at: String,
     pub version: i64,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+pub struct DbReceipt {
+    pub id: RecordId,
+    pub whatsapp_message_id: String,
+    pub group_id: EntityId,
+    pub chat_id: String,
+    pub sender_phone: String,
+    pub member_id: Option<EntityId>,
+    pub cycle_id: Option<EntityId>,
+    pub extracted_amount: Option<i64>,
+    pub expected_amount: Option<i64>,
+    pub amount_matches: Option<bool>,
+    pub status: String,
+    pub ocr_text: Option<String>,
+    pub sender_label: Option<String>,
+    pub bank_label: Option<String>,
+    pub received_at: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, SurrealValue)]
@@ -307,6 +349,44 @@ pub struct Payment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Receipt {
+    pub id: EntityId,
+    #[serde(rename = "whatsappMessageId")]
+    pub whatsapp_message_id: String,
+    #[serde(rename = "groupId")]
+    pub group_id: EntityId,
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    #[serde(rename = "senderPhone")]
+    pub sender_phone: String,
+    #[serde(rename = "memberId", skip_serializing_if = "Option::is_none")]
+    pub member_id: Option<EntityId>,
+    #[serde(rename = "cycleId", skip_serializing_if = "Option::is_none")]
+    pub cycle_id: Option<EntityId>,
+    #[serde(rename = "extractedAmount", skip_serializing_if = "Option::is_none")]
+    pub extracted_amount: Option<i64>,
+    #[serde(rename = "expectedAmount", skip_serializing_if = "Option::is_none")]
+    pub expected_amount: Option<i64>,
+    #[serde(rename = "amountMatches", skip_serializing_if = "Option::is_none")]
+    pub amount_matches: Option<bool>,
+    pub status: ReceiptStatus,
+    #[serde(rename = "ocrText", skip_serializing_if = "Option::is_none")]
+    pub ocr_text: Option<String>,
+    #[serde(rename = "senderLabel", skip_serializing_if = "Option::is_none")]
+    pub sender_label: Option<String>,
+    #[serde(rename = "bankLabel", skip_serializing_if = "Option::is_none")]
+    pub bank_label: Option<String>,
+    #[serde(rename = "receivedAt")]
+    pub received_at: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    #[serde(rename = "deletedAt", skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupLink {
     pub id: EntityId,
     #[serde(rename = "chatId")]
@@ -410,6 +490,32 @@ impl TryFrom<DbPayment> for Payment {
     }
 }
 
+impl TryFrom<DbReceipt> for Receipt {
+    type Error = AppError;
+    fn try_from(db: DbReceipt) -> Result<Self, AppError> {
+        Ok(Self {
+            id: record_id_to_string(db.id),
+            whatsapp_message_id: db.whatsapp_message_id,
+            group_id: db.group_id,
+            chat_id: db.chat_id,
+            sender_phone: db.sender_phone,
+            member_id: db.member_id,
+            cycle_id: db.cycle_id,
+            extracted_amount: db.extracted_amount,
+            expected_amount: db.expected_amount,
+            amount_matches: db.amount_matches,
+            status: db.status.parse().map_err(|e: String| AppError::Internal(e))?,
+            ocr_text: db.ocr_text,
+            sender_label: db.sender_label,
+            bank_label: db.bank_label,
+            received_at: db.received_at,
+            created_at: db.created_at,
+            updated_at: db.updated_at,
+            deleted_at: db.deleted_at,
+        })
+    }
+}
+
 impl From<DbGroupLink> for GroupLink {
     fn from(db: DbGroupLink) -> Self {
         Self {
@@ -478,6 +584,27 @@ pub struct PaymentContent {
     pub reference: Option<String>,
     pub confirmed_at: Option<String>,
     pub confirmed_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, SurrealValue)]
+pub struct ReceiptContent {
+    pub whatsapp_message_id: String,
+    pub group_id: EntityId,
+    pub chat_id: String,
+    pub sender_phone: String,
+    pub member_id: Option<EntityId>,
+    pub cycle_id: Option<EntityId>,
+    pub extracted_amount: Option<i64>,
+    pub expected_amount: Option<i64>,
+    pub amount_matches: Option<bool>,
+    pub status: String,
+    pub ocr_text: Option<String>,
+    pub sender_label: Option<String>,
+    pub bank_label: Option<String>,
+    pub received_at: String,
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
