@@ -11,9 +11,10 @@ use tower_http::cors::CorsLayer;
 
 use crate::db::DbConn;
 use handlers::{
-    create_cycle, create_group, create_member, create_payment, delete_cycle, delete_group,
-    delete_member, delete_payment, get_cycles, get_groups, get_members, get_payments, reset_db,
-    update_cycle, update_group, update_member,
+    create_cycle, create_group, create_member, create_payment, create_whatsapp_link, delete_cycle,
+    delete_group, delete_member, delete_payment, delete_whatsapp_link, get_cycles, get_groups,
+    get_members, get_payments, get_whatsapp_links, reset_db, update_cycle, update_group,
+    update_member,
 };
 
 /// Build the Axum router with all API routes and CORS middleware.
@@ -39,7 +40,11 @@ pub fn router(db: DbConn) -> Router {
         // Admin cycle endpoints
         .route("/api/admin/groups/{gid}/cycles", post(create_cycle))
         .route("/api/admin/cycles/{id}", patch(update_cycle))
-        .route("/api/admin/cycles/{id}", delete(delete_cycle));
+        .route("/api/admin/cycles/{id}", delete(delete_cycle))
+        // Admin WhatsApp link endpoints
+        .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
+        .route("/api/admin/whatsapp-links", post(create_whatsapp_link))
+        .route("/api/admin/whatsapp-links/{id}", delete(delete_whatsapp_link));
 
     if std::env::var("APP_ENV").as_deref() != Ok("production") {
         router = router.route("/api/test/reset", post(reset_db));

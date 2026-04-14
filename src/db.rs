@@ -18,6 +18,8 @@ pub async fn init() -> Result<DbConn, surrealdb::Error> {
     let db = Surreal::new::<RocksDb>("./data.surreal").await?;
     db.use_ns("circle").use_db("main").await?;
 
+    define_tables(&db).await?;
+
     if std::env::var("SEED_ON_EMPTY").as_deref() == Ok("true") {
         seed(&db).await?;
     }
@@ -31,8 +33,28 @@ pub async fn init_memory() -> Result<DbConn, surrealdb::Error> {
     use surrealdb::engine::local::Mem;
     let db = Surreal::new::<Mem>(()).await?;
     db.use_ns("circle").use_db("main").await?;
+    define_tables(&db).await?;
     seed(&db).await?;
     Ok(Arc::new(db))
+}
+
+/// Idempotently define every table the application reads from.
+///
+/// In SurrealDB 3, `SELECT` against an undefined table returns an error rather
+/// than an empty result. Tables seeded via `upsert` in `insert_fixtures` are
+/// defined implicitly, but tables that start empty (e.g. `group_link`) must be
+/// declared here so handlers can query them without special-casing.
+async fn define_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+    db.query(
+        "DEFINE TABLE IF NOT EXISTS group SCHEMALESS;
+         DEFINE TABLE IF NOT EXISTS member SCHEMALESS;
+         DEFINE TABLE IF NOT EXISTS cycle SCHEMALESS;
+         DEFINE TABLE IF NOT EXISTS payment SCHEMALESS;
+         DEFINE TABLE IF NOT EXISTS group_link SCHEMALESS;",
+    )
+    .await?
+    .check()?;
+    Ok(())
 }
 
 /// Seed the database with fixture data.

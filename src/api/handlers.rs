@@ -9,9 +9,10 @@ use tracing::error;
 use super::auth::AdminToken;
 use crate::api::models::{
     AppError, CreateCycleRequest, CreateGroupRequest, CreateMemberRequest, CreatePaymentRequest,
-    Cycle, CycleContent, DbCycle, DbGroup, DbMember, DbPayment, EntityId, Group, GroupContent,
-    Member, MemberContent, Payment, PaymentContent, UpdateCycleRequest, UpdateGroupRequest,
-    UpdateMemberRequest, now_iso, record_id_to_string,
+    CreateWhatsappLinkRequest, Cycle, CycleContent, DbCycle, DbGroup, DbGroupLink, DbMember,
+    DbPayment, EntityId, Group, GroupContent, GroupLink, GroupLinkContent, Member, MemberContent,
+    Payment, PaymentContent, UpdateCycleRequest, UpdateGroupRequest, UpdateMemberRequest, now_iso,
+    record_id_to_string,
 };
 use crate::db::{DbConn, reseed};
 
@@ -623,6 +624,96 @@ pub async fn delete_payment(
         };
         let _: Option<DbPayment> = db.upsert(("payment", id.as_str())).content(content).await?;
     }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Admin WhatsApp link handlers ─────────────────────────────────────────────
+
+pub async fn get_whatsapp_links(
+    _auth: AdminToken,
+    State(db): State<DbConn>,
+) -> Result<Json<Vec<GroupLink>>, AppError> {
+    let rows: Vec<DbGroupLink> = db.select("group_link").await?;
+    let links: Vec<GroupLink> = rows
+        .into_iter()
+        .map(GroupLink::from)
+        .filter(|l| l.deleted_at.is_none())
+        .collect();
+    Ok(Json(links))
+}
+
+pub async fn create_whatsapp_link(
+    _auth: AdminToken,
+    State(db): State<DbConn>,
+    Json(body): Json<CreateWhatsappLinkRequest>,
+) -> Result<(StatusCode, Json<GroupLink>), AppError> {
+    body.validate()?;
+
+    let group_id = body.group_id.trim().to_string();
+    let chat_id = body.chat_id.trim().to_string();
+
+    // Verify group exists and is not soft-deleted.
+    let group: Option<DbGroup> = db.select(("group", group_id.as_str())).await?;
+    match &group {
+        None => return Err(AppError::NotFound(format!("group {group_id} does not exist"))),
+        Some(g) if g.deleted_at.is_some() => {
+            return Err(AppError::NotFound(format!("group {group_id} does not exist")));
+        }
+        _ => {}
+    }
+
+    // Enforce 1:1 chat_id uniqueness over live (non-deleted) links.
+    let dupes: Vec<DbGroupLink> = db
+        .query("SELECT * FROM group_link WHERE chat_id = $cid AND deleted_at IS NONE")
+        .bind(("cid", chat_id.clone()))
+        .await?
+        .take(0)?;
+    if !dupes.is_empty() {
+        return Err(AppError::Conflict(
+            "a WhatsApp link already exists for this chatId".into(),
+        ));
+    }
+
+    let now = now_iso();
+    let content = GroupLinkContent {
+        chat_id,
+        group_id,
+        created_at: now.clone(),
+        updated_at: now,
+        deleted_at: None,
+    };
+
+    let created: Option<DbGroupLink> = db.create("group_link").content(content).await?;
+    let created = created.ok_or_else(|| AppError::Internal("whatsapp link was not created".into()))?;
+
+    Ok((StatusCode::CREATED, Json(GroupLink::from(created))))
+}
+
+pub async fn delete_whatsapp_link(
+    _auth: AdminToken,
+    State(db): State<DbConn>,
+    Path(id): Path<EntityId>,
+) -> Result<StatusCode, AppError> {
+    let existing: Option<DbGroupLink> = db.select(("group_link", id.as_str())).await?;
+    let existing =
+        existing.ok_or_else(|| AppError::NotFound(format!("whatsapp link {id} does not exist")))?;
+
+    if existing.deleted_at.is_some() {
+        return Err(AppError::NotFound(format!(
+            "whatsapp link {id} does not exist"
+        )));
+    }
+
+    let now = now_iso();
+    let content = GroupLinkContent {
+        chat_id: existing.chat_id,
+        group_id: existing.group_id,
+        created_at: existing.created_at,
+        updated_at: now.clone(),
+        deleted_at: Some(now),
+    };
+    let _: Option<DbGroupLink> = db.upsert(("group_link", id.as_str())).content(content).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
