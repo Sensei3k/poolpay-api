@@ -4,6 +4,7 @@
 //! JWT, refresh tokens, and request extractors land in subsequent increments.
 
 pub mod bootstrap;
+pub mod extractors;
 pub mod hmac;
 pub mod jwt;
 pub mod password;
