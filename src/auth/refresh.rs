@@ -102,8 +102,11 @@ pub async fn rotate(
     let hashed = hash_token(presented);
     let row = load_by_hash(db, &hashed).await?.ok_or(RefreshError::NotFound)?;
 
+    // Cheap pre-checks. These are not the authoritative guard — the atomic
+    // revoke below is — but they short-circuit the obvious cases without
+    // writing a new row first.
     if row.revoked_at.is_some() {
-        handle_reuse(db, &row).await?;
+        handle_reuse(db, &row).await;
         return Err(RefreshError::ReuseDetected);
     }
     if is_expired(&row.expires_at) {
@@ -131,8 +134,25 @@ pub async fn rotate(
         None => return Err(RefreshError::Internal("new refresh_token row not returned".into())),
     };
 
-    let old_id = record_id_to_string(row.id);
-    mark_revoked(db, &old_id, &now, Some(&new_id)).await?;
+    // Atomic guard: only one concurrent rotate per row can win the
+    // `WHERE revoked_at IS NONE` clause. The loser gets zero affected rows
+    // back, which is exactly the reuse/theft signal. This closes the
+    // TOCTOU window between the pre-check above and the revoke: two
+    // callers presenting the same refresh token in parallel cannot both
+    // walk away with live tokens in the same family.
+    let old_id = record_id_to_string(row.id.clone());
+    let revoked = try_revoke_unrevoked(db, &old_id, &now, &new_id).await?;
+    if !revoked {
+        // Someone else already rotated this row. Roll back our freshly
+        // minted row so the family doesn't accumulate orphans, then run
+        // the full reuse response (kill family, bump token_version, audit).
+        let _: Option<DbRefreshToken> = db
+            .delete(("refresh_token", new_id.as_str()))
+            .await
+            .unwrap_or(None);
+        handle_reuse(db, &row).await;
+        return Err(RefreshError::ReuseDetected);
+    }
 
     Ok((
         IssuedRefreshToken { plaintext: new_plain, family_id: row.family_id, expires_at },
@@ -164,10 +184,18 @@ pub async fn revoke_by_presented(
     Ok(row.user_id)
 }
 
-async fn handle_reuse(db: &DbConn, stolen: &DbRefreshToken) -> Result<(), RefreshError> {
-    revoke_family(db, &stolen.family_id).await?;
-    bump_token_version(db, &stolen.user_id).await?;
-    // Failures here must not mask the 401 — log and swallow.
+/// Run every side-effect of reuse detection — family kill, token_version
+/// bump, audit row — and swallow all errors. The caller must always be
+/// able to return a uniform 401: surfacing a 500 from here would turn a
+/// detected-theft signal into a different response code, which is itself
+/// an oracle. Any DB failure is logged for ops but never propagated.
+async fn handle_reuse(db: &DbConn, stolen: &DbRefreshToken) {
+    if let Err(e) = revoke_family(db, &stolen.family_id).await {
+        warn!(error = %e, family_id = %stolen.family_id, "reuse: revoke_family failed");
+    }
+    if let Err(e) = bump_token_version(db, &stolen.user_id).await {
+        warn!(error = %e, user = %stolen.user_id, "reuse: bump_token_version failed");
+    }
     let event = AuthEventContent {
         user_id: Some(stolen.user_id.clone()),
         event_type: "refresh_reuse_detected".into(),
@@ -180,7 +208,6 @@ async fn handle_reuse(db: &DbConn, stolen: &DbRefreshToken) -> Result<(), Refres
     if let Err(e) = db.create::<Option<DbAuthEvent>>("auth_event").content(event).await {
         warn!(error = %e, "Failed to record refresh_reuse_detected auth_event");
     }
-    Ok(())
 }
 
 async fn bump_token_version(db: &DbConn, user_id: &str) -> Result<(), RefreshError> {
@@ -205,19 +232,28 @@ async fn load_by_hash(
     Ok(rows.into_iter().next())
 }
 
-async fn mark_revoked(
+/// Atomically revoke a refresh-token row iff it is still live. Returns
+/// `true` if this call did the revoke, `false` if the row was already
+/// revoked (i.e. a concurrent rotate or a replay won the race). Callers
+/// treat `false` as reuse detection.
+async fn try_revoke_unrevoked(
     db: &DbConn,
     id: &str,
     at: &str,
-    replaced_by: Option<&str>,
-) -> Result<(), RefreshError> {
-    db.query("UPDATE $id SET revoked_at = $at, replaced_by = $rb")
+    replaced_by: &str,
+) -> Result<bool, RefreshError> {
+    let mut resp = db
+        .query(
+            "UPDATE $id SET revoked_at = $at, replaced_by = $rb \
+             WHERE revoked_at IS NONE RETURN AFTER",
+        )
         .bind(("id", RecordId::new("refresh_token", id.to_string())))
         .bind(("at", at.to_string()))
-        .bind(("rb", replaced_by.map(|s| s.to_string())))
+        .bind(("rb", replaced_by.to_string()))
         .await?
         .check()?;
-    Ok(())
+    let updated: Vec<DbRefreshToken> = resp.take(0)?;
+    Ok(!updated.is_empty())
 }
 
 fn is_expired(expires_at: &str) -> bool {
