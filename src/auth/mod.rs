@@ -8,3 +8,4 @@ pub mod hmac;
 pub mod jwt;
 pub mod password;
 pub mod rate_limit;
+pub mod refresh;
