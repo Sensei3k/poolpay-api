@@ -106,13 +106,16 @@ pub async fn require_group_scope(
     if user.role == "super_admin" {
         return Ok(());
     }
-    if user.role != "admin" {
-        return Err(AppError::Forbidden("admin role required".into()));
-    }
-    if has_group_admin(db, &user.user_id, group_id).await? {
+    // Single opaque 403 for every non-super-admin failure path. Leaking
+    // "admin role required" vs "no access to this group" tells the caller
+    // whether the JWT role is at least admin — cheap information we don't
+    // need to give away.
+    let allowed =
+        user.role == "admin" && has_group_admin(db, &user.user_id, group_id).await?;
+    if allowed {
         Ok(())
     } else {
-        Err(AppError::Forbidden("no access to this group".into()))
+        Err(AppError::Forbidden("forbidden".into()))
     }
 }
 
