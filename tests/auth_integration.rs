@@ -1093,13 +1093,13 @@ async fn shim_rejects_stale_token_version_jwt() {
     init_legacy_admin_token();
     let (_app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let admin_id = bootstrap_admin_id(&db).await;
-    // Bootstrap user has token_version=0; mint with a stale version.
-    let stale = verifier
+    // Bootstrap user has token_version=0; mint with a mismatched version.
+    let mismatched = verifier
         .mint_access(&admin_id, "super_admin", 99)
-        .expect("mint stale");
+        .expect("mint mismatched token version");
 
     let app = shim_app(db, verifier);
-    let resp = call(app, bearer_get("/admin", &stale)).await;
+    let resp = call(app, bearer_get("/admin", &mismatched)).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
