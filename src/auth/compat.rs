@@ -99,27 +99,55 @@ mod tests {
     //! exercised in `tests/auth_integration.rs`.
 
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serializes mutation of the process-global `ADMIN_TOKEN` env var so
+    /// concurrent unit tests in this module cannot race each other on the
+    /// `set_var`/`remove_var` calls (which `cargo test` runs in parallel
+    /// across threads by default).
+    static ADMIN_TOKEN_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    /// RAII guard that restores `ADMIN_TOKEN` to its pre-test value on
+    /// drop. Keeping the restore in `Drop` guarantees it runs even if the
+    /// wrapped closure panics (e.g. a failing assertion), so a flaky test
+    /// cannot leak a bogus `ADMIN_TOKEN` into subsequent tests.
+    struct AdminTokenGuard {
+        prev: Option<String>,
+    }
+
+    impl Drop for AdminTokenGuard {
+        fn drop(&mut self) {
+            // Safety: the lock held by the caller serializes all writers
+            // to `ADMIN_TOKEN`; readers outside this module set their own
+            // value before reading, so a transient restore is harmless.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var("ADMIN_TOKEN", v),
+                    None => std::env::remove_var("ADMIN_TOKEN"),
+                }
+            }
+        }
+    }
 
     fn with_admin_token<F: FnOnce()>(value: Option<&str>, f: F) {
-        // Legacy env-var based config; tests run sequentially in this
-        // module to avoid clobbering each other's view of ADMIN_TOKEN.
-        let prev = std::env::var("ADMIN_TOKEN").ok();
-        // Safety: this module's tests never run in parallel with each
-        // other (single-threaded `cargo test` per module by default for
-        // the few tests here) and other suites pin their own state.
+        let _env_lock = ADMIN_TOKEN_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let _restore = AdminTokenGuard {
+            prev: std::env::var("ADMIN_TOKEN").ok(),
+        };
+
+        // Safety: serialized by `ADMIN_TOKEN_ENV_LOCK` above.
         unsafe {
             match value {
                 Some(v) => std::env::set_var("ADMIN_TOKEN", v),
                 None => std::env::remove_var("ADMIN_TOKEN"),
             }
         }
+
         f();
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("ADMIN_TOKEN", v),
-                None => std::env::remove_var("ADMIN_TOKEN"),
-            }
-        }
     }
 
     #[test]
