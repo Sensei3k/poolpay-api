@@ -101,6 +101,16 @@ fn mint_admin_jwt(role: &str) -> String {
         matches!(role, "super_admin" | "admin"),
         "mint_admin_jwt only mints admin-tier roles; got {role}"
     );
+    // `shared_verifier()` fails closed if `APP_ENV` is not `test` /
+    // `development` and `JWT_KEYS` is absent. Callers in BE-5 may use
+    // this helper without going through `test_app()` first, so mirror
+    // the env init here to keep ordering-independent.
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        // Safety: called once before any caller reads APP_ENV through
+        // the verifier; other suite helpers set the same value.
+        unsafe { std::env::set_var("APP_ENV", "test") };
+    });
     poolpay::api::shared_verifier()
         .mint_access("test-admin-user", role, 0)
         .expect("shared verifier must mint")
