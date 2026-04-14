@@ -115,9 +115,14 @@ Two layers protect the HMAC-gated auth surface:
   both `/api/auth/verify-credentials` and `/api/auth/ensure-user`. Runs
   before HMAC verification so anonymous floods are dropped cheaply.
 - **Composite `(ip, email_normalised)`** — in-handler limiter on
-  `/api/auth/verify-credentials`. Up to `AUTH_CREDENTIAL_FAILURE_LIMIT`
-  failures per `AUTH_CREDENTIAL_FAILURE_WINDOW_SECS`. Successful logins do
-  not consume quota, so legitimate users are never penalised.
+  `/api/auth/verify-credentials`. Token-bucket with burst
+  `AUTH_CREDENTIAL_FAILURE_LIMIT` that refills one slot every
+  `AUTH_CREDENTIAL_FAILURE_WINDOW_SECS / AUTH_CREDENTIAL_FAILURE_LIMIT`
+  seconds — an average rate of `LIMIT` failures per `WINDOW_SECS` with
+  burst tolerance. Attackers spacing attempts out can exceed `LIMIT`
+  within a rolling `WINDOW_SECS` interval; if you need a strict fixed-
+  window guarantee, switch the implementation to a counter. Successful
+  logins do not consume quota, so legitimate users are never penalised.
 
 When a limit is hit the response is `429 Too Many Requests` with a
 `Retry-After` header in seconds. Legitimate callers should honour it.
