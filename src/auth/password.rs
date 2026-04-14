@@ -10,14 +10,25 @@ use std::sync::OnceLock;
 
 use crate::api::models::AppError;
 
-/// OWASP 2024 baseline: m=19 MiB, t=2, p=1.
+/// OWASP 2024 baseline for production hashing.
+pub(crate) const ARGON2_PROD_M_COST_KIB: u32 = 19_456;
+pub(crate) const ARGON2_PROD_T_COST: u32 = 2;
+pub(crate) const ARGON2_PROD_P_COST: u32 = 1;
+
+/// When this crate is compiled with `cfg(test)` (i.e. `cargo test` unit tests
+/// and doctests *of this crate*), Argon2 work factors collapse to the library
+/// minimum. A single hash at the OWASP params runs ~500 ms in debug mode, and
+/// the auth suite calls `hash`/`verify` 50+ times across bootstrap and
+/// credential-verification tests — that alone added ~30 s of pure CPU per
+/// `cargo test` cycle and dragged tower-governor's wall-clock-based
+/// rate-limit tests into flaky territory by pushing real-time refills past
+/// the assertion windows.
 ///
-/// Under `cargo test` these collapse to the Argon2 minimum — a single hash
-/// at the OWASP params runs ~500 ms in debug mode, and the auth suite calls
-/// `hash`/`verify` 50+ times across bootstrap and credential-verification
-/// tests. That alone added ~30 s of pure CPU per `cargo test` cycle and
-/// dragged tower-governor's wall-clock-based rate-limit tests into flaky
-/// territory by pushing real-time refills past the assertion windows.
+/// Note: `#[cfg(test)]` only affects the unit-test build of *this* crate.
+/// Downstream integration-test binaries and external consumers link against
+/// the non-test build and therefore keep the full OWASP parameters. If you
+/// need the weak params in a new integration test, move the assertion into a
+/// `#[cfg(test)] mod tests` block inside this crate.
 ///
 /// The algorithm (Argon2id), version (V0x13), salt generation and PHC
 /// encoding are unchanged — only the work factor differs — so weak-params
@@ -25,11 +36,11 @@ use crate::api::models::AppError;
 /// on the prod params themselves is covered by `prod_params_round_trip`
 /// in the test module below, which runs the OWASP baseline once per CI.
 #[cfg(not(test))]
-const ARGON2_M_COST_KIB: u32 = 19_456;
+const ARGON2_M_COST_KIB: u32 = ARGON2_PROD_M_COST_KIB;
 #[cfg(not(test))]
-const ARGON2_T_COST: u32 = 2;
+const ARGON2_T_COST: u32 = ARGON2_PROD_T_COST;
 #[cfg(not(test))]
-const ARGON2_P_COST: u32 = 1;
+const ARGON2_P_COST: u32 = ARGON2_PROD_P_COST;
 
 #[cfg(test)]
 const ARGON2_M_COST_KIB: u32 = argon2::Params::MIN_M_COST;
@@ -124,7 +135,13 @@ mod tests {
     fn prod_params_round_trip() {
         use password_hash::{PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng};
 
-        let params = Params::new(19_456, 2, 1, None).expect("prod params must be valid");
+        let params = Params::new(
+            ARGON2_PROD_M_COST_KIB,
+            ARGON2_PROD_T_COST,
+            ARGON2_PROD_P_COST,
+            None,
+        )
+        .expect("prod params must be valid");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let salt = SaltString::generate(&mut OsRng);
         let hash = argon2
