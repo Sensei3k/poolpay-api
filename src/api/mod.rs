@@ -32,8 +32,9 @@ pub fn router(db: DbConn) -> Router {
     let verifier = VERIFIER
         .get_or_init(|| {
             Arc::new(
-                StaticKeyVerifier::from_env(JwtConfig::from_env())
-                    .expect("JWT_KEYS must be set or APP_ENV must permit an ephemeral key"),
+                StaticKeyVerifier::from_env(JwtConfig::from_env()).unwrap_or_else(|err| {
+                    panic!("Failed to initialise JWT verifier: {err}")
+                }),
             )
         })
         .clone();

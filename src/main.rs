@@ -66,7 +66,7 @@ async fn main() {
     // so `cargo run` needs no extra setup.
     let verifier: SharedVerifier = Arc::new(
         StaticKeyVerifier::from_env(JwtConfig::from_env())
-            .expect("Failed to initialise JWT verifier"),
+            .unwrap_or_else(|err| panic!("Failed to initialise JWT verifier: {err}")),
     );
 
     // Parse rate-limit config once at boot and reuse the same instance for
