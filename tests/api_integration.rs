@@ -111,6 +111,15 @@ fn post_empty(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn post_empty_authed(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("authorization", "Bearer test-secret-token")
+        .body(Body::empty())
+        .unwrap()
+}
+
 // ── Auth extractor tests ─────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -1559,4 +1568,147 @@ async fn reset_restores_receipts_to_fixture_count() {
     let after: Vec<serde_json::Value> =
         json_body(call(app, get("/api/receipts")).await).await;
     assert_eq!(after.len(), baseline);
+}
+
+// ── POST /api/admin/receipts/{id}/confirm ────────────────────────────────────
+
+#[tokio::test]
+async fn confirm_receipt_requires_auth() {
+    let app = test_app_with_auth().await;
+    let resp = call(app, post_empty("/api/admin/receipts/1/confirm")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn confirm_receipt_unknown_id_returns_404() {
+    let app = test_app_with_auth().await;
+    let resp = call(app, post_empty_authed("/api/admin/receipts/does-not-exist/confirm")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn confirm_receipt_soft_deleted_returns_404() {
+    // Fixture receipt id 2 is soft-deleted.
+    let app = test_app_with_auth().await;
+    let resp = call(app, post_empty_authed("/api/admin/receipts/2/confirm")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn confirm_receipt_marks_status_and_creates_payment() {
+    let app = test_app_with_auth().await;
+
+    let payments_before: Vec<serde_json::Value> =
+        json_body(call(app.clone(), get("/api/payments")).await).await;
+    let baseline = payments_before.len();
+
+    let resp = call(app.clone(), post_empty_authed("/api/admin/receipts/1/confirm")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let updated: serde_json::Value = json_body(resp).await;
+    assert_eq!(updated["status"], "confirmed");
+    assert_eq!(updated["id"], "1");
+
+    let payments_after: Vec<serde_json::Value> =
+        json_body(call(app, get("/api/payments")).await).await;
+    assert_eq!(payments_after.len(), baseline + 1);
+
+    let new_payment = payments_after
+        .iter()
+        .find(|p| p["reference"] == "3EB0C123ABCD4567EF89")
+        .expect("expected new payment referencing the receipt's whatsapp message id");
+    assert_eq!(new_payment["memberId"], "4");
+    assert_eq!(new_payment["cycleId"], "3");
+    assert_eq!(new_payment["amount"], 1_000_000);
+    assert_eq!(new_payment["currency"], "NGN");
+    assert!(new_payment["confirmedAt"].is_string());
+}
+
+#[tokio::test]
+async fn confirm_receipt_twice_returns_409() {
+    let app = test_app_with_auth().await;
+    let first = call(app.clone(), post_empty_authed("/api/admin/receipts/1/confirm")).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = call(app, post_empty_authed("/api/admin/receipts/1/confirm")).await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn confirm_receipt_with_existing_payment_for_member_cycle_returns_409() {
+    // Fixture payments cover member 1 for cycle 1; receipt 1 points at cycle 3,
+    // so confirm should succeed initially. After deleting that payment's
+    // member+cycle pairing manually isn't easy, so instead test via a second
+    // confirmation attempt covered above.
+    //
+    // For the duplicate-payment guard, create a payment for the receipt's
+    // member+cycle first, then confirm.
+    let app = test_app_with_auth().await;
+    let create = post_json_authed(
+        "/api/payments",
+        serde_json::json!({
+            "memberId": "4",
+            "cycleId": "3",
+            "amount": 1_000_000,
+            "currency": "NGN",
+            "paymentDate": "2026-03-02"
+        }),
+    );
+    let create_resp = call(app.clone(), create).await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+    let resp = call(app, post_empty_authed("/api/admin/receipts/1/confirm")).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+// ── POST /api/admin/receipts/{id}/reject ─────────────────────────────────────
+
+#[tokio::test]
+async fn reject_receipt_requires_auth() {
+    let app = test_app_with_auth().await;
+    let resp = call(app, post_empty("/api/admin/receipts/1/reject")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn reject_receipt_unknown_id_returns_404() {
+    let app = test_app_with_auth().await;
+    let resp = call(app, post_empty_authed("/api/admin/receipts/nope/reject")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn reject_receipt_marks_status_and_creates_no_payment() {
+    let app = test_app_with_auth().await;
+    let payments_before: Vec<serde_json::Value> =
+        json_body(call(app.clone(), get("/api/payments")).await).await;
+    let baseline = payments_before.len();
+
+    let resp = call(app.clone(), post_empty_authed("/api/admin/receipts/1/reject")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let updated: serde_json::Value = json_body(resp).await;
+    assert_eq!(updated["status"], "rejected");
+
+    let payments_after: Vec<serde_json::Value> =
+        json_body(call(app, get("/api/payments")).await).await;
+    assert_eq!(payments_after.len(), baseline);
+}
+
+#[tokio::test]
+async fn reject_receipt_already_rejected_returns_409() {
+    // Fixture receipt id 2 is rejected and soft-deleted, so reject hits 404.
+    // Use receipt 1: reject once, then try again.
+    let app = test_app_with_auth().await;
+    let first = call(app.clone(), post_empty_authed("/api/admin/receipts/1/reject")).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = call(app, post_empty_authed("/api/admin/receipts/1/reject")).await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn confirm_after_reject_returns_409() {
+    let app = test_app_with_auth().await;
+    let r = call(app.clone(), post_empty_authed("/api/admin/receipts/1/reject")).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let c = call(app, post_empty_authed("/api/admin/receipts/1/confirm")).await;
+    assert_eq!(c.status(), StatusCode::CONFLICT);
 }
