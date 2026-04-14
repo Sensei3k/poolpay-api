@@ -84,7 +84,15 @@ pub async fn issue(db: &DbConn, user_id: &str) -> Result<IssuedRefreshToken, Ref
         revoked_at: None,
         replaced_by: None,
     };
-    let _: Option<DbRefreshToken> = db.create("refresh_token").content(content).await?;
+    let created: Option<DbRefreshToken> = db.create("refresh_token").content(content).await?;
+    // Treat a missing row the same way `create_social_user` does — handing a
+    // plaintext token to the client that has no matching DB row would leave
+    // the session un-rotatable and un-revocable.
+    if created.is_none() {
+        return Err(RefreshError::Internal(
+            "refresh token create returned no record".to_string(),
+        ));
+    }
     Ok(IssuedRefreshToken { plaintext, family_id, expires_at })
 }
 
