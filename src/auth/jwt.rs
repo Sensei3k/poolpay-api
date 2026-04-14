@@ -73,8 +73,24 @@ impl std::error::Error for JwtError {}
 
 /// The `TokenVerifier` abstraction lets BE-8 swap in a `JwksVerifier` for
 /// Cognito without touching handlers or extractors.
+///
+/// `mint_access` is on the same trait because every deployment needs the
+/// local minting path for `/api/auth/refresh`: even when the upstream IdP
+/// issues the original access token, the refresh rotation re-issues a new
+/// short-lived access token from within this service. A pure-verifier
+/// implementation (e.g. `JwksVerifier`) can override the default to return
+/// `NoActiveKey` if minting is genuinely unsupported.
 pub trait TokenVerifier: Send + Sync {
     fn verify_access(&self, token: &str) -> Result<AccessClaims, JwtError>;
+
+    fn mint_access(
+        &self,
+        _subject: &str,
+        _role: &str,
+        _token_version: i64,
+    ) -> Result<String, JwtError> {
+        Err(JwtError::NoActiveKey)
+    }
 }
 
 /// A single RS256 keypair identified by `kid`. Private key is optional: a
@@ -255,11 +271,12 @@ impl StaticKeyVerifier {
         })
     }
 
-    /// Mint an access token. Kept public so BE-4 can wire it into the compat
-    /// shim and integration tests can mint valid tokens. Lives behind
-    /// `#[allow(dead_code)]` until a handler actually calls it.
-    #[allow(dead_code)]
-    pub fn mint_access(&self, subject: &str, role: &str, token_version: i64) -> Result<String, JwtError> {
+    fn mint_access_inner(
+        &self,
+        subject: &str,
+        role: &str,
+        token_version: i64,
+    ) -> Result<String, JwtError> {
         let kid = self.active_kid.as_deref().ok_or(JwtError::NoActiveKey)?;
         let entry = self.keys.get(kid).ok_or(JwtError::NoActiveKey)?;
         let encoding = entry.encoding.as_ref().ok_or(JwtError::NoActiveKey)?;
@@ -281,9 +298,19 @@ impl StaticKeyVerifier {
 
         encode(&header, &claims, encoding).map_err(|_| JwtError::Invalid)
     }
+
 }
 
 impl TokenVerifier for StaticKeyVerifier {
+    fn mint_access(
+        &self,
+        subject: &str,
+        role: &str,
+        token_version: i64,
+    ) -> Result<String, JwtError> {
+        self.mint_access_inner(subject, role, token_version)
+    }
+
     fn verify_access(&self, token: &str) -> Result<AccessClaims, JwtError> {
         let header = decode_header(token).map_err(|_| JwtError::Malformed)?;
         let kid = header.kid.ok_or(JwtError::MissingKid)?;
