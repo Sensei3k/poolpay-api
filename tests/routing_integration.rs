@@ -20,7 +20,7 @@ async fn fresh_db() -> DbConn {
 
 async fn seed_link(db: &DbConn, chat_id: &str, group_id: &str) {
     let now = now_iso();
-    let _: Option<DbGroupLink> = db
+    let created: Option<DbGroupLink> = db
         .create("group_link")
         .content(GroupLinkContent {
             chat_id: chat_id.into(),
@@ -31,6 +31,7 @@ async fn seed_link(db: &DbConn, chat_id: &str, group_id: &str) {
         })
         .await
         .expect("seed link failed");
+    assert!(created.is_some(), "group_link insert returned None");
 }
 
 // ── find_group_by_chat_id ────────────────────────────────────────────────────
@@ -103,9 +104,9 @@ async fn member_by_phone_returns_none_for_unknown_phone() {
 }
 
 #[tokio::test]
-async fn member_by_phone_scoped_to_group() {
-    // Same phone but a different group id must return None even though the
-    // member exists in another group.
+async fn member_by_phone_returns_none_for_unknown_group() {
+    // A phone that matches a fixture member must not resolve when the
+    // supplied group_id does not exist — the query is group-scoped.
     let db = fresh_db().await;
     let other: EntityId = "does-not-exist".into();
     let m = find_member_by_phone(&db, &other, "2348101234567")

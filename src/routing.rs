@@ -31,7 +31,10 @@ pub async fn find_group_by_chat_id(
     Ok(group.filter(|g| g.deleted_at.is_none()))
 }
 
-/// Find the active member in `group_id` whose stored phone matches `phone`.
+/// Find a live (non-soft-deleted) member in `group_id` whose stored phone
+/// matches `phone`. Member `status` is not constrained, so inactive members
+/// still match — callers that need to exclude inactive members must filter
+/// on the returned row themselves.
 ///
 /// Phone comparison is exact; canonicalisation is the caller's job, since
 /// WhatsApp delivers numbers as raw E.164-style digits and admin input is
@@ -57,9 +60,10 @@ pub async fn find_member_by_phone(
 /// Return the single active cycle for `group_id`, if one exists.
 ///
 /// Cycles do not carry `deleted_at`, but only one cycle per group should
-/// hold `status = 'active'` at a time. If the invariant is violated this
-/// returns the first row deterministically — the caller is expected to
-/// surface the inconsistency separately.
+/// hold `status = 'active'` at a time. The query is ordered by
+/// `cycle_number` ascending so that, if the invariant is violated, the
+/// lowest-numbered active cycle is returned deterministically — the
+/// caller is expected to surface the inconsistency separately.
 pub async fn find_active_cycle(
     db: &DbConn,
     group_id: &EntityId,
@@ -67,7 +71,8 @@ pub async fn find_active_cycle(
     let rows: Vec<DbCycle> = db
         .query(
             "SELECT * FROM cycle \
-             WHERE group_id = $gid AND status = 'active' LIMIT 1",
+             WHERE group_id = $gid AND status = 'active' \
+             ORDER BY cycle_number ASC LIMIT 1",
         )
         .bind(("gid", group_id.clone()))
         .await?
