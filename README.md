@@ -89,7 +89,9 @@ brew install tesseract poppler pkgconf
 |----------|----------|---------|-------------|
 | `GREEN_API_INSTANCE_ID` | Yes | — | Instance ID from the Green API dashboard |
 | `GREEN_API_TOKEN` | Yes | — | API token shown next to your instance |
-| `APP_ENV` | No | `development` | Set to `production` to enable CORS restrictions and disable `/api/test/reset` |
+| `NEXTAUTH_BACKEND_SECRET` | Yes | — | Shared secret for NextAuth → backend HMAC signing. Generate with `openssl rand -hex 32` |
+| `JWT_KEYS` | Yes in production | — | JSON array of RS256 keypairs for admin JWT verification. Required when `APP_ENV=production`; ephemeral keys are auto-generated only for `development`/`test` |
+| `APP_ENV` | No (fail-closed if unset) | — | Must be `development`, `test`, or `production`. `production` enables CORS restrictions, requires `JWT_KEYS`, and disables `/api/test/reset`; only explicit `development` or `test` enables `/api/test/reset` and ephemeral JWT keys |
 | `DASHBOARD_ORIGIN` | No (required if `APP_ENV=production`) | — | CORS origin for the dashboard (e.g., `https://dashboard.example.com`) |
 | `API_BIND_ADDR` | No | `0.0.0.0:8080` | Socket address for the HTTP server |
 | `SEED_ON_EMPTY` | No | `false` | Set to `true` to seed fixture data when all database tables are empty |
