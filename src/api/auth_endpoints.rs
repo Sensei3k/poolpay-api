@@ -71,7 +71,7 @@ pub async fn verify_credentials(
     match result {
         Ok(user) => {
             let user_id = record_id_to_string(user.id);
-            let _ = record_auth_event(
+            record_auth_event(
                 &db,
                 Some(user_id.clone()),
                 "login_success",
@@ -95,7 +95,7 @@ pub async fn verify_credentials(
             let key = (client_ip, email_normalised.clone());
             match limiter.charge_failure(&key) {
                 Ok(()) => {
-                    let _ = record_auth_event(
+                    record_auth_event(
                         &db,
                         user_id,
                         "login_failure",
@@ -107,7 +107,7 @@ pub async fn verify_credentials(
                     Err(AppError::Unauthorized)
                 }
                 Err(retry_after_secs) => {
-                    let _ = record_auth_event(
+                    record_auth_event(
                         &db,
                         user_id,
                         "login_failure",
@@ -377,7 +377,7 @@ async fn record_auth_event(
     success: bool,
     reason: Option<&str>,
     ip: Option<&str>,
-) -> Result<(), AppError> {
+) {
     let content = AuthEventContent {
         user_id,
         event_type: event_type.into(),
@@ -390,7 +390,8 @@ async fn record_auth_event(
     // auth_event writes are fire-and-forget at every callsite: telemetry
     // failure must never block a login. We still warn so ops can alert on
     // "auth_event insert failed" without the error propagating into the
-    // request path. Always return Ok to make misuse impossible.
+    // request path. Returning `()` makes that contract explicit — callers
+    // cannot mistake this for a fallible operation worth handling.
     if let Err(e) = db
         .create::<Option<DbAuthEvent>>("auth_event")
         .content(content)
@@ -398,5 +399,4 @@ async fn record_auth_event(
     {
         tracing::warn!(error = %e, event_type, "auth_event insert failed");
     }
-    Ok(())
 }
