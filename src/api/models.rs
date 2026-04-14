@@ -25,6 +25,7 @@ pub enum AppError {
     NotFound(String),
     BadRequest(String),
     Unauthorized,
+    Forbidden(String),
     Conflict(String),
     Internal(String),
 }
@@ -35,6 +36,7 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg),
             // Don't leak internal error details to the caller.
             AppError::Internal(_) => (
@@ -935,3 +937,77 @@ fn is_valid_date(s: &str) -> bool {
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
+
+// ── Auth models ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+pub struct UserContent {
+    pub email: String,
+    pub email_normalised: String,
+    pub password_hash: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub token_version: i64,
+    pub must_reset_password: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+pub struct DbUser {
+    pub id: RecordId,
+    pub email: String,
+    pub email_normalised: String,
+    pub password_hash: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub token_version: i64,
+    pub must_reset_password: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+pub struct UserIdentityContent {
+    pub user_id: String,
+    pub provider: String,
+    pub provider_subject: String,
+    pub email_at_link: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+pub struct DbUserIdentity {
+    pub id: RecordId,
+    pub user_id: String,
+    pub provider: String,
+    pub provider_subject: String,
+    pub email_at_link: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+pub struct AuthEventContent {
+    pub user_id: Option<String>,
+    pub event_type: String,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub success: bool,
+    pub reason: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+pub struct DbAuthEvent {
+    pub id: RecordId,
+    pub user_id: Option<String>,
+    pub event_type: String,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub success: bool,
+    pub reason: Option<String>,
+    pub created_at: String,
+}
+

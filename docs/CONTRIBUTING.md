@@ -1,6 +1,6 @@
 # Contributing to PoolPay
 
-Last Updated: 2026-04-01
+Last Updated: 2026-04-14
 
 ## Prerequisites
 
@@ -122,10 +122,12 @@ Supported log levels: `debug`, `info`, `warn`, `error`.
 cargo test
 ```
 
-Runs 106 tests across:
-- **Models** (3 tests) — JSON deserialization, idMessage placement
-- **Parser** (28 tests) — amount extraction, sender detection, bank matching
-- **API Integration** (75 tests) — admin CRUD, auth, validation, soft delete, version conflicts, route handlers
+Runs 193 tests across unit + integration suites:
+- **Unit tests** — models, parser, password hashing, HMAC primitives
+- **Parser integration** — amount extraction, sender detection, bank matching
+- **API integration** — admin CRUD, auth, validation, soft delete, version conflicts, route handlers
+- **Auth integration** — HMAC-gated `verify-credentials` / `ensure-user`, bootstrap idempotency, field-length caps
+- **Routing / ingestion integration** — chat→group resolution, receipt ingestion pipeline
 
 Tests use an in-memory SurrealDB instance and do not touch the filesystem or call external APIs.
 
@@ -189,12 +191,21 @@ src/
 ├── api/
 │   ├── mod.rs          — router setup, CORS configuration
 │   ├── auth.rs         — AdminToken extractor (Bearer token via ADMIN_TOKEN)
+│   ├── auth_endpoints.rs — HMAC-gated NextAuth endpoints (verify-credentials, ensure-user)
 │   ├── handlers.rs     — HTTP handlers (GET/POST/PATCH/DELETE)
 │   └── models.rs       — API request/response types, EntityId alias, DB/API structs
+├── auth/
+│   ├── mod.rs          — auth module root
+│   ├── bootstrap.rs    — seed super_admin user on first boot
+│   ├── hmac.rs         — HMAC-SHA256 request signing extractor
+│   └── password.rs     — Argon2id hashing + constant-time verify_or_dummy
 
 tests/
-├── parser_tests.rs     — parser module integration tests
-└── api_integration.rs  — API route and database integration tests
+├── parser_tests.rs          — parser module integration tests
+├── api_integration.rs       — API route and database integration tests
+├── auth_integration.rs      — HMAC + bootstrap + password-flow integration tests
+├── ingestion_integration.rs — receipt ingestion pipeline tests
+└── routing_integration.rs   — chat→group / phone→member resolution tests
 ```
 
 ### Adding a New Module
@@ -232,8 +243,11 @@ tests/
 | `GREEN_API_INSTANCE_ID` | Yes | — | Green API instance ID from dashboard |
 | `GREEN_API_TOKEN` | Yes | — | Green API authentication token |
 | `ADMIN_TOKEN` | Yes | — | Bearer token for all `/api/admin/*` endpoints. Generate with `openssl rand -hex 32` |
-| `APP_ENV` | No | `development` | Environment mode: `development` or `production` (controls CORS and `/api/test/reset` availability) |
+| `NEXTAUTH_BACKEND_SECRET` | Yes | — | Shared secret for NextAuth→backend HMAC signing (min 32 bytes; panics in production if shorter). Generate with `openssl rand -hex 32` |
+| `APP_ENV` | No | unset | `production` enables strict CORS; `development` or `test` mounts `/api/test/reset`. Anything else (including unset) is treated as production for the reset gate |
 | `DASHBOARD_ORIGIN` | No (required if `APP_ENV=production`) | — | CORS origin for production (e.g., `https://dashboard.example.com`) |
+| `BOOTSTRAP_ADMIN_EMAIL` | No | — | Email seeded on first boot if no active admin exists. Rotate the password immediately after first login |
+| `BOOTSTRAP_ADMIN_PASSWORD` | No | — | Password for the bootstrap admin; stored as Argon2id, flagged `must_reset_password=true` |
 | `API_BIND_ADDR` | No | `0.0.0.0:8080` | Socket address for the HTTP server |
 | `SEED_ON_EMPTY` | No | `false` | Set to `true` to seed fixture data when all database tables are empty |
 | `RECEIPT_DOWNLOAD_DIR` | No | OS temp dir | Directory for temporary receipt files during OCR |

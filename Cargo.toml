@@ -44,6 +44,15 @@ chrono = { version = "0.4", features = ["serde"] }
 # Constant-time comparison for auth tokens
 subtle = "2"
 
+# Password hashing — Argon2id with OWASP 2024 parameters
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.5", features = ["rand_core"] }
+
+# HMAC-SHA256 for NextAuth → backend request signing
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
 [dev-dependencies]
 # HTTP service test utilities — used in API integration tests
 tower = { version = "0.5", features = ["util"] }

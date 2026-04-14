@@ -62,7 +62,7 @@ pub async fn get_members(
     let filtered: Vec<Member> = members
         .into_iter()
         .filter(|m| m.deleted_at.is_none())
-        .filter(|m| params.group_id.as_ref().map_or(true, |gid| m.group_id == *gid))
+        .filter(|m| params.group_id.as_ref().is_none_or(|gid| m.group_id == *gid))
         .collect();
 
     Ok(Json(filtered))
@@ -78,7 +78,7 @@ pub async fn get_cycles(
 
     let filtered: Vec<Cycle> = cycles
         .into_iter()
-        .filter(|c| params.group_id.as_ref().map_or(true, |gid| c.group_id == *gid))
+        .filter(|c| params.group_id.as_ref().is_none_or(|gid| c.group_id == *gid))
         .collect();
 
     Ok(Json(filtered))
@@ -96,7 +96,7 @@ pub async fn get_payments(
     let filtered: Vec<Payment> = payments
         .into_iter()
         .filter(|p| p.deleted_at.is_none())
-        .filter(|p| params.cycle_id.as_ref().map_or(true, |cid| p.cycle_id == *cid))
+        .filter(|p| params.cycle_id.as_ref().is_none_or(|cid| p.cycle_id == *cid))
         .collect();
 
     Ok(Json(filtered))

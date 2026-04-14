@@ -1,4 +1,4 @@
-use poolpay::{api, db, extractor, ingestion, parser, replies, whatsapp};
+use poolpay::{api, auth, db, extractor, ingestion, parser, replies, whatsapp};
 use poolpay::api::models::now_iso;
 
 use dotenv::dotenv;
@@ -30,10 +30,47 @@ async fn main() {
         warn!("ADMIN_TOKEN is not set — all admin endpoints will return 401");
     }
 
+    // HMAC strength depends on key entropy. hmac.rs only rejects an empty
+    // secret, so a 6-char value would silently pass. Fail fast on anything
+    // shorter than 32 bytes (matches `openssl rand -hex 32` in .env.example).
+    // Panic in production; warn elsewhere so local dev with a throwaway
+    // secret stays frictionless.
+    const MIN_SECRET_LEN: usize = 32;
+    match env::var("NEXTAUTH_BACKEND_SECRET") {
+        Ok(s) if s.len() >= MIN_SECRET_LEN => {}
+        Ok(s) => {
+            let msg = format!(
+                "NEXTAUTH_BACKEND_SECRET must be at least {MIN_SECRET_LEN} bytes (got {})",
+                s.len()
+            );
+            if env::var("APP_ENV").as_deref() == Ok("production") {
+                panic!("{msg}");
+            } else {
+                warn!("{msg} — acceptable in non-production only");
+            }
+        }
+        Err(_) => {
+            if env::var("APP_ENV").as_deref() == Ok("production") {
+                panic!("NEXTAUTH_BACKEND_SECRET must be set in production");
+            } else {
+                warn!("NEXTAUTH_BACKEND_SECRET is not set — HMAC endpoints will reject all requests");
+            }
+        }
+    }
+
+    // Pre-warm the dummy Argon2 hash so the first unknown-email login path is
+    // not measurably slower than subsequent ones (closes a timing side channel
+    // around user enumeration).
+    auth::password::prewarm();
+
     // Initialise embedded SurrealDB and, if SEED_ON_EMPTY=true and the DB is empty, seed fixture data.
     let surreal_db = db::init()
         .await
         .expect("Failed to initialise SurrealDB");
+
+    if let Err(e) = auth::bootstrap::ensure_admin_user(&surreal_db).await {
+        error!(error = %e, "Bootstrap admin seeding failed");
+    }
 
     // Spawn the Axum HTTP server.
     // Monitored below — if the server dies the process exits rather than
