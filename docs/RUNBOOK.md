@@ -182,9 +182,12 @@ wires NextAuth to call this surface; today the extractors ride behind
 
 **Production requires `JWT_KEYS`.** With `APP_ENV=production` the
 process panics at boot if `JWT_KEYS` is missing or contains no active
-entry. In dev/test, an ephemeral RSA-2048 keypair is generated on boot
-and a warning is logged — this keeps `cargo run` frictionless but is
-unsafe to deploy (every restart invalidates every outstanding token).
+entry. When `APP_ENV` is explicitly set to `development` or `test`, an
+ephemeral RSA-2048 keypair is generated on boot and a warning is logged —
+this keeps `cargo run` frictionless but is unsafe to deploy (every
+restart invalidates every outstanding token). Missing or unrecognised
+`APP_ENV` values fail closed, so local setups must set `APP_ENV`
+explicitly.
 
 **Refresh rotation = theft detection.** The rotation endpoint follows
 RFC 6749 BCP §4.12: every use of a refresh token revokes the original
