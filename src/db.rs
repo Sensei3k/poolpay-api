@@ -94,7 +94,29 @@ async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
          DEFINE FIELD IF NOT EXISTS user_agent ON auth_event TYPE option<string>;
          DEFINE FIELD IF NOT EXISTS success ON auth_event TYPE bool;
          DEFINE FIELD IF NOT EXISTS reason ON auth_event TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS created_at ON auth_event TYPE string;",
+         DEFINE FIELD IF NOT EXISTS created_at ON auth_event TYPE string;
+
+         DEFINE TABLE IF NOT EXISTS refresh_token SCHEMAFULL;
+         DEFINE FIELD IF NOT EXISTS user_id ON refresh_token TYPE string;
+         DEFINE FIELD IF NOT EXISTS hashed_token ON refresh_token TYPE string;
+         DEFINE FIELD IF NOT EXISTS family_id ON refresh_token TYPE string;
+         DEFINE FIELD IF NOT EXISTS issued_at ON refresh_token TYPE string;
+         DEFINE FIELD IF NOT EXISTS expires_at ON refresh_token TYPE string;
+         DEFINE FIELD IF NOT EXISTS revoked_at ON refresh_token TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS replaced_by ON refresh_token TYPE option<string>;
+         DEFINE INDEX IF NOT EXISTS refresh_token_hashed
+             ON refresh_token FIELDS hashed_token UNIQUE;
+         DEFINE INDEX IF NOT EXISTS refresh_token_family ON refresh_token FIELDS family_id;
+         DEFINE INDEX IF NOT EXISTS refresh_token_user ON refresh_token FIELDS user_id;
+
+         DEFINE TABLE IF NOT EXISTS group_admin SCHEMAFULL;
+         DEFINE FIELD IF NOT EXISTS user_id ON group_admin TYPE string;
+         DEFINE FIELD IF NOT EXISTS group_id ON group_admin TYPE string;
+         DEFINE FIELD IF NOT EXISTS created_at ON group_admin TYPE string;
+         DEFINE FIELD IF NOT EXISTS created_by ON group_admin TYPE string;
+         DEFINE INDEX IF NOT EXISTS group_admin_user_group
+             ON group_admin FIELDS user_id, group_id UNIQUE;
+         DEFINE INDEX IF NOT EXISTS group_admin_group ON group_admin FIELDS group_id;",
     )
     .await?
     .check()?;

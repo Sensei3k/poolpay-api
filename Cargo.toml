@@ -60,6 +60,22 @@ tower_governor = { version = "0.8", default-features = false, features = ["axum"
 governor = "0.10"
 dashmap = "6"
 
+# JWT verification + signing — RS256, kid-indexed key map for rotation (Plan 3 / BE-3)
+jsonwebtoken = "10"
+
+# RSA keygen — only used to mint an ephemeral dev/test keypair when JWT_KEYS is
+# unset outside production. Prod panics at boot without JWT_KEYS, so this dep is
+# never exercised on the hot path.
+rsa = { version = "0.9", features = ["pem"] }
+
+# Base64url encoding for opaque refresh tokens
+base64 = "0.22"
+
+# Random bytes — ephemeral JWT key generation in dev/test and opaque refresh
+# token material. `rsa` already depends on `rand`, listing it explicitly keeps
+# the dependency intentional.
+rand = "0.8"
+
 [dev-dependencies]
 # HTTP service test utilities — used in API integration tests
 tower = { version = "0.5", features = ["util"] }

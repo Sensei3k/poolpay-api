@@ -10,8 +10,10 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 
+use crate::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use crate::auth::rate_limit::{self, CredentialFailureLimiter, RateLimitConfig};
 use crate::db::DbConn;
+use std::sync::{Arc, OnceLock};
 use handlers::{
     confirm_receipt, create_cycle, create_group, create_member, create_payment,
     create_whatsapp_link, delete_cycle, delete_group, delete_member, delete_payment,
@@ -20,14 +22,32 @@ use handlers::{
 };
 
 /// Build the Axum router with all API routes and CORS middleware.
+///
+/// The verifier is built once per process and cached — rebuilding on every
+/// `router()` call would re-parse `JWT_KEYS` (or, in dev/test, generate a
+/// fresh RSA-2048 keypair) which is both expensive and breaks any caller
+/// that holds a previously-minted token across rebuilds.
 pub fn router(db: DbConn) -> Router {
-    router_with_config(db, RateLimitConfig::from_env())
+    static VERIFIER: OnceLock<SharedVerifier> = OnceLock::new();
+    let verifier = VERIFIER
+        .get_or_init(|| {
+            Arc::new(
+                StaticKeyVerifier::from_env(JwtConfig::from_env()).unwrap_or_else(|err| {
+                    panic!("Failed to initialise JWT verifier: {err}")
+                }),
+            )
+        })
+        .clone();
+    router_with_config(db, RateLimitConfig::from_env(), verifier)
 }
 
-/// Build the router with an explicit rate-limit config — used by tests that
-/// need to inject tuned limits (e.g. small bucket sizes that are easy to
-/// exhaust without wall-clock delays).
-pub fn router_with_config(db: DbConn, rate_cfg: RateLimitConfig) -> Router {
+/// Build the router with explicit rate-limit config and token verifier —
+/// used by tests that need tuned limits and a verifier they can mint against.
+pub fn router_with_config(
+    db: DbConn,
+    rate_cfg: RateLimitConfig,
+    verifier: SharedVerifier,
+) -> Router {
     let cors = build_cors();
 
     // Composite (ip, email) failure limiter — charged only on 401 from
@@ -43,6 +63,8 @@ pub fn router_with_config(db: DbConn, rate_cfg: RateLimitConfig) -> Router {
             post(auth_endpoints::verify_credentials),
         )
         .route("/api/auth/ensure-user", post(auth_endpoints::ensure_user))
+        .route("/api/auth/refresh", post(auth_endpoints::refresh_token_endpoint))
+        .route("/api/auth/logout", post(auth_endpoints::logout_endpoint))
         .layer(rate_limit::build_per_ip_layer(&rate_cfg))
         .layer(Extension(credential_failure_limiter))
         .layer(Extension(rate_cfg.clone()));
@@ -75,7 +97,9 @@ pub fn router_with_config(db: DbConn, rate_cfg: RateLimitConfig) -> Router {
         .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
         .route("/api/admin/whatsapp-links", post(create_whatsapp_link))
         .route("/api/admin/whatsapp-links/{id}", delete(delete_whatsapp_link))
-        // Auth endpoints (HMAC-gated, rate-limited) are merged below
+        // Auth endpoints (rate-limited; verify-credentials/ensure-user are
+        // HMAC-gated, refresh/logout authenticate via the refresh token itself)
+        // are merged below
         .merge(auth_router);
 
     // Fail-closed: the destructive test reset endpoint is only mounted when
@@ -86,7 +110,10 @@ pub fn router_with_config(db: DbConn, rate_cfg: RateLimitConfig) -> Router {
         router = router.route("/api/test/reset", post(reset_db));
     }
 
-    router.layer(cors).with_state(db)
+    // The verifier is injected as a request Extension so every handler
+    // (including the auth extractors landing in BE-5) can reach it without
+    // forcing a state-type migration on the existing DbConn-state router.
+    router.layer(cors).layer(Extension(verifier)).with_state(db)
 }
 
 fn build_cors() -> CorsLayer {

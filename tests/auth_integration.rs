@@ -9,17 +9,26 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt;
+use axum::{
+    extract::{Path, State},
+    http::StatusCode as AxumStatus,
+    routing::get,
+    Extension as AxumExtension,
+};
 use poolpay::{
     api,
     auth::{
         bootstrap,
+        extractors::{require_group_scope, AuthenticatedUser, SuperAdminUser},
         hmac::sign_for_testing,
+        jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier},
         password,
         rate_limit::{RateLimitConfig, TEST_PEER_IP_HEADER},
+        refresh,
     },
     db,
 };
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
 
 // ── Shared env setup ──────────────────────────────────────────────────────────
@@ -37,22 +46,56 @@ fn init_env() {
             std::env::set_var("NEXTAUTH_BACKEND_SECRET", HMAC_SECRET);
             std::env::set_var("BOOTSTRAP_ADMIN_EMAIL", BOOTSTRAP_EMAIL);
             std::env::set_var("BOOTSTRAP_ADMIN_PASSWORD", BOOTSTRAP_PASSWORD);
+            // Pin APP_ENV so `StaticKeyVerifier::from_env` takes the ephemeral
+            // branch even when the host shell has `APP_ENV=production` or a
+            // real `JWT_KEYS` set. Keeps the suite hermetic.
+            std::env::set_var("APP_ENV", "test");
+            std::env::remove_var("JWT_KEYS");
         }
     });
 }
 
 async fn test_app() -> (Router, poolpay::db::DbConn) {
-    build_app(lax_rate_cfg()).await
+    let (r, d, _v) = build_app_full(lax_rate_cfg()).await;
+    (r, d)
 }
 
 async fn build_app(rate_cfg: RateLimitConfig) -> (Router, poolpay::db::DbConn) {
+    let (r, d, _v) = build_app_full(rate_cfg).await;
+    (r, d)
+}
+
+async fn build_app_full(
+    rate_cfg: RateLimitConfig,
+) -> (Router, poolpay::db::DbConn, SharedVerifier) {
     init_env();
     let conn = db::init_memory().await.expect("failed to init test DB");
     bootstrap::ensure_admin_user(&conn)
         .await
         .expect("bootstrap seed must succeed");
-    let router = api::router_with_config(conn.clone(), rate_cfg);
-    (router, conn)
+    let verifier = test_verifier();
+    let router = api::router_with_config(conn.clone(), rate_cfg, verifier.clone());
+    (router, conn, verifier)
+}
+
+fn test_verifier() -> SharedVerifier {
+    // `StaticKeyVerifier::from_env` generates a fresh RSA-2048 keypair when
+    // `JWT_KEYS` is unset, which is expensive enough to dominate test runtime
+    // if we rebuild it per call. Build once per process and clone the `Arc`.
+    static VERIFIER: OnceLock<SharedVerifier> = OnceLock::new();
+    VERIFIER
+        .get_or_init(|| {
+            Arc::new(
+                StaticKeyVerifier::from_env(JwtConfig {
+                    audience: "poolpay-api".into(),
+                    issuer: "poolpay-nextauth".into(),
+                    access_ttl_secs: 900,
+                    leeway_secs: 60,
+                })
+                .expect("test verifier"),
+            )
+        })
+        .clone()
 }
 
 /// Non-restrictive config used by every non-rate-limit test. Large buckets so
@@ -543,6 +586,382 @@ async fn per_ip_limit_isolates_by_ip() {
     )
     .await;
     assert_eq!(ok.status(), StatusCode::OK);
+}
+
+// ── Refresh rotation + logout (Plan 3 / BE-3) ────────────────────────────────
+
+/// Provision a member user via the public ensure-user endpoint so we get a
+/// real `user_id` string without reaching into `pub(crate)` helpers.
+async fn seed_member(app: &Router, subject: &str, email: &str) -> String {
+    let body = serde_json::json!({
+        "provider": "google",
+        "providerSubject": subject,
+        "email": email,
+    });
+    let resp = call(app.clone(), hmac_request("/api/auth/ensure-user", &body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    v["userId"].as_str().unwrap().to_string()
+}
+
+fn refresh_req(token: &str) -> Request<Body> {
+    let body = serde_json::json!({ "refreshToken": token });
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/refresh")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn logout_req(token: &str) -> Request<Body> {
+    let body = serde_json::json!({ "refreshToken": token });
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/logout")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn refresh_rotates_and_invalidates_the_old_token() {
+    let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-refresh-1", "refresh1@example.com").await;
+
+    let issued = refresh::issue(&db, &user_id).await.expect("issue");
+    let original = issued.plaintext;
+
+    let resp = call(app.clone(), refresh_req(&original)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    let new_refresh = v["refreshToken"].as_str().unwrap().to_string();
+    assert!(!v["accessToken"].as_str().unwrap().is_empty());
+    assert_ne!(new_refresh, original, "rotation must mint a new token");
+
+    // Presenting the original token again is the reuse signal: it's already
+    // revoked, so the endpoint returns 401 and the rotation chain is killed.
+    let replay = call(app.clone(), refresh_req(&original)).await;
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+
+    // The freshly rotated token should also now be dead — family was revoked
+    // as part of reuse detection on the replay.
+    let after_reuse = call(app, refresh_req(&new_refresh)).await;
+    assert_eq!(after_reuse.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn refresh_reuse_bumps_token_version() {
+    let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-refresh-2", "refresh2@example.com").await;
+
+    let version_before = user_token_version(&db, &user_id).await;
+
+    let issued = refresh::issue(&db, &user_id).await.expect("issue");
+    let original = issued.plaintext;
+
+    // First rotate succeeds.
+    let ok = call(app.clone(), refresh_req(&original)).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    // Replay the now-revoked token: server must bump token_version and 401.
+    let replay = call(app, refresh_req(&original)).await;
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+
+    let version_after = user_token_version(&db, &user_id).await;
+    assert!(
+        version_after > version_before,
+        "token_version must advance on reuse detection: before={version_before} after={version_after}"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_refresh_rotation_detects_race_as_reuse() {
+    // Two callers present the same refresh token at the same time. The
+    // atomic conditional revoke guarantees exactly one wins; the other
+    // trips reuse detection and kills the family. If both walked away
+    // with live tokens in the same family we would have a working
+    // token-theft bypass — this test pins that behaviour down.
+    let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-race-1", "race1@example.com").await;
+    let issued = refresh::issue(&db, &user_id).await.expect("issue");
+
+    let a = tokio::spawn({
+        let app = app.clone();
+        let tok = issued.plaintext.clone();
+        async move { call(app, refresh_req(&tok)).await }
+    });
+    let b = tokio::spawn({
+        let app = app.clone();
+        let tok = issued.plaintext.clone();
+        async move { call(app, refresh_req(&tok)).await }
+    });
+    let (resp_a, resp_b) = (a.await.unwrap(), b.await.unwrap());
+
+    let mut statuses = [resp_a.status(), resp_b.status()];
+    statuses.sort_by_key(|s| s.as_u16());
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::UNAUTHORIZED],
+        "exactly one of the racing rotates must win; the other is reuse",
+    );
+
+    // The losing call must have killed the family: the winner's freshly
+    // rotated token is also dead now, just like the non-racing reuse path.
+    let version_after = user_token_version(&db, &user_id).await;
+    assert!(
+        version_after > 0,
+        "reuse detection on the racing call must bump token_version: got {version_after}"
+    );
+}
+
+#[tokio::test]
+async fn refresh_unknown_token_returns_401() {
+    let (app, _db) = test_app().await;
+    let resp = call(app, refresh_req("not-a-real-token")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn logout_revokes_family_and_always_returns_204() {
+    let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-logout-1", "logout1@example.com").await;
+
+    let issued = refresh::issue(&db, &user_id).await.expect("issue");
+
+    // Happy path: logout returns 204.
+    let out = call(app.clone(), logout_req(&issued.plaintext)).await;
+    assert_eq!(out.status(), StatusCode::NO_CONTENT);
+
+    // The refresh token is now dead — /refresh must 401.
+    let after = call(app.clone(), refresh_req(&issued.plaintext)).await;
+    assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+
+    // Unknown token → still 204 (no oracle).
+    let unknown = call(app, logout_req("nonsense")).await;
+    assert_eq!(unknown.status(), StatusCode::NO_CONTENT);
+}
+
+// ── Extractors (Plan 3 / BE-3) ────────────────────────────────────────────────
+
+/// Tiny inline router that exercises the extractors so we can verify their
+/// guard logic without waiting for BE-5 to flip real handlers over.
+fn extractor_app(db: poolpay::db::DbConn, verifier: SharedVerifier) -> Router {
+    async fn who_am_i(user: AuthenticatedUser) -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({
+            "userId": user.user_id,
+            "role": user.role,
+            "tokenVersion": user.token_version,
+        }))
+    }
+    async fn super_only(_: SuperAdminUser) -> AxumStatus {
+        AxumStatus::NO_CONTENT
+    }
+    async fn scoped(
+        user: AuthenticatedUser,
+        State(db): State<poolpay::db::DbConn>,
+        Path(gid): Path<String>,
+    ) -> Result<AxumStatus, poolpay::api::models::AppError> {
+        require_group_scope(&user, &gid, &db).await?;
+        Ok(AxumStatus::NO_CONTENT)
+    }
+
+    Router::new()
+        .route("/me", get(who_am_i))
+        .route("/super", get(super_only))
+        .route("/scope/{gid}", get(scoped))
+        .layer(AxumExtension(verifier))
+        .with_state(db)
+}
+
+fn bearer_get(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn user_token_version(db: &poolpay::db::DbConn, user_id: &str) -> i64 {
+    use surrealdb::types::RecordId;
+    let mut resp = db
+        .query("SELECT token_version FROM $id")
+        .bind(("id", RecordId::new("user", user_id.to_string())))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp.take("token_version").unwrap_or_default();
+    rows.first().copied().unwrap_or(-1)
+}
+
+async fn set_user_role(db: &poolpay::db::DbConn, user_id: &str, role: &str) {
+    use surrealdb::types::RecordId;
+    db.query("UPDATE $id SET role = $r")
+        .bind(("id", RecordId::new("user", user_id.to_string())))
+        .bind(("r", role.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+}
+
+async fn set_user_status(db: &poolpay::db::DbConn, user_id: &str, status: &str) {
+    use surrealdb::types::RecordId;
+    db.query("UPDATE $id SET status = $s")
+        .bind(("id", RecordId::new("user", user_id.to_string())))
+        .bind(("s", status.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+}
+
+async fn bootstrap_admin_id(db: &poolpay::db::DbConn) -> String {
+    let mut resp = db
+        .query("SELECT VALUE meta::id(id) FROM user WHERE email_normalised = $e LIMIT 1")
+        .bind(("e", BOOTSTRAP_EMAIL.to_lowercase()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<String> = resp.take(0).unwrap_or_default();
+    rows.into_iter().next().expect("bootstrap admin row must exist")
+}
+
+#[tokio::test]
+async fn extractor_accepts_valid_token_for_active_user() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-ext-1", "ext1@example.com").await;
+    let token = verifier.mint_access(&user_id, "member", 0).expect("mint");
+
+    let app = extractor_app(db, verifier);
+    let resp = call(app, bearer_get("/me", &token)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    assert_eq!(v["userId"].as_str().unwrap(), user_id);
+    assert_eq!(v["role"], "member");
+}
+
+#[tokio::test]
+async fn extractor_rejects_stale_token_version() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-ext-2", "ext2@example.com").await;
+
+    // Mint a token with a version that does not match the user's current 0.
+    let stale = verifier.mint_access(&user_id, "member", 42).expect("mint");
+
+    let app = extractor_app(db, verifier);
+    let resp = call(app, bearer_get("/me", &stale)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn extractor_rejects_disabled_user() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-ext-3", "ext3@example.com").await;
+    let token = verifier.mint_access(&user_id, "member", 0).expect("mint");
+
+    set_user_status(&db, &user_id, "disabled").await;
+
+    let app = extractor_app(db, verifier);
+    let resp = call(app, bearer_get("/me", &token)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn extractor_rejects_missing_bearer() {
+    let (_app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let app = extractor_app(db, verifier);
+
+    let no_header = Request::builder()
+        .method(Method::GET)
+        .uri("/me")
+        .body(Body::empty())
+        .unwrap();
+    let resp = call(app, no_header).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn super_admin_extractor_accepts_super_admin_and_rejects_others() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+
+    let admin_id = bootstrap_admin_id(&db).await;
+    let admin_token = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint super");
+
+    let member_id = seed_member(&app, "sub-super-1", "super1@example.com").await;
+    let member_token = verifier.mint_access(&member_id, "member", 0).expect("mint");
+
+    let test_app = extractor_app(db, verifier);
+
+    let ok = call(test_app.clone(), bearer_get("/super", &admin_token)).await;
+    assert_eq!(ok.status(), StatusCode::NO_CONTENT);
+
+    let denied = call(test_app, bearer_get("/super", &member_token)).await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn group_scope_super_admin_bypasses() {
+    let (_app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let token = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint");
+
+    let test_app = extractor_app(db, verifier);
+    // No `group_admin` row exists — super_admin still passes.
+    let resp = call(test_app, bearer_get("/scope/any-group-id", &token)).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn group_scope_admin_requires_group_admin_row() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+
+    let user_id = seed_member(&app, "sub-scope-1", "scope1@example.com").await;
+    set_user_role(&db, &user_id, "admin").await;
+    let token = verifier.mint_access(&user_id, "admin", 0).expect("mint");
+
+    let test_app = extractor_app(db.clone(), verifier);
+
+    // No row yet → 403.
+    let denied = call(test_app.clone(), bearer_get("/scope/group-7", &token)).await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    // Add the join row — now the same token passes for that specific group.
+    db.create::<Option<poolpay::api::models::DbGroupAdmin>>("group_admin")
+        .content(poolpay::api::models::GroupAdminContent {
+            user_id: user_id.clone(),
+            group_id: "group-7".into(),
+            created_at: poolpay::api::models::now_iso(),
+            created_by: "test".into(),
+        })
+        .await
+        .expect("insert group_admin")
+        .expect("row returned");
+
+    let ok = call(test_app.clone(), bearer_get("/scope/group-7", &token)).await;
+    assert_eq!(ok.status(), StatusCode::NO_CONTENT);
+
+    // Different group still denied.
+    let other = call(test_app, bearer_get("/scope/group-8", &token)).await;
+    assert_eq!(other.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn group_scope_member_is_always_forbidden() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-scope-2", "scope2@example.com").await;
+    let token = verifier.mint_access(&user_id, "member", 0).expect("mint");
+
+    let test_app = extractor_app(db, verifier);
+    let resp = call(test_app, bearer_get("/scope/group-9", &token)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
 // ── Password primitives sanity check ──────────────────────────────────────────

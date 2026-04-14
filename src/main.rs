@@ -1,6 +1,8 @@
+use poolpay::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use poolpay::auth::rate_limit::RateLimitConfig;
 use poolpay::{api, auth, db, extractor, ingestion, parser, replies, whatsapp};
 use poolpay::api::models::now_iso;
+use std::sync::Arc;
 
 use dotenv::dotenv;
 use std::{env, net::SocketAddr};
@@ -59,6 +61,14 @@ async fn main() {
         }
     }
 
+    // Boot-time JWT verifier. In production this panics if JWT_KEYS is unset
+    // or has no active key; in dev/test an ephemeral RSA keypair is generated
+    // so `cargo run` needs no extra setup.
+    let verifier: SharedVerifier = Arc::new(
+        StaticKeyVerifier::from_env(JwtConfig::from_env())
+            .unwrap_or_else(|err| panic!("Failed to initialise JWT verifier: {err}")),
+    );
+
     // Parse rate-limit config once at boot and reuse the same instance for
     // both the boot-time safety warning and the router. Previously main.rs
     // duplicated `TRUST_PROXY_HEADERS` parsing which drifted from
@@ -103,7 +113,7 @@ async fn main() {
         let addr: SocketAddr = bind_addr
             .parse()
             .expect("API_BIND_ADDR is not a valid socket address");
-        let router = api::router_with_config(api_db, rate_cfg);
+        let router = api::router_with_config(api_db, rate_cfg, verifier);
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .expect("Failed to bind Axum listener");

@@ -1027,3 +1027,50 @@ pub struct DbAuthEvent {
     pub created_at: String,
 }
 
+/// Row shape for minting a new refresh token. `hashed_token` is the sha256
+/// hex of the opaque 32-byte random value handed to the client — the
+/// plaintext never hits disk, so a DB leak cannot be replayed as-is.
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+pub struct RefreshTokenContent {
+    pub user_id: String,
+    pub hashed_token: String,
+    pub family_id: String,
+    pub issued_at: String,
+    pub expires_at: String,
+    pub revoked_at: Option<String>,
+    pub replaced_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, SurrealValue)]
+pub struct DbRefreshToken {
+    pub id: RecordId,
+    pub user_id: String,
+    pub hashed_token: String,
+    pub family_id: String,
+    pub issued_at: String,
+    pub expires_at: String,
+    pub revoked_at: Option<String>,
+    pub replaced_by: Option<String>,
+}
+
+/// Grants one `admin`-role user access to one group. Presence of a row is
+/// the RBAC check; deleting the row is the revocation primitive (and bumps
+/// the target user's `token_version`).
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+pub struct GroupAdminContent {
+    pub user_id: String,
+    pub group_id: String,
+    pub created_at: String,
+    pub created_by: String,
+}
+
+#[derive(Debug, Clone, Deserialize, SurrealValue)]
+#[allow(dead_code)] // Wired to handlers in BE-7; kept here so BE-3 sets the shape.
+pub struct DbGroupAdmin {
+    pub id: RecordId,
+    pub user_id: String,
+    pub group_id: String,
+    pub created_at: String,
+    pub created_by: String,
+}
+

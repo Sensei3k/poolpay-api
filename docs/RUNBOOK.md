@@ -104,6 +104,26 @@ AUTH_CREDENTIAL_FAILURE_WINDOW_SECS=900
 # behind a reverse proxy that strips user-supplied copies of that header
 # (Fly, Vercel edge, nginx). Default false.
 TRUST_PROXY_HEADERS=false
+
+# --- JWT verifier (Plan 3 / BE-3) ---
+# RS256 key material. JSON array of entries:
+#   [{"kid":"...","active":true,"public_pem":"...","private_pem":"..."}]
+# Exactly one entry must be active — that key mints new access tokens;
+# inactive entries are accepted during rotation. Required in production.
+# JWT_KEYS=...
+
+# Audience / issuer claims the verifier enforces on every access token.
+JWT_AUDIENCE=poolpay-api
+JWT_ISSUER=poolpay-nextauth
+
+# Access-token lifetime (seconds). Short on purpose — refresh rotates.
+JWT_ACCESS_TTL_SECS=900
+
+# Clock-skew tolerance for exp/nbf/iat validation.
+JWT_LEEWAY_SECS=60
+
+# Refresh-token lifetime (seconds). Default: 14 days.
+JWT_REFRESH_TTL_SECS=1209600
 ```
 
 ### Auth Rate Limiting
@@ -138,12 +158,53 @@ leaves that as the proxy's own IP, set `TRUST_PROXY_HEADERS=true` so the
 proxy's `X-Forwarded-For` is honoured — but only if the proxy strips any
 client-supplied copy of that header, otherwise callers can spoof their IP.
 
+### JWT Verification + Refresh Rotation
+
+The API verifies RS256 access tokens and rotates refresh tokens. BE-4
+wires NextAuth to call this surface; today the extractors ride behind
+`#[allow(dead_code)]`.
+
+- **`JWT_KEYS`** — JSON array of keypairs:
+  `[{ "kid": "...", "active": true, "public_pem": "...", "private_pem": "..." }]`.
+  Exactly one active entry is required. The active key mints tokens
+  inside `/api/auth/refresh`; any listed key verifies incoming access
+  tokens (staged rotation: publish the new key as inactive, flip
+  `active` once the upstream minter has picked it up, then remove
+  the old entry one refresh cycle later).
+- **`JWT_AUDIENCE` / `JWT_ISSUER`** — enforced on every access token.
+  Must match whatever the upstream minter stamps on tokens; a mismatch
+  is a hard 401 with no body hint.
+- **`JWT_ACCESS_TTL_SECS`** — access-token lifetime. Default 900 (15 min).
+  Short on purpose: `token_version` bumps on role changes and refresh
+  reuse detection take effect within this window.
+- **`JWT_LEEWAY_SECS`** — clock-skew tolerance for exp/nbf/iat. Default 60.
+- **`JWT_REFRESH_TTL_SECS`** — refresh-token lifetime. Default 1209600 (14 days).
+
+**Production requires `JWT_KEYS`.** With `APP_ENV=production` the
+process panics at boot if `JWT_KEYS` is missing or contains no active
+entry. When `APP_ENV` is explicitly set to `development` or `test`, an
+ephemeral RSA-2048 keypair is generated on boot and a warning is logged —
+this keeps `cargo run` frictionless but is unsafe to deploy (every
+restart invalidates every outstanding token). Missing or unrecognised
+`APP_ENV` values fail closed, so local setups must set `APP_ENV`
+explicitly.
+
+**Refresh rotation = theft detection.** The rotation endpoint follows
+OAuth 2.0 Security BCP (RFC 9700) §4.12: every use of a refresh token revokes the original
+row and issues a new one in the same family. Presenting an already-
+rotated token is treated as evidence of compromise — the entire family
+is revoked, the user's `token_version` is bumped (which invalidates any
+outstanding access tokens within the 15-minute TTL), and an
+`auth_event{refresh_reuse_detected}` is written. The caller receives
+a generic 401 so the signal is not exposed to the attacker.
+
 ### Production Security
 
 - Set `APP_ENV=production` to enable CORS restrictions
 - Set `DASHBOARD_ORIGIN` to the dashboard URL
 - Set a strong `ADMIN_TOKEN` (at least 32 hex characters)
 - Set `NEXTAUTH_BACKEND_SECRET` to a value with ≥ 32 bytes — the process panics at boot in production if it is shorter or unset
+- Set `JWT_KEYS` with at least one active RS256 entry — the process panics at boot in production if it is missing (ephemeral-key fallback is disabled outside dev/test)
 - The `/api/test/reset` endpoint is fail-closed: it only mounts when `APP_ENV=development` or `APP_ENV=test`. Unset `APP_ENV` on a staging/prod host and the endpoint stays unreachable
 - After the bootstrap admin's first password rotation, remove `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` from deployed env
 - Never commit `.env` with real credentials
