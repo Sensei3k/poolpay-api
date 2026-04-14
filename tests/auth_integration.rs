@@ -334,10 +334,11 @@ fn strict_credential_cfg() -> RateLimitConfig {
 
 fn strict_per_ip_cfg() -> RateLimitConfig {
     // Per-IP limiter with a tiny burst so tests can exhaust it in-process.
-    // `per_ip_per_minute=60` → one replenish per second; burst=2 means the
-    // third consecutive hit gets 429.
+    // `per_ip_per_minute=1` → one replenish per minute; burst=2 means the
+    // third consecutive hit gets 429 without any risk of a token refilling
+    // mid-test on slow CI.
     RateLimitConfig {
-        per_ip_per_minute: 60,
+        per_ip_per_minute: 1,
         per_ip_burst: 2,
         credential_failure_limit: 1000,
         credential_failure_window_secs: 900,
