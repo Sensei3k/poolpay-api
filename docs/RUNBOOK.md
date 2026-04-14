@@ -107,7 +107,7 @@ TRUST_PROXY_HEADERS=false
 
 # --- JWT verifier (Plan 3 / BE-3) ---
 # RS256 key material. JSON array of entries:
-#   [{"kid":"...","is_active":true,"public_pem":"...","private_pem":"..."}]
+#   [{"kid":"...","active":true,"public_pem":"...","private_pem":"..."}]
 # Exactly one entry must be active — that key mints new access tokens;
 # inactive entries are accepted during rotation. Required in production.
 # JWT_KEYS=...
@@ -165,11 +165,11 @@ wires NextAuth to call this surface; today the extractors ride behind
 `#[allow(dead_code)]`.
 
 - **`JWT_KEYS`** — JSON array of keypairs:
-  `[{ "kid": "...", "is_active": true, "public_pem": "...", "private_pem": "..." }]`.
+  `[{ "kid": "...", "active": true, "public_pem": "...", "private_pem": "..." }]`.
   Exactly one active entry is required. The active key mints tokens
   inside `/api/auth/refresh`; any listed key verifies incoming access
   tokens (staged rotation: publish the new key as inactive, flip
-  `is_active` once the upstream minter has picked it up, then remove
+  `active` once the upstream minter has picked it up, then remove
   the old entry one refresh cycle later).
 - **`JWT_AUDIENCE` / `JWT_ISSUER`** — enforced on every access token.
   Must match whatever the upstream minter stamps on tokens; a mismatch
