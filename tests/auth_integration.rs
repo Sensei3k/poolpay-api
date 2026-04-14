@@ -14,12 +14,13 @@ use poolpay::{
     auth::{
         bootstrap,
         hmac::sign_for_testing,
+        jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier},
         password,
         rate_limit::{RateLimitConfig, TEST_PEER_IP_HEADER},
     },
     db,
 };
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
 
 // ── Shared env setup ──────────────────────────────────────────────────────────
@@ -51,8 +52,21 @@ async fn build_app(rate_cfg: RateLimitConfig) -> (Router, poolpay::db::DbConn) {
     bootstrap::ensure_admin_user(&conn)
         .await
         .expect("bootstrap seed must succeed");
-    let router = api::router_with_config(conn.clone(), rate_cfg);
+    let verifier = test_verifier();
+    let router = api::router_with_config(conn.clone(), rate_cfg, verifier);
     (router, conn)
+}
+
+fn test_verifier() -> SharedVerifier {
+    Arc::new(
+        StaticKeyVerifier::from_env(JwtConfig {
+            audience: "poolpay-api".into(),
+            issuer: "poolpay-nextauth".into(),
+            access_ttl_secs: 900,
+            leeway_secs: 60,
+        })
+        .expect("test verifier"),
+    )
 }
 
 /// Non-restrictive config used by every non-rate-limit test. Large buckets so

@@ -16,8 +16,10 @@ use crate::api::models::{
     UserIdentityContent, now_iso, record_id_to_string,
 };
 use crate::auth::hmac::HmacVerifiedJson;
+use crate::auth::jwt::SharedVerifier;
 use crate::auth::password;
 use crate::auth::rate_limit::{ClientIp, CredentialFailureLimiter};
+use crate::auth::refresh::{self, RefreshError};
 use crate::db::DbConn;
 
 const CREDENTIALS_PROVIDER: &str = "credentials";
@@ -368,6 +370,118 @@ async fn find_identity(
         .check()?;
     let rows: Vec<DbUserIdentity> = resp.take(0)?;
     Ok(rows.into_iter().next())
+}
+
+// ── refresh + logout ──────────────────────────────────────────────────────────
+
+const MAX_REFRESH_TOKEN_LEN: usize = 128;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: String,
+}
+
+/// Rotate a refresh token and mint a fresh access token. Dead code from the
+/// client perspective until BE-4 wires NextAuth to start calling it.
+///
+/// Every failure path produces `401 Unauthorized` with no body hint — the
+/// caller cannot distinguish "expired" from "reused" from "unknown" because
+/// that distinction is only useful to an attacker.
+pub async fn refresh_token_endpoint(
+    State(db): State<DbConn>,
+    Extension(verifier): Extension<SharedVerifier>,
+    ClientIp(client_ip): ClientIp,
+    Json(req): Json<RefreshRequest>,
+) -> Result<Json<RefreshResponse>, AppError> {
+    if req.refresh_token.is_empty() || req.refresh_token.len() > MAX_REFRESH_TOKEN_LEN {
+        return Err(AppError::Unauthorized);
+    }
+
+    let ip = client_ip.to_string();
+    let (new_token, user_id) = match refresh::rotate(&db, &req.refresh_token).await {
+        Ok(pair) => pair,
+        Err(RefreshError::ReuseDetected) => {
+            // `rotate` already killed the family, bumped token_version, and
+            // wrote the audit row — we only need to 401 the caller.
+            return Err(AppError::Unauthorized);
+        }
+        Err(RefreshError::NotFound | RefreshError::Expired) => {
+            record_auth_event(&db, None, "refresh_failure", false, Some("invalid"), Some(&ip))
+                .await;
+            return Err(AppError::Unauthorized);
+        }
+        Err(e @ (RefreshError::Db(_) | RefreshError::Internal(_))) => {
+            tracing::error!(error = %e, "refresh rotate failed");
+            return Err(AppError::Internal("refresh failed".into()));
+        }
+    };
+
+    // Mint a matching access token. The user row is loaded fresh to pick up
+    // the latest role + token_version — those can change between refreshes.
+    let user = refresh::load_user(&db, &user_id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or(AppError::Unauthorized)?;
+
+    if user.status != "active" || user.deleted_at.is_some() {
+        return Err(AppError::Unauthorized);
+    }
+
+    let access = verifier
+        .mint_access(&user_id, &user.role, user.token_version)
+        .map_err(|e| {
+            tracing::error!(error = %e, "mint access on refresh failed");
+            AppError::Internal("refresh failed".into())
+        })?;
+
+    record_auth_event(&db, Some(user_id), "refresh_success", true, None, Some(&ip)).await;
+
+    Ok(Json(RefreshResponse {
+        access_token: access,
+        refresh_token: new_token.plaintext,
+        expires_at: new_token.expires_at,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogoutRequest {
+    pub refresh_token: String,
+}
+
+/// Revoke the entire refresh-token family the caller belongs to. Always
+/// returns 204 — we do not signal whether the token was known so logout
+/// cannot be used as an oracle.
+pub async fn logout_endpoint(
+    State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
+    Json(req): Json<LogoutRequest>,
+) -> Result<axum::http::StatusCode, AppError> {
+    if req.refresh_token.is_empty() || req.refresh_token.len() > MAX_REFRESH_TOKEN_LEN {
+        return Ok(axum::http::StatusCode::NO_CONTENT);
+    }
+    let ip = client_ip.to_string();
+    match refresh::revoke_by_presented(&db, &req.refresh_token).await {
+        Ok(user_id) => {
+            record_auth_event(&db, Some(user_id), "logout", true, None, Some(&ip)).await;
+        }
+        Err(RefreshError::NotFound) => {
+            // Unknown token — still return 204 to avoid leaking validity.
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "logout revoke failed");
+        }
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 async fn record_auth_event(

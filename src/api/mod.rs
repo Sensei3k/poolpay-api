@@ -10,8 +10,10 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 
+use crate::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use crate::auth::rate_limit::{self, CredentialFailureLimiter, RateLimitConfig};
 use crate::db::DbConn;
+use std::sync::Arc;
 use handlers::{
     confirm_receipt, create_cycle, create_group, create_member, create_payment,
     create_whatsapp_link, delete_cycle, delete_group, delete_member, delete_payment,
@@ -21,13 +23,20 @@ use handlers::{
 
 /// Build the Axum router with all API routes and CORS middleware.
 pub fn router(db: DbConn) -> Router {
-    router_with_config(db, RateLimitConfig::from_env())
+    let verifier: SharedVerifier = Arc::new(
+        StaticKeyVerifier::from_env(JwtConfig::from_env())
+            .expect("JWT_KEYS must be set or APP_ENV must permit an ephemeral key"),
+    );
+    router_with_config(db, RateLimitConfig::from_env(), verifier)
 }
 
-/// Build the router with an explicit rate-limit config — used by tests that
-/// need to inject tuned limits (e.g. small bucket sizes that are easy to
-/// exhaust without wall-clock delays).
-pub fn router_with_config(db: DbConn, rate_cfg: RateLimitConfig) -> Router {
+/// Build the router with explicit rate-limit config and token verifier —
+/// used by tests that need tuned limits and a verifier they can mint against.
+pub fn router_with_config(
+    db: DbConn,
+    rate_cfg: RateLimitConfig,
+    verifier: SharedVerifier,
+) -> Router {
     let cors = build_cors();
 
     // Composite (ip, email) failure limiter — charged only on 401 from
@@ -43,6 +52,8 @@ pub fn router_with_config(db: DbConn, rate_cfg: RateLimitConfig) -> Router {
             post(auth_endpoints::verify_credentials),
         )
         .route("/api/auth/ensure-user", post(auth_endpoints::ensure_user))
+        .route("/api/auth/refresh", post(auth_endpoints::refresh_token_endpoint))
+        .route("/api/auth/logout", post(auth_endpoints::logout_endpoint))
         .layer(rate_limit::build_per_ip_layer(&rate_cfg))
         .layer(Extension(credential_failure_limiter))
         .layer(Extension(rate_cfg.clone()));
@@ -86,7 +97,10 @@ pub fn router_with_config(db: DbConn, rate_cfg: RateLimitConfig) -> Router {
         router = router.route("/api/test/reset", post(reset_db));
     }
 
-    router.layer(cors).with_state(db)
+    // The verifier is injected as a request Extension so every handler
+    // (including the auth extractors landing in BE-5) can reach it without
+    // forcing a state-type migration on the existing DbConn-state router.
+    router.layer(cors).layer(Extension(verifier)).with_state(db)
 }
 
 fn build_cors() -> CorsLayer {
