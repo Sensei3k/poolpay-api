@@ -227,6 +227,12 @@ impl StaticKeyVerifier {
                 }
                 active_kid = Some(entry.kid.clone());
             }
+            if keys.contains_key(&entry.kid) {
+                return Err(format!(
+                    "JWT_KEYS contains duplicate kid={}; each entry must have a unique kid",
+                    entry.kid
+                ));
+            }
             keys.insert(
                 entry.kid.clone(),
                 KeyEntry { kid: entry.kid, encoding, decoding, active: entry.active },
@@ -509,6 +515,22 @@ mod tests {
             Ok(_) => panic!("expected error for multi-active keys"),
         };
         assert!(err.contains("more than one active"), "got: {err}");
+    }
+
+    #[test]
+    fn from_json_rejects_duplicate_kids() {
+        let (priv_pem, pub_pem) = pem_pair();
+        let raw = format!(
+            r#"[
+                {{ "kid": "dup", "private_pem": {priv_pem:?}, "public_pem": {pub_pem:?}, "active": true }},
+                {{ "kid": "dup", "private_pem": {priv_pem:?}, "public_pem": {pub_pem:?}, "active": false }}
+            ]"#
+        );
+        let err = match StaticKeyVerifier::from_json(&raw, test_config()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for duplicate kids"),
+        };
+        assert!(err.contains("duplicate kid"), "got: {err}");
     }
 
     #[test]
