@@ -108,6 +108,52 @@ pub fn parse_receipt(text: &str) -> ParsedReceipt {
     ParsedReceipt { sender, bank, amount }
 }
 
+/// Converts a normalised amount string (as produced by `parse_receipt`) into
+/// an integer kobo value. Returns `None` when the input is not a recognisable
+/// Naira amount.
+///
+/// Accepted shapes: `₦97,800.00`, `₦97,800`, `₦97800.5`. The currency prefix
+/// may be `₦`, `#`, or `NGN` (with optional whitespace). Thousand separators
+/// and spaces are ignored; decimals are truncated to two places of kobo.
+pub fn parse_amount_to_kobo(amount: &str) -> Option<i64> {
+    let trimmed = amount.trim();
+    let without_prefix = trimmed
+        .strip_prefix('₦')
+        .or_else(|| trimmed.strip_prefix('#'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix("NGN")
+                .or_else(|| trimmed.strip_prefix("ngn"))
+                .map(str::trim_start)
+        })?;
+
+    let cleaned: String = without_prefix
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ',')
+        .collect();
+
+    let (whole, fraction) = match cleaned.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (cleaned.as_str(), ""),
+    };
+
+    if whole.is_empty() || !whole.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if !fraction.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let naira: i64 = whole.parse().ok()?;
+    let kobo_fraction: i64 = match fraction.len() {
+        0 => 0,
+        1 => fraction.parse::<i64>().ok()? * 10,
+        _ => fraction[..2].parse().ok()?,
+    };
+
+    naira.checked_mul(100)?.checked_add(kobo_fraction)
+}
+
 /// Logs the fields of a ParsedReceipt.
 pub fn print_parsed(parsed: &ParsedReceipt) {
     info!(

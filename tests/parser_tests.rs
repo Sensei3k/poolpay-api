@@ -210,3 +210,42 @@ fn full_receipt_with_ocr_hash_and_space_noise() {
     assert_eq!(r.bank.as_deref(), Some("GTBank"));
     assert_eq!(r.amount.as_deref(), Some("₦15,000.00"));
 }
+
+// ── parse_amount_to_kobo ─────────────────────────────────────────────────────
+
+use poolpay::parser::parse_amount_to_kobo;
+
+#[test]
+fn kobo_naira_symbol_with_decimals() {
+    assert_eq!(parse_amount_to_kobo("₦10,000.00"), Some(1_000_000));
+}
+
+#[test]
+fn kobo_naira_symbol_no_decimals() {
+    assert_eq!(parse_amount_to_kobo("₦10,000"), Some(1_000_000));
+}
+
+#[test]
+fn kobo_single_decimal_digit() {
+    assert_eq!(parse_amount_to_kobo("₦10,000.5"), Some(1_000_050));
+}
+
+#[test]
+fn kobo_ngn_prefix() {
+    assert_eq!(parse_amount_to_kobo("NGN 97,800.25"), Some(9_780_025));
+}
+
+#[test]
+fn kobo_hash_prefix() {
+    assert_eq!(parse_amount_to_kobo("#500.00"), Some(50_000));
+}
+
+#[test]
+fn kobo_rejects_unprefixed() {
+    assert_eq!(parse_amount_to_kobo("10,000.00"), None);
+}
+
+#[test]
+fn kobo_rejects_garbage() {
+    assert_eq!(parse_amount_to_kobo("₦not-a-number"), None);
+}
