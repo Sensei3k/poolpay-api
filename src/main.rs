@@ -63,10 +63,15 @@ async fn main() {
     // setting its own — otherwise a client can spoof their source IP and
     // bypass per-IP rate limiting. Emit a prominent warning at boot so a
     // misconfigured proxy cannot silently neutralise the limiter.
-    let trust_proxy = matches!(
-        env::var("TRUST_PROXY_HEADERS").as_deref(),
-        Ok("true" | "1" | "yes")
-    );
+    let trust_proxy = env::var("TRUST_PROXY_HEADERS")
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes"
+            )
+        })
+        .unwrap_or(false);
     if trust_proxy && env::var("APP_ENV").as_deref() == Ok("production") {
         warn!(
             "TRUST_PROXY_HEADERS=true in production — confirm the upstream proxy \
