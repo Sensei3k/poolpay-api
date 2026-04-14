@@ -1,4 +1,5 @@
-use poolpay::{api, db, extractor, parser, whatsapp};
+use poolpay::{api, db, extractor, ingestion, parser, whatsapp};
+use poolpay::api::models::now_iso;
 
 use dotenv::dotenv;
 use std::{env, net::SocketAddr};
@@ -113,6 +114,38 @@ async fn main() {
                                             .sender_data
                                             .as_ref()
                                             .and_then(|s| s.chat_id.as_deref());
+                                        let sender_jid = notification
+                                            .body
+                                            .sender_data
+                                            .as_ref()
+                                            .and_then(|s| s.sender.as_deref());
+                                        let message_id = notification.body.id_message.as_deref();
+
+                                        match (chat_id, sender_jid, message_id) {
+                                            (Some(cid), Some(sender), Some(mid)) => {
+                                                let input = ingestion::IngestionInput {
+                                                    chat_id: cid,
+                                                    sender_phone: sender,
+                                                    message_id: mid,
+                                                    ocr_text: &text,
+                                                    parsed: &parsed,
+                                                    received_at: now_iso(),
+                                                };
+                                                match ingestion::ingest_receipt(&surreal_db, input).await {
+                                                    Ok(outcome) => info!(?outcome, "Ingestion outcome"),
+                                                    Err(e) => {
+                                                        error!(error = ?e, "Ingestion failed");
+                                                        processing_ok = false;
+                                                    }
+                                                }
+                                            }
+                                            _ => warn!(
+                                                has_chat_id = chat_id.is_some(),
+                                                has_sender = sender_jid.is_some(),
+                                                has_message_id = message_id.is_some(),
+                                                "Skipping ingestion — notification missing required ids"
+                                            ),
+                                        }
 
                                         if let Some(chat_id) = chat_id {
                                             let sender = parsed.sender.unwrap_or_else(|| "unknown".to_string());
