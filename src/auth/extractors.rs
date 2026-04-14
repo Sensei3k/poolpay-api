@@ -121,7 +121,7 @@ pub async fn require_group_scope(
     }
 }
 
-fn extract_bearer(parts: &Parts) -> Result<String, AppError> {
+pub(crate) fn extract_bearer(parts: &Parts) -> Result<String, AppError> {
     let header = parts
         .headers
         .get(axum::http::header::AUTHORIZATION)
