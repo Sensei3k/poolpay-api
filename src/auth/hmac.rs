@@ -56,8 +56,7 @@ where
 
         verify_signature(&secret, timestamp, &bytes, &signature_hex)?;
 
-        let value: T = serde_json::from_slice(&bytes)
-            .map_err(|e| AppError::BadRequest(format!("invalid JSON body: {e}")))?;
+        let value: T = serde_json::from_slice(&bytes).map_err(|_| AppError::Unauthorized)?;
         Ok(HmacVerifiedJson(value))
     }
 }
