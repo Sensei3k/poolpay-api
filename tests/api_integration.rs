@@ -78,17 +78,30 @@ async fn test_app_with_auth() -> Router {
 
 const TEST_SUPER_ADMIN_SUB: &str = "test-super-admin";
 const TEST_ADMIN_SUB: &str = "test-admin";
+const TEST_SCOPED_ADMIN_SUB: &str = "test-scoped-admin";
+/// Fixture group the scoped admin is granted access to — matches the
+/// single group id produced by `db::init_memory()`.
+const TEST_SCOPED_ADMIN_GROUP: &str = "1";
 
-/// Insert two pre-baked admin user rows so JWT-gated handlers find a
-/// matching `user` record on the `claims.sub → user` lookup. Roles are
-/// fixed: `TEST_SUPER_ADMIN_SUB` is the only sub that should pass
-/// `SuperAdminUser`; `TEST_ADMIN_SUB` is the canonical 403 fixture.
+/// Insert three pre-baked admin user rows so JWT-gated handlers find a
+/// matching `user` record on the `claims.sub → user` lookup, plus a
+/// `group_admin` row granting `TEST_SCOPED_ADMIN_SUB` access to the
+/// fixture group.
+///
+/// * `TEST_SUPER_ADMIN_SUB` — bypasses `GroupScopedAdmin` via role.
+/// * `TEST_SCOPED_ADMIN_SUB` — scoped `admin` with a matching
+///   `group_admin` row for `TEST_SCOPED_ADMIN_GROUP`; exercises the
+///   positive branch of `require_group_scope`.
+/// * `TEST_ADMIN_SUB` — `admin` with no `group_admin` rows; the
+///   canonical 403 fixture for both `SuperAdminUser` and
+///   `GroupScopedAdmin` handlers.
 async fn seed_test_admin_users(db: &poolpay::db::DbConn) {
     use poolpay::api::models::{DbUser, UserContent, now_iso};
 
     for (sub, role) in [
         (TEST_SUPER_ADMIN_SUB, "super_admin"),
         (TEST_ADMIN_SUB, "admin"),
+        (TEST_SCOPED_ADMIN_SUB, "admin"),
     ] {
         let now = now_iso();
         let content = UserContent {
@@ -109,6 +122,24 @@ async fn seed_test_admin_users(db: &poolpay::db::DbConn) {
             .await
             .expect("seed admin user");
     }
+
+    // Grant the scoped admin access to the fixture group. Inserted via raw
+    // query because `group_admin` has no helper Content type in the test
+    // harness and the schema asserts `UNIQUE(user_id, group_id)`.
+    let now = poolpay::api::models::now_iso();
+    db.query(
+        "CREATE group_admin SET \
+             user_id = $uid, group_id = $gid, \
+             created_at = $now, created_by = $creator",
+    )
+    .bind(("uid", TEST_SCOPED_ADMIN_SUB.to_string()))
+    .bind(("gid", TEST_SCOPED_ADMIN_GROUP.to_string()))
+    .bind(("now", now))
+    .bind(("creator", TEST_SUPER_ADMIN_SUB.to_string()))
+    .await
+    .expect("seed group_admin row")
+    .check()
+    .expect("group_admin insert check");
 }
 
 async fn call(app: Router, req: Request<Body>) -> Response {
@@ -133,16 +164,6 @@ fn post_json(uri: &str, body: serde_json::Value) -> Request<Body> {
         .method(Method::POST)
         .uri(uri)
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap()
-}
-
-fn post_json_authed(uri: &str, body: serde_json::Value) -> Request<Body> {
-    Request::builder()
-        .method(Method::POST)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header("authorization", "Bearer test-secret-token")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap()
 }
@@ -186,6 +207,13 @@ fn admin_bearer() -> String {
     format!("Bearer {}", mint_admin_jwt(TEST_ADMIN_SUB, "admin"))
 }
 
+/// Bearer for an `admin`-role user with a matching `group_admin` row
+/// for `TEST_SCOPED_ADMIN_GROUP`. Used to verify that scoped admins —
+/// not just super-admins — can reach `GroupScopedAdmin` handlers.
+fn scoped_admin_bearer() -> String {
+    format!("Bearer {}", mint_admin_jwt(TEST_SCOPED_ADMIN_SUB, "admin"))
+}
+
 fn post_json_jwt(uri: &str, body: serde_json::Value) -> Request<Body> {
     post_json_jwt_with(uri, body, &super_admin_bearer())
 }
@@ -201,20 +229,41 @@ fn post_json_jwt_with(uri: &str, body: serde_json::Value, bearer: &str) -> Reque
 }
 
 fn patch_json_jwt(uri: &str, body: serde_json::Value) -> Request<Body> {
+    patch_json_jwt_with(uri, body, &super_admin_bearer())
+}
+
+fn patch_json_jwt_with(uri: &str, body: serde_json::Value, bearer: &str) -> Request<Body> {
     Request::builder()
         .method(Method::PATCH)
         .uri(uri)
         .header("content-type", "application/json")
-        .header("authorization", super_admin_bearer())
+        .header("authorization", bearer)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap()
 }
 
 fn delete_req_jwt(uri: &str) -> Request<Body> {
+    delete_req_jwt_with(uri, &super_admin_bearer())
+}
+
+fn delete_req_jwt_with(uri: &str, bearer: &str) -> Request<Body> {
     Request::builder()
         .method(Method::DELETE)
         .uri(uri)
-        .header("authorization", super_admin_bearer())
+        .header("authorization", bearer)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn post_empty_jwt(uri: &str) -> Request<Body> {
+    post_empty_jwt_with(uri, &super_admin_bearer())
+}
+
+fn post_empty_jwt_with(uri: &str, bearer: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("authorization", bearer)
         .body(Body::empty())
         .unwrap()
 }
@@ -228,16 +277,6 @@ fn get_jwt(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
-fn patch_json_authed(uri: &str, body: serde_json::Value) -> Request<Body> {
-    Request::builder()
-        .method(Method::PATCH)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header("authorization", "Bearer test-secret-token")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap()
-}
-
 fn delete_req(uri: &str) -> Request<Body> {
     Request::builder()
         .method(Method::DELETE)
@@ -246,28 +285,10 @@ fn delete_req(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
-fn delete_req_authed(uri: &str) -> Request<Body> {
-    Request::builder()
-        .method(Method::DELETE)
-        .uri(uri)
-        .header("authorization", "Bearer test-secret-token")
-        .body(Body::empty())
-        .unwrap()
-}
-
 fn post_empty(uri: &str) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn post_empty_authed(uri: &str) -> Request<Body> {
-    Request::builder()
-        .method(Method::POST)
-        .uri(uri)
-        .header("authorization", "Bearer test-secret-token")
         .body(Body::empty())
         .unwrap()
 }
@@ -507,7 +528,7 @@ async fn create_member_returns_201() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/groups/1/members",
             serde_json::json!({
                 "name": "New Member",
@@ -529,7 +550,7 @@ async fn create_member_duplicate_phone_same_group_returns_409() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/groups/1/members",
             serde_json::json!({
                 "name": "Duplicate Phone",
@@ -558,7 +579,7 @@ async fn create_member_same_phone_different_group_allowed() {
     // Same phone as member 1 in group 1 — should succeed in different group.
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             &format!("/api/admin/groups/{group_id}/members"),
             serde_json::json!({
                 "name": "Cross-Group Member",
@@ -576,7 +597,7 @@ async fn create_member_nonexistent_group_returns_404() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/groups/999/members",
             serde_json::json!({
                 "name": "Orphan",
@@ -604,7 +625,7 @@ async fn update_member_name_only_preserves_other_fields() {
 
     let resp = call(
         app,
-        patch_json_authed(
+        patch_json_jwt(
             "/api/admin/members/1",
             serde_json::json!({"name": "Updated Name", "version": 1}),
         ),
@@ -623,7 +644,7 @@ async fn update_member_version_mismatch_returns_409() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        patch_json_authed(
+        patch_json_jwt(
             "/api/admin/members/1",
             serde_json::json!({"name": "X", "version": 999}),
         ),
@@ -638,7 +659,7 @@ async fn update_member_phone_to_duplicate_returns_409() {
     // Member 2's phone is "2347031234567". Try changing member 1's phone to it.
     let resp = call(
         app,
-        patch_json_authed(
+        patch_json_jwt(
             "/api/admin/members/1",
             serde_json::json!({"phone": "2347031234567", "version": 1}),
         ),
@@ -653,7 +674,7 @@ async fn update_member_phone_to_duplicate_returns_409() {
 async fn delete_member_active_cycle_recipient_returns_409() {
     // Member 3 is the recipient of cycle 3 (the active cycle).
     let app = test_app_with_auth().await;
-    let resp = call(app, delete_req_authed("/api/admin/members/3")).await;
+    let resp = call(app, delete_req_jwt("/api/admin/members/3")).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
 
@@ -661,7 +682,7 @@ async fn delete_member_active_cycle_recipient_returns_409() {
 async fn delete_member_not_recipient_returns_204() {
     // Member 6 is not the recipient of the active cycle.
     let app = test_app_with_auth().await;
-    let resp = call(app.clone(), delete_req_authed("/api/admin/members/6")).await;
+    let resp = call(app.clone(), delete_req_jwt("/api/admin/members/6")).await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // Verify soft delete — member no longer in default list.
@@ -675,13 +696,13 @@ async fn delete_already_deleted_member_returns_204() {
     let app = test_app_with_auth().await;
 
     // Delete member 6.
-    let resp = call(app.clone(), delete_req_authed("/api/admin/members/6")).await;
+    let resp = call(app.clone(), delete_req_jwt("/api/admin/members/6")).await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // Try to delete again — should still find the record via select but it
     // will appear deleted. The handler fetches by ID without soft-delete
     // filtering, so it will find it. This tests the current behaviour.
-    let resp = call(app, delete_req_authed("/api/admin/members/6")).await;
+    let resp = call(app, delete_req_jwt("/api/admin/members/6")).await;
     // The handler succeeds (re-sets deleted_at) — this is acceptable.
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
@@ -762,7 +783,7 @@ async fn create_cycle_returns_201_with_computed_total() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/groups/1/cycles",
             serde_json::json!({
                 "cycleNumber": 10,
@@ -799,7 +820,7 @@ async fn create_cycle_recipient_wrong_group_returns_400() {
     // Create a member in the other group.
     let resp = call(
         app.clone(),
-        post_json_authed(
+        post_json_jwt(
             &format!("/api/admin/groups/{other_gid}/members"),
             serde_json::json!({
                 "name": "Other Member",
@@ -815,7 +836,7 @@ async fn create_cycle_recipient_wrong_group_returns_400() {
     // Try to create cycle in group 1 with recipient from other group.
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/groups/1/cycles",
             serde_json::json!({
                 "cycleNumber": 10,
@@ -839,7 +860,7 @@ async fn update_cycle_contribution_recomputes_total() {
     // Cycle 3 (id=3) is the active cycle with contribution 1,000,000.
     let resp = call(
         app,
-        patch_json_authed(
+        patch_json_jwt(
             "/api/admin/cycles/3",
             serde_json::json!({
                 "contributionPerMember": 2_000_000,
@@ -862,7 +883,7 @@ async fn update_cycle_contribution_recomputes_total() {
 async fn delete_cycle_with_payments_returns_409() {
     let app = test_app_with_auth().await;
     // Cycle 3 has 3 fixture payments.
-    let resp = call(app, delete_req_authed("/api/admin/cycles/3")).await;
+    let resp = call(app, delete_req_jwt("/api/admin/cycles/3")).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
 
@@ -873,7 +894,7 @@ async fn delete_cycle_without_payments_returns_204() {
     // Create a new cycle with no payments.
     let resp = call(
         app.clone(),
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/groups/1/cycles",
             serde_json::json!({
                 "cycleNumber": 99,
@@ -890,7 +911,7 @@ async fn delete_cycle_without_payments_returns_204() {
 
     let resp = call(
         app,
-        delete_req_authed(&format!("/api/admin/cycles/{cycle_id}")),
+        delete_req_jwt(&format!("/api/admin/cycles/{cycle_id}")),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -901,7 +922,7 @@ async fn create_cycle_start_after_end_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/admin/groups/1/cycles",
             serde_json::json!({
                 "cycleNumber": 99,
@@ -996,7 +1017,7 @@ async fn create_payment_returns_201() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "4",
@@ -1016,7 +1037,7 @@ async fn create_payment_response_shape() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "4",
@@ -1043,7 +1064,7 @@ async fn create_payment_persists_to_db() {
 
     call(
         app.clone(),
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "4",
@@ -1066,7 +1087,7 @@ async fn create_payment_zero_amount_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "4", "cycleId": "3",
@@ -1083,7 +1104,7 @@ async fn create_payment_negative_amount_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "4", "cycleId": "3",
@@ -1100,7 +1121,7 @@ async fn create_payment_invalid_currency_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "4", "cycleId": "3",
@@ -1117,7 +1138,7 @@ async fn create_payment_invalid_date_format_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "4", "cycleId": "3",
@@ -1134,7 +1155,7 @@ async fn create_payment_empty_date_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "4", "cycleId": "3",
@@ -1151,7 +1172,7 @@ async fn create_payment_invalid_member_id_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "", "cycleId": "3",
@@ -1168,7 +1189,7 @@ async fn create_payment_nonexistent_member_returns_404() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "999", "cycleId": "3",
@@ -1185,7 +1206,7 @@ async fn create_payment_nonexistent_cycle_returns_404() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "1", "cycleId": "999",
@@ -1204,7 +1225,7 @@ async fn create_payment_same_group_returns_201() {
     // Member 1 and cycle 3 are both in group 1 — payment should be accepted.
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "1", "cycleId": "3",
@@ -1228,7 +1249,7 @@ async fn delete_payment_requires_auth() {
 #[tokio::test]
 async fn delete_payment_returns_204() {
     let app = test_app_with_auth().await;
-    let resp = call(app, delete_req_authed("/api/payments/1/3")).await;
+    let resp = call(app, delete_req_jwt("/api/payments/1/3")).await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
 
@@ -1240,7 +1261,7 @@ async fn delete_payment_soft_deletes_record() {
         json_body(call(app.clone(), get("/api/payments?cycleId=3")).await).await;
     assert_eq!(before.len(), 3);
 
-    call(app.clone(), delete_req_authed("/api/payments/1/3")).await;
+    call(app.clone(), delete_req_jwt("/api/payments/1/3")).await;
 
     // Soft-deleted payment should no longer appear in the default list.
     let after: Vec<serde_json::Value> =
@@ -1251,21 +1272,21 @@ async fn delete_payment_soft_deletes_record() {
 #[tokio::test]
 async fn delete_payment_unknown_member_returns_404() {
     let app = test_app_with_auth().await;
-    let resp = call(app, delete_req_authed("/api/payments/999/3")).await;
+    let resp = call(app, delete_req_jwt("/api/payments/999/3")).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn delete_payment_unknown_cycle_returns_404() {
     let app = test_app_with_auth().await;
-    let resp = call(app, delete_req_authed("/api/payments/1/999")).await;
+    let resp = call(app, delete_req_jwt("/api/payments/1/999")).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn delete_payment_404_body_has_error_field() {
     let app = test_app_with_auth().await;
-    let resp = call(app, delete_req_authed("/api/payments/999/3")).await;
+    let resp = call(app, delete_req_jwt("/api/payments/999/3")).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body: serde_json::Value = json_body(resp).await;
     assert!(
@@ -1288,7 +1309,7 @@ async fn reset_restores_payments_to_fixture_count() {
 
     call(
         app.clone(),
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "4", "cycleId": "3",
@@ -1339,7 +1360,7 @@ async fn bad_request_error_has_json_error_field() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_authed(
+        post_json_jwt(
             "/api/payments",
             serde_json::json!({
                 "memberId": "", "cycleId": "3",
@@ -1357,7 +1378,7 @@ async fn bad_request_error_has_json_error_field() {
 #[tokio::test]
 async fn not_found_error_has_json_error_field() {
     let app = test_app_with_auth().await;
-    let resp = call(app, delete_req_authed("/api/payments/999/999")).await;
+    let resp = call(app, delete_req_jwt("/api/payments/999/999")).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body: serde_json::Value = json_body(resp).await;
     assert!(body.get("error").is_some(), "404 must have an 'error' field");
@@ -1747,7 +1768,7 @@ async fn confirm_receipt_requires_auth() {
 #[tokio::test]
 async fn confirm_receipt_unknown_id_returns_404() {
     let app = test_app_with_auth().await;
-    let resp = call(app, post_empty_authed("/api/admin/receipts/does-not-exist/confirm")).await;
+    let resp = call(app, post_empty_jwt("/api/admin/receipts/does-not-exist/confirm")).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1755,7 +1776,7 @@ async fn confirm_receipt_unknown_id_returns_404() {
 async fn confirm_receipt_soft_deleted_returns_404() {
     // Fixture receipt id 2 is soft-deleted.
     let app = test_app_with_auth().await;
-    let resp = call(app, post_empty_authed("/api/admin/receipts/2/confirm")).await;
+    let resp = call(app, post_empty_jwt("/api/admin/receipts/2/confirm")).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1767,7 +1788,7 @@ async fn confirm_receipt_marks_status_and_creates_payment() {
         json_body(call(app.clone(), get("/api/payments")).await).await;
     let baseline = payments_before.len();
 
-    let resp = call(app.clone(), post_empty_authed("/api/admin/receipts/1/confirm")).await;
+    let resp = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/confirm")).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     let updated: serde_json::Value = json_body(resp).await;
@@ -1792,9 +1813,9 @@ async fn confirm_receipt_marks_status_and_creates_payment() {
 #[tokio::test]
 async fn confirm_receipt_twice_returns_409() {
     let app = test_app_with_auth().await;
-    let first = call(app.clone(), post_empty_authed("/api/admin/receipts/1/confirm")).await;
+    let first = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/confirm")).await;
     assert_eq!(first.status(), StatusCode::OK);
-    let second = call(app, post_empty_authed("/api/admin/receipts/1/confirm")).await;
+    let second = call(app, post_empty_jwt("/api/admin/receipts/1/confirm")).await;
     assert_eq!(second.status(), StatusCode::CONFLICT);
 }
 
@@ -1804,7 +1825,7 @@ async fn confirm_receipt_with_existing_payment_for_member_cycle_returns_409() {
     // then confirm the receipt and verify the duplicate-payment guard returns
     // HTTP 409 Conflict.
     let app = test_app_with_auth().await;
-    let create = post_json_authed(
+    let create = post_json_jwt(
         "/api/payments",
         serde_json::json!({
             "memberId": "4",
@@ -1817,7 +1838,7 @@ async fn confirm_receipt_with_existing_payment_for_member_cycle_returns_409() {
     let create_resp = call(app.clone(), create).await;
     assert_eq!(create_resp.status(), StatusCode::CREATED);
 
-    let resp = call(app, post_empty_authed("/api/admin/receipts/1/confirm")).await;
+    let resp = call(app, post_empty_jwt("/api/admin/receipts/1/confirm")).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
 
@@ -1833,7 +1854,7 @@ async fn reject_receipt_requires_auth() {
 #[tokio::test]
 async fn reject_receipt_unknown_id_returns_404() {
     let app = test_app_with_auth().await;
-    let resp = call(app, post_empty_authed("/api/admin/receipts/nope/reject")).await;
+    let resp = call(app, post_empty_jwt("/api/admin/receipts/nope/reject")).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1844,7 +1865,7 @@ async fn reject_receipt_marks_status_and_creates_no_payment() {
         json_body(call(app.clone(), get("/api/payments")).await).await;
     let baseline = payments_before.len();
 
-    let resp = call(app.clone(), post_empty_authed("/api/admin/receipts/1/reject")).await;
+    let resp = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/reject")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let updated: serde_json::Value = json_body(resp).await;
     assert_eq!(updated["status"], "rejected");
@@ -1859,17 +1880,323 @@ async fn reject_receipt_already_rejected_returns_409() {
     // Fixture receipt id 2 is rejected and soft-deleted, so reject hits 404.
     // Use receipt 1: reject once, then try again.
     let app = test_app_with_auth().await;
-    let first = call(app.clone(), post_empty_authed("/api/admin/receipts/1/reject")).await;
+    let first = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/reject")).await;
     assert_eq!(first.status(), StatusCode::OK);
-    let second = call(app, post_empty_authed("/api/admin/receipts/1/reject")).await;
+    let second = call(app, post_empty_jwt("/api/admin/receipts/1/reject")).await;
     assert_eq!(second.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
 async fn confirm_after_reject_returns_409() {
     let app = test_app_with_auth().await;
-    let r = call(app.clone(), post_empty_authed("/api/admin/receipts/1/reject")).await;
+    let r = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/reject")).await;
     assert_eq!(r.status(), StatusCode::OK);
-    let c = call(app, post_empty_authed("/api/admin/receipts/1/confirm")).await;
+    let c = call(app, post_empty_jwt("/api/admin/receipts/1/confirm")).await;
     assert_eq!(c.status(), StatusCode::CONFLICT);
+}
+
+// ── GroupScopedAdmin guard (BE-5b–e) ─────────────────────────────────────────
+//
+// These cases pin both branches of `require_group_scope` for every
+// group-scoped resource. `admin_bearer()` is an `admin`-role user with
+// no `group_admin` rows — it must be rejected with 403 on any handler
+// behind `GroupScopedAdmin`. `scoped_admin_bearer()` is an `admin` with
+// a `group_admin{user_id, group_id=1}` row and must succeed on the same
+// endpoints. Super-admin happy paths are already covered above via
+// `super_admin_bearer()` through the normal resource tests.
+
+#[tokio::test]
+async fn create_member_admin_without_group_admin_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_jwt_with(
+            "/api/admin/groups/1/members",
+            serde_json::json!({
+                "name": "Gatekept",
+                "phone": "+2348099990001",
+                "position": 7,
+            }),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_member_scoped_admin_proceeds() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_jwt_with(
+            "/api/admin/groups/1/members",
+            serde_json::json!({
+                "name": "Scoped Success",
+                "phone": "+2348099990002",
+                "position": 7,
+            }),
+            &scoped_admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn update_member_admin_without_group_admin_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt_with(
+            "/api/admin/members/1",
+            serde_json::json!({"name": "x", "version": 1}),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn delete_member_admin_without_group_admin_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        delete_req_jwt_with("/api/admin/members/3", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_cycle_admin_without_group_admin_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_jwt_with(
+            "/api/admin/groups/1/cycles",
+            serde_json::json!({
+                "cycleNumber": 99,
+                "startDate": "2027-01-01",
+                "endDate": "2027-01-31",
+                "contributionPerMember": 1_000,
+                "recipientMemberId": "4",
+            }),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_cycle_scoped_admin_proceeds() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_jwt_with(
+            "/api/admin/groups/1/cycles",
+            serde_json::json!({
+                "cycleNumber": 99,
+                "startDate": "2027-01-01",
+                "endDate": "2027-01-31",
+                "contributionPerMember": 1_000,
+                "recipientMemberId": "4",
+            }),
+            &scoped_admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn update_cycle_admin_without_group_admin_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt_with(
+            "/api/admin/cycles/1",
+            serde_json::json!({"version": 1, "status": "closed"}),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn delete_cycle_admin_without_group_admin_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        delete_req_jwt_with("/api/admin/cycles/3", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_payment_admin_without_group_admin_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_jwt_with(
+            "/api/payments",
+            serde_json::json!({
+                "memberId": "4",
+                "cycleId": "3",
+                "amount": 1_000_000,
+                "currency": "NGN",
+                "paymentDate": "2026-03-10",
+            }),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_payment_scoped_admin_proceeds() {
+    let app = test_app_with_auth().await;
+    // Member 4 has no payment in fixture cycle 3 yet; member 4 belongs to group 1.
+    let resp = call(
+        app,
+        post_json_jwt_with(
+            "/api/payments",
+            serde_json::json!({
+                "memberId": "4",
+                "cycleId": "3",
+                "amount": 1_000_000,
+                "currency": "NGN",
+                "paymentDate": "2026-03-10",
+            }),
+            &scoped_admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn delete_payment_admin_without_group_admin_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        delete_req_jwt_with("/api/payments/1/3", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn confirm_receipt_admin_without_group_admin_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_empty_jwt_with("/api/admin/receipts/1/confirm", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn reject_receipt_admin_without_group_admin_returns_403() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_empty_jwt_with("/api/admin/receipts/1/reject", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn reject_receipt_scoped_admin_proceeds() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_empty_jwt_with("/api/admin/receipts/1/reject", &scoped_admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ── Opaque-denial for unknown ids (cross-tenant existence probing) ───────────
+//
+// A non-scoped `admin` must not be able to distinguish "this id doesn't
+// exist" from "this id exists in a group you can't touch" — both collapse
+// to 403. Super-admins still see 404 for truly missing ids (covered by
+// the existing `*_unknown_*_returns_404` tests that run under
+// `super_admin_bearer()`).
+
+#[tokio::test]
+async fn update_member_unknown_id_denies_non_scoped_admin_opaquely() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt_with(
+            "/api/admin/members/does-not-exist",
+            serde_json::json!({"name": "x", "version": 1}),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn delete_cycle_unknown_id_denies_non_scoped_admin_opaquely() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        delete_req_jwt_with("/api/admin/cycles/does-not-exist", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn confirm_receipt_unknown_id_denies_non_scoped_admin_opaquely() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_empty_jwt_with("/api/admin/receipts/does-not-exist/confirm", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_payment_unknown_member_denies_non_scoped_admin_opaquely() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_jwt_with(
+            "/api/payments",
+            serde_json::json!({
+                "memberId": "does-not-exist",
+                "cycleId": "3",
+                "amount": 1_000_000,
+                "currency": "NGN",
+                "paymentDate": "2026-03-10",
+            }),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn delete_payment_unknown_cycle_denies_non_scoped_admin_opaquely() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        delete_req_jwt_with("/api/payments/1/does-not-exist", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }

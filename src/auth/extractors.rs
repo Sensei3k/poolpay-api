@@ -1,16 +1,15 @@
 //! Axum extractors that turn a bearer token into an attributable user.
 //!
-//! Three guards land in BE-3 but sit behind `#[allow(dead_code)]` until
-//! BE-4 mints real tokens and BE-5 flips handlers to consume them:
-//!
 //! * `AuthenticatedUser` — any active user with a valid, fresh access token
 //!   (signature + exp + token_version + status checks).
 //! * `SuperAdminUser` — `AuthenticatedUser` narrowed to `role == "super_admin"`.
-//! * `require_group_scope(&user, group_id, db)` — handler-called guard that
-//!   super-admins bypass and scoped admins pass iff a matching
-//!   `group_admin(user_id, group_id)` row exists. Kept as a helper (not a
-//!   typed extractor) because the `group_id` is often resolved from a
-//!   parent record (payment → cycle → group) inside the handler.
+//! * `GroupScopedAdmin` — handler-constructed guard wrapping an
+//!   `AuthenticatedUser` that has been checked against a specific
+//!   `group_id`: super-admins bypass, scoped admins pass iff a matching
+//!   `group_admin(user_id, group_id)` row exists. Built via
+//!   `GroupScopedAdmin::ensure()` rather than `FromRequestParts` because
+//!   the `group_id` is often resolved from a parent record
+//!   (payment → cycle → group) inside the handler.
 
 use axum::extract::{Extension, FromRef, FromRequestParts, State};
 use axum::http::request::Parts;
@@ -21,7 +20,6 @@ use crate::api::models::{AppError, DbUser};
 use crate::auth::jwt::SharedVerifier;
 use crate::db::DbConn;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: String,
@@ -32,6 +30,42 @@ pub struct AuthenticatedUser {
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SuperAdminUser(pub AuthenticatedUser);
+
+/// Wraps an `AuthenticatedUser` whose access to a specific `group_id` has
+/// been verified. Built via `ensure()` so handlers can resolve `group_id`
+/// from the path or a parent record before running the check.
+#[derive(Debug, Clone)]
+pub struct GroupScopedAdmin(pub AuthenticatedUser);
+
+impl GroupScopedAdmin {
+    pub async fn ensure(
+        user: AuthenticatedUser,
+        group_id: &str,
+        db: &DbConn,
+    ) -> Result<Self, AppError> {
+        require_group_scope(&user, group_id, db).await?;
+        Ok(Self(user))
+    }
+
+    /// Resolve the scope when the parent record may be missing. Passing
+    /// `None` for `group_id` means the target record was not found — in
+    /// that case super-admins receive `missing_err` (they already know
+    /// every id in the system) while non-super-admins receive the same
+    /// opaque 403 they would get for a cross-tenant record, so that
+    /// 404 vs 403 can't be used to probe existence across groups.
+    pub async fn ensure_or_deny(
+        user: AuthenticatedUser,
+        group_id: Option<&str>,
+        db: &DbConn,
+        missing_err: AppError,
+    ) -> Result<Self, AppError> {
+        match group_id {
+            Some(gid) => Self::ensure(user, gid, db).await,
+            None if user.role == "super_admin" => Err(missing_err),
+            None => Err(AppError::Forbidden("forbidden".into())),
+        }
+    }
+}
 
 impl AuthenticatedUser {
     /// Build an `AuthenticatedUser` from an already-parsed bearer token.
@@ -118,7 +152,6 @@ where
     }
 }
 
-#[allow(dead_code)]
 pub async fn require_group_scope(
     user: &AuthenticatedUser,
     group_id: &str,
