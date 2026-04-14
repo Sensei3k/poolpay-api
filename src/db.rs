@@ -74,7 +74,7 @@ async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
          DEFINE FIELD IF NOT EXISTS created_at ON user TYPE string;
          DEFINE FIELD IF NOT EXISTS updated_at ON user TYPE string;
          DEFINE FIELD IF NOT EXISTS deleted_at ON user TYPE option<string>;
-         DEFINE INDEX IF NOT EXISTS user_email_normalised ON user FIELDS email_normalised UNIQUE;
+         DEFINE INDEX IF NOT EXISTS user_email_normalised ON user FIELDS email_normalised;
 
          DEFINE TABLE IF NOT EXISTS user_identity SCHEMAFULL;
          DEFINE FIELD IF NOT EXISTS user_id ON user_identity TYPE string;
