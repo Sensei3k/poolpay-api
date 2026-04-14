@@ -146,10 +146,19 @@ pub async fn rotate(
         // Someone else already rotated this row. Roll back our freshly
         // minted row so the family doesn't accumulate orphans, then run
         // the full reuse response (kill family, bump token_version, audit).
-        let _: Option<DbRefreshToken> = db
-            .delete(("refresh_token", new_id.as_str()))
+        // Best-effort cleanup — surface DB errors in logs so orphan rows
+        // are observable, but do not fail the caller: the authoritative
+        // outcome (reuse detected) is already decided.
+        if let Err(err) = db
+            .delete::<Option<DbRefreshToken>>(("refresh_token", new_id.as_str()))
             .await
-            .unwrap_or(None);
+        {
+            warn!(
+                error = %err,
+                new_id = %new_id,
+                "failed to delete orphan refresh_token row after lost rotation race",
+            );
+        }
         handle_reuse(db, &row).await;
         return Err(RefreshError::ReuseDetected);
     }
