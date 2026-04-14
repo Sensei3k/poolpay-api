@@ -83,6 +83,29 @@ fn post_json_authed(uri: &str, body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
+/// Mint an admin access token signed by the same verifier the app uses,
+/// for the requested role (`super_admin` or `admin`). Per Plan 3 / BE-4:
+/// the helper is here so that BE-5's per-resource swap PRs can migrate
+/// tests off the legacy `Bearer test-secret-token` one resource at a
+/// time without having to thread the verifier through every call site.
+///
+/// The minted token references a synthetic `test-admin-user` subject with
+/// `token_version=0`. BE-5 sub-PRs that exercise the JWT path through the
+/// real `SuperAdminUser` / `GroupScopedAdmin` extractors are responsible
+/// for seeding a matching `user` row before calling this helper —
+/// `AdminOrLegacyToken` is the only consumer in BE-4 itself, and its
+/// integration coverage seeds its own users.
+#[allow(dead_code)]
+fn mint_admin_jwt(role: &str) -> String {
+    assert!(
+        matches!(role, "super_admin" | "admin"),
+        "mint_admin_jwt only mints admin-tier roles; got {role}"
+    );
+    poolpay::api::shared_verifier()
+        .mint_access("test-admin-user", role, 0)
+        .expect("shared verifier must mint")
+}
+
 fn patch_json_authed(uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method(Method::PATCH)

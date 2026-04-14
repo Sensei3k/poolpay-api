@@ -28,8 +28,16 @@ use handlers::{
 /// fresh RSA-2048 keypair) which is both expensive and breaks any caller
 /// that holds a previously-minted token across rebuilds.
 pub fn router(db: DbConn) -> Router {
+    router_with_config(db, RateLimitConfig::from_env(), shared_verifier())
+}
+
+/// Process-cached verifier used by `router()`. Exposed so the BE-4
+/// `mint_admin_jwt()` test helper can sign tokens with the same key the
+/// running app uses to verify them — without it, tests would build a
+/// fresh ephemeral keypair and the token's signature would be rejected.
+pub fn shared_verifier() -> SharedVerifier {
     static VERIFIER: OnceLock<SharedVerifier> = OnceLock::new();
-    let verifier = VERIFIER
+    VERIFIER
         .get_or_init(|| {
             Arc::new(
                 StaticKeyVerifier::from_env(JwtConfig::from_env()).unwrap_or_else(|err| {
@@ -37,8 +45,7 @@ pub fn router(db: DbConn) -> Router {
                 }),
             )
         })
-        .clone();
-    router_with_config(db, RateLimitConfig::from_env(), verifier)
+        .clone()
 }
 
 /// Build the router with explicit rate-limit config and token verifier —
