@@ -5,7 +5,7 @@ use surrealdb::engine::local::{Db, RocksDb};
 use tracing::info;
 
 use crate::api::models::{
-    CycleContent, DbCycle, DbGroup, DbMember, DbPayment, GroupContent, MemberContent,
+    CycleContent, DbCycle, DbGroup, DbGroupLink, DbMember, DbPayment, GroupContent, MemberContent,
     PaymentContent,
 };
 
@@ -17,6 +17,8 @@ pub type DbConn = Arc<Surreal<Db>>;
 pub async fn init() -> Result<DbConn, surrealdb::Error> {
     let db = Surreal::new::<RocksDb>("./data.surreal").await?;
     db.use_ns("circle").use_db("main").await?;
+
+    define_tables(&db).await?;
 
     if std::env::var("SEED_ON_EMPTY").as_deref() == Ok("true") {
         seed(&db).await?;
@@ -31,8 +33,28 @@ pub async fn init_memory() -> Result<DbConn, surrealdb::Error> {
     use surrealdb::engine::local::Mem;
     let db = Surreal::new::<Mem>(()).await?;
     db.use_ns("circle").use_db("main").await?;
+    define_tables(&db).await?;
     seed(&db).await?;
     Ok(Arc::new(db))
+}
+
+/// Idempotently define every table the application reads from.
+///
+/// In SurrealDB 3, `SELECT` against an undefined table returns an error rather
+/// than an empty result. Tables seeded via `upsert` in `insert_fixtures` are
+/// defined implicitly, but tables that start empty (e.g. `group_link`) must be
+/// declared here so handlers can query them without special-casing.
+async fn define_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+    db.query(
+        "DEFINE TABLE IF NOT EXISTS group SCHEMALESS;
+         DEFINE TABLE IF NOT EXISTS member SCHEMALESS;
+         DEFINE TABLE IF NOT EXISTS cycle SCHEMALESS;
+         DEFINE TABLE IF NOT EXISTS payment SCHEMALESS;
+         DEFINE TABLE IF NOT EXISTS group_link SCHEMALESS;",
+    )
+    .await?
+    .check()?;
+    Ok(())
 }
 
 /// Seed the database with fixture data.
@@ -44,8 +66,14 @@ async fn seed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
     let members: Vec<DbMember> = select_or_empty(db, "member").await?;
     let cycles: Vec<DbCycle> = select_or_empty(db, "cycle").await?;
     let payments: Vec<DbPayment> = select_or_empty(db, "payment").await?;
+    let group_links: Vec<DbGroupLink> = select_or_empty(db, "group_link").await?;
 
-    if !groups.is_empty() || !members.is_empty() || !cycles.is_empty() || !payments.is_empty() {
+    if !groups.is_empty()
+        || !members.is_empty()
+        || !cycles.is_empty()
+        || !payments.is_empty()
+        || !group_links.is_empty()
+    {
         info!("SurrealDB already has data — skipping seed");
         return Ok(());
     }
@@ -71,6 +99,7 @@ pub async fn reseed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
     let _: Vec<DbMember> = db.delete("member").await?;
     let _: Vec<DbCycle> = db.delete("cycle").await?;
     let _: Vec<DbPayment> = db.delete("payment").await?;
+    let _: Vec<DbGroupLink> = db.delete("group_link").await?;
 
     insert_fixtures(db).await?;
 

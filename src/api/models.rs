@@ -184,6 +184,16 @@ pub struct DbCycle {
 }
 
 #[derive(Debug, Deserialize, SurrealValue)]
+pub struct DbGroupLink {
+    pub id: RecordId,
+    pub chat_id: String,
+    pub group_id: EntityId,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
 pub struct DbPayment {
     pub id: RecordId,
     pub member_id: EntityId,
@@ -296,6 +306,21 @@ pub struct Payment {
     pub deleted_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupLink {
+    pub id: EntityId,
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    #[serde(rename = "groupId")]
+    pub group_id: EntityId,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    #[serde(rename = "deletedAt", skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+}
+
 // ── DB-to-API conversions ───────────────────────────────────────────────────
 
 /// Extract the string key from a SurrealDB RecordId.
@@ -385,6 +410,19 @@ impl TryFrom<DbPayment> for Payment {
     }
 }
 
+impl From<DbGroupLink> for GroupLink {
+    fn from(db: DbGroupLink) -> Self {
+        Self {
+            id: record_id_to_string(db.id),
+            chat_id: db.chat_id,
+            group_id: db.group_id,
+            created_at: db.created_at,
+            updated_at: db.updated_at,
+            deleted_at: db.deleted_at,
+        }
+    }
+}
+
 // ── DB-side insert structs (no id — SurrealDB owns the record ID) ───────────
 
 #[derive(Debug, Clone, Serialize, SurrealValue)]
@@ -440,6 +478,15 @@ pub struct PaymentContent {
     pub reference: Option<String>,
     pub confirmed_at: Option<String>,
     pub confirmed_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, SurrealValue)]
+pub struct GroupLinkContent {
+    pub chat_id: String,
+    pub group_id: EntityId,
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
@@ -727,6 +774,26 @@ impl CreatePaymentRequest {
             return Err(AppError::BadRequest(
                 "paymentDate must be a valid YYYY-MM-DD date".into(),
             ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateWhatsappLinkRequest {
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    #[serde(rename = "groupId")]
+    pub group_id: EntityId,
+}
+
+impl CreateWhatsappLinkRequest {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.chat_id.trim().is_empty() {
+            return Err(AppError::BadRequest("chatId must not be empty".into()));
+        }
+        if self.group_id.trim().is_empty() {
+            return Err(AppError::BadRequest("groupId must not be empty".into()));
         }
         Ok(())
     }

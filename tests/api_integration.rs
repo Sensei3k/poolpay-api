@@ -1219,3 +1219,243 @@ async fn conflict_error_has_json_error_field() {
     let body: serde_json::Value = json_body(resp).await;
     assert!(body.get("error").is_some(), "409 must have an 'error' field");
 }
+
+// ── WhatsApp links (admin CRUD) ─────────────────────────────────────────────
+
+fn get_authed(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("authorization", "Bearer test-secret-token")
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn create_whatsapp_link_no_auth_returns_401() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json(
+            "/api/admin/whatsapp-links",
+            serde_json::json!({"chatId": "2349000000001@g.us", "groupId": "1"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn get_whatsapp_links_no_auth_returns_401() {
+    let app = test_app_with_auth().await;
+    let resp = call(app, get("/api/admin/whatsapp-links")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn delete_whatsapp_link_no_auth_returns_401() {
+    let app = test_app_with_auth().await;
+    let resp = call(app, delete_req("/api/admin/whatsapp-links/xyz")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn create_whatsapp_link_returns_201_with_body() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_authed(
+            "/api/admin/whatsapp-links",
+            serde_json::json!({"chatId": "2349000000001@g.us", "groupId": "1"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let link: serde_json::Value = json_body(resp).await;
+    assert!(link.get("id").is_some(), "missing id");
+    assert_eq!(link["chatId"], "2349000000001@g.us");
+    assert_eq!(link["groupId"], "1");
+    assert!(link.get("createdAt").is_some(), "missing createdAt");
+    assert!(link.get("updatedAt").is_some(), "missing updatedAt");
+}
+
+#[tokio::test]
+async fn create_whatsapp_link_missing_group_returns_404() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_authed(
+            "/api/admin/whatsapp-links",
+            serde_json::json!({"chatId": "2349000000001@g.us", "groupId": "999"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn create_whatsapp_link_deleted_group_returns_404() {
+    let app = test_app_with_auth().await;
+
+    // Create a group, then soft-delete it.
+    let resp = call(
+        app.clone(),
+        post_json_authed("/api/admin/groups", serde_json::json!({"name": "Doomed"})),
+    )
+    .await;
+    let group: serde_json::Value = json_body(resp).await;
+    let gid = group["id"].as_str().unwrap().to_string();
+    let del = call(
+        app.clone(),
+        delete_req_authed(&format!("/api/admin/groups/{gid}")),
+    )
+    .await;
+    assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+    let resp = call(
+        app,
+        post_json_authed(
+            "/api/admin/whatsapp-links",
+            serde_json::json!({"chatId": "2349000000002@g.us", "groupId": gid}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn create_whatsapp_link_duplicate_chat_id_returns_409() {
+    let app = test_app_with_auth().await;
+    let body = serde_json::json!({"chatId": "2349000000003@g.us", "groupId": "1"});
+
+    let first = call(app.clone(), post_json_authed("/api/admin/whatsapp-links", body.clone())).await;
+    assert_eq!(first.status(), StatusCode::CREATED);
+
+    let second = call(app, post_json_authed("/api/admin/whatsapp-links", body)).await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn create_whatsapp_link_empty_chat_id_returns_400() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_authed(
+            "/api/admin/whatsapp-links",
+            serde_json::json!({"chatId": "   ", "groupId": "1"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_whatsapp_link_empty_group_id_returns_400() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_authed(
+            "/api/admin/whatsapp-links",
+            serde_json::json!({"chatId": "2349000000004@g.us", "groupId": ""}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn get_whatsapp_links_returns_200_empty_on_fresh_db() {
+    let app = test_app_with_auth().await;
+    let resp = call(app, get_authed("/api/admin/whatsapp-links")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let links: Vec<serde_json::Value> = json_body(resp).await;
+    assert_eq!(links.len(), 0);
+}
+
+#[tokio::test]
+async fn get_whatsapp_links_excludes_soft_deleted() {
+    let app = test_app_with_auth().await;
+
+    let created = call(
+        app.clone(),
+        post_json_authed(
+            "/api/admin/whatsapp-links",
+            serde_json::json!({"chatId": "2349000000005@g.us", "groupId": "1"}),
+        ),
+    )
+    .await;
+    let link: serde_json::Value = json_body(created).await;
+    let id = link["id"].as_str().unwrap().to_string();
+
+    let before: Vec<serde_json::Value> =
+        json_body(call(app.clone(), get_authed("/api/admin/whatsapp-links")).await).await;
+    assert_eq!(before.len(), 1);
+
+    let del = call(
+        app.clone(),
+        delete_req_authed(&format!("/api/admin/whatsapp-links/{id}")),
+    )
+    .await;
+    assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+    let after: Vec<serde_json::Value> =
+        json_body(call(app, get_authed("/api/admin/whatsapp-links")).await).await;
+    assert_eq!(after.len(), 0, "soft-deleted links must be excluded");
+}
+
+#[tokio::test]
+async fn delete_whatsapp_link_returns_204() {
+    let app = test_app_with_auth().await;
+    let created = call(
+        app.clone(),
+        post_json_authed(
+            "/api/admin/whatsapp-links",
+            serde_json::json!({"chatId": "2349000000006@g.us", "groupId": "1"}),
+        ),
+    )
+    .await;
+    let link: serde_json::Value = json_body(created).await;
+    let id = link["id"].as_str().unwrap().to_string();
+
+    let resp = call(
+        app,
+        delete_req_authed(&format!("/api/admin/whatsapp-links/{id}")),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn delete_whatsapp_link_nonexistent_returns_404() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        delete_req_authed("/api/admin/whatsapp-links/does-not-exist"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_whatsapp_link_allows_relinking_same_chat_id() {
+    let app = test_app_with_auth().await;
+    let body = serde_json::json!({"chatId": "2349000000007@g.us", "groupId": "1"});
+
+    let first = call(
+        app.clone(),
+        post_json_authed("/api/admin/whatsapp-links", body.clone()),
+    )
+    .await;
+    let link: serde_json::Value = json_body(first).await;
+    let id = link["id"].as_str().unwrap().to_string();
+
+    call(
+        app.clone(),
+        delete_req_authed(&format!("/api/admin/whatsapp-links/{id}")),
+    )
+    .await;
+
+    // Recreate the same chat_id — should succeed because previous row is soft-deleted.
+    let second = call(app, post_json_authed("/api/admin/whatsapp-links", body)).await;
+    assert_eq!(second.status(), StatusCode::CREATED);
+}
