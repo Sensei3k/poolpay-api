@@ -58,6 +58,23 @@ async fn main() {
         }
     }
 
+    // When the per-IP limiter is configured to trust proxy headers, the
+    // deployed proxy MUST strip any client-supplied X-Forwarded-For before
+    // setting its own — otherwise a client can spoof their source IP and
+    // bypass per-IP rate limiting. Emit a prominent warning at boot so a
+    // misconfigured proxy cannot silently neutralise the limiter.
+    let trust_proxy = matches!(
+        env::var("TRUST_PROXY_HEADERS").as_deref(),
+        Ok("true" | "1" | "yes")
+    );
+    if trust_proxy && env::var("APP_ENV").as_deref() == Ok("production") {
+        warn!(
+            "TRUST_PROXY_HEADERS=true in production — confirm the upstream proxy \
+             strips client-supplied X-Forwarded-For before appending; otherwise \
+             per-IP rate limiting can be bypassed by header spoofing"
+        );
+    }
+
     // Pre-warm the dummy Argon2 hash so the first unknown-email login path is
     // not measurably slower than subsequent ones (closes a timing side channel
     // around user enumeration).
