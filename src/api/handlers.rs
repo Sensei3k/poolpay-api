@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use surrealdb_types::SurrealValue;
 use tracing::error;
 
 use super::auth::AdminToken;
@@ -740,8 +741,15 @@ pub async fn confirm_receipt(
     }
 
     // Reject duplicate confirmations for the same member+cycle.
-    let existing: Vec<DbPayment> = db
-        .query("SELECT * FROM payment WHERE member_id = $mid AND cycle_id = $cid AND deleted_at IS NONE")
+    #[derive(Debug, Deserialize, SurrealValue)]
+    struct ExistingPaymentId {
+        #[allow(dead_code)]
+        id: surrealdb::types::RecordId,
+    }
+    let existing: Vec<ExistingPaymentId> = db
+        .query(
+            "SELECT id FROM payment WHERE member_id = $mid AND cycle_id = $cid AND deleted_at IS NONE LIMIT 1",
+        )
         .bind(("mid", member_id.clone()))
         .bind(("cid", cycle_id.clone()))
         .await?
@@ -753,11 +761,13 @@ pub async fn confirm_receipt(
     }
 
     let now = now_iso();
-    let payment_date = receipt
-        .received_at
-        .get(..10)
-        .unwrap_or(&receipt.received_at)
-        .to_string();
+    let payment_date = chrono::DateTime::parse_from_rfc3339(&receipt.received_at)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .map_err(|_| {
+            AppError::Conflict(format!(
+                "receipt {id} has an invalid received_at timestamp"
+            ))
+        })?;
 
     let payment_content = PaymentContent {
         member_id: member_id.clone(),

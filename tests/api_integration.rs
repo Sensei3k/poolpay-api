@@ -1635,13 +1635,9 @@ async fn confirm_receipt_twice_returns_409() {
 
 #[tokio::test]
 async fn confirm_receipt_with_existing_payment_for_member_cycle_returns_409() {
-    // Fixture payments cover member 1 for cycle 1; receipt 1 points at cycle 3,
-    // so confirm should succeed initially. After deleting that payment's
-    // member+cycle pairing manually isn't easy, so instead test via a second
-    // confirmation attempt covered above.
-    //
-    // For the duplicate-payment guard, create a payment for the receipt's
-    // member+cycle first, then confirm.
+    // Pre-create a payment for the same member+cycle referenced by receipt 1,
+    // then confirm the receipt and verify the duplicate-payment guard returns
+    // HTTP 409 Conflict.
     let app = test_app_with_auth().await;
     let create = post_json_authed(
         "/api/payments",
