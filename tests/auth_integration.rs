@@ -19,6 +19,7 @@ use poolpay::{
     api,
     auth::{
         bootstrap,
+        compat::AdminOrLegacyToken,
         extractors::{require_group_scope, AuthenticatedUser, SuperAdminUser},
         hmac::sign_for_testing,
         jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier},
@@ -28,7 +29,7 @@ use poolpay::{
     },
     db,
 };
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tower::ServiceExt;
 
 // ── Shared env setup ──────────────────────────────────────────────────────────
@@ -37,11 +38,23 @@ const HMAC_SECRET: &str = "test-hmac-secret-for-integration-only";
 const BOOTSTRAP_EMAIL: &str = "seed-admin@example.com";
 const BOOTSTRAP_PASSWORD: &str = "correct-horse-battery-staple";
 
+/// Single global lock serializing every `std::env::set_var`/`remove_var`
+/// call in this integration binary. Each test helper has its own `OnceLock`
+/// so it only mutates the env once, but those first-time initializers can
+/// still execute concurrently across helpers under parallel tests — which
+/// violates `set_var`'s safety precondition. Taking this mutex before any
+/// mutation makes the writer window mutually exclusive across helpers.
+fn env_lock() -> &'static Mutex<()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn init_env() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
-        // Safety: written once before any test reads these vars. Parallel
-        // tests may then read them freely.
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: serialized by `env_lock()` above; written once before any
+        // test reads these vars. Parallel tests may then read them freely.
         unsafe {
             std::env::set_var("NEXTAUTH_BACKEND_SECRET", HMAC_SECRET);
             std::env::set_var("BOOTSTRAP_ADMIN_EMAIL", BOOTSTRAP_EMAIL);
@@ -962,6 +975,146 @@ async fn group_scope_member_is_always_forbidden() {
     let test_app = extractor_app(db, verifier);
     let resp = call(test_app, bearer_get("/scope/group-9", &token)).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+// ── AdminOrLegacyToken compat shim (Plan 3 / BE-4) ───────────────────────────
+
+const LEGACY_ADMIN_TOKEN: &str = "legacy-admin-token-for-shim-tests";
+
+/// Set `ADMIN_TOKEN` once for the suite so the shim's legacy path has a
+/// stable expected value. Tests that exercise the unset/blank branches
+/// live in the unit-test module under `src/auth/compat.rs`.
+fn init_legacy_admin_token() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: serialized by `env_lock()` with every other env mutator
+        // in this binary; written once before any shim test reads ADMIN_TOKEN.
+        unsafe {
+            std::env::set_var("ADMIN_TOKEN", LEGACY_ADMIN_TOKEN);
+        }
+    });
+}
+
+fn shim_app(db: poolpay::db::DbConn, verifier: SharedVerifier) -> Router {
+    async fn admin_only(token: AdminOrLegacyToken) -> axum::Json<serde_json::Value> {
+        let kind = match &token {
+            AdminOrLegacyToken::Legacy => "legacy",
+            AdminOrLegacyToken::Jwt(_) => "jwt",
+        };
+        axum::Json(serde_json::json!({
+            "kind": kind,
+            "userId": token.user_id(),
+        }))
+    }
+
+    Router::new()
+        .route("/admin", get(admin_only))
+        .layer(AxumExtension(verifier))
+        .with_state(db)
+}
+
+#[tokio::test]
+async fn shim_accepts_legacy_admin_token() {
+    init_legacy_admin_token();
+    let (_app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let app = shim_app(db, verifier);
+
+    let resp = call(app, bearer_get("/admin", LEGACY_ADMIN_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    assert_eq!(v["kind"], "legacy");
+    assert!(v["userId"].is_null(), "legacy path is not tied to a user");
+}
+
+#[tokio::test]
+async fn shim_accepts_super_admin_jwt() {
+    init_legacy_admin_token();
+    let (_app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let token = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint super_admin");
+
+    let app = shim_app(db, verifier);
+    let resp = call(app, bearer_get("/admin", &token)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    assert_eq!(v["kind"], "jwt");
+    assert_eq!(v["userId"].as_str().unwrap(), admin_id);
+}
+
+#[tokio::test]
+async fn shim_accepts_admin_jwt() {
+    init_legacy_admin_token();
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-shim-admin-1", "shim-admin@example.com").await;
+    set_user_role(&db, &user_id, "admin").await;
+    let token = verifier
+        .mint_access(&user_id, "admin", 0)
+        .expect("mint admin");
+
+    let shim = shim_app(db, verifier);
+    let resp = call(shim, bearer_get("/admin", &token)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    assert_eq!(v["kind"], "jwt");
+    assert_eq!(v["userId"].as_str().unwrap(), user_id);
+}
+
+#[tokio::test]
+async fn shim_rejects_member_jwt_with_403() {
+    // A `member` JWT is structurally valid but has no admin authority —
+    // the shim must surface this as 403, not pass and not fall through to
+    // a generic 401, so a misrouted member token is debuggable.
+    init_legacy_admin_token();
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-shim-mem-1", "shim-mem@example.com").await;
+    let token = verifier
+        .mint_access(&user_id, "member", 0)
+        .expect("mint member");
+
+    let shim = shim_app(db, verifier);
+    let resp = call(shim, bearer_get("/admin", &token)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn shim_rejects_garbage_bearer_with_401() {
+    init_legacy_admin_token();
+    let (_app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let app = shim_app(db, verifier);
+    let resp = call(app, bearer_get("/admin", "neither-legacy-nor-jwt")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn shim_rejects_missing_authorization_header() {
+    init_legacy_admin_token();
+    let (_app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let app = shim_app(db, verifier);
+    let no_header = Request::builder()
+        .method(Method::GET)
+        .uri("/admin")
+        .body(Body::empty())
+        .unwrap();
+    let resp = call(app, no_header).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn shim_rejects_stale_token_version_jwt() {
+    init_legacy_admin_token();
+    let (_app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    // Bootstrap user has token_version=0; mint with a mismatched version.
+    let mismatched = verifier
+        .mint_access(&admin_id, "super_admin", 99)
+        .expect("mint mismatched token version");
+
+    let app = shim_app(db, verifier);
+    let resp = call(app, bearer_get("/admin", &mismatched)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ── Password primitives sanity check ──────────────────────────────────────────

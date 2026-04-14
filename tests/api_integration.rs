@@ -20,13 +20,26 @@ use tower::ServiceExt;
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
+/// Single global lock serializing every `std::env::set_var`/`remove_var`
+/// call in this integration binary. Per-helper `OnceLock`s stop each helper
+/// from mutating the env more than once, but distinct helpers' first-time
+/// initializers can still race under parallel tests — which violates
+/// `set_var`'s safety precondition. Taking this mutex before any mutation
+/// makes the writer window mutually exclusive across helpers.
+fn env_lock() -> &'static std::sync::Mutex<()> {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Build a fresh app backed by an isolated in-memory DB.
 async fn test_app() -> Router {
     // The /api/test/reset endpoint is only mounted when APP_ENV is "test" or
     // "development" (fail-closed). Set it once for the whole suite.
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
-        // Safety: called once before any test reads APP_ENV.
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: serialized by `env_lock()`; called once before any test
+        // reads APP_ENV.
         unsafe { std::env::set_var("APP_ENV", "test") };
     });
     let conn = db::init_memory().await.expect("failed to init test DB");
@@ -41,7 +54,9 @@ async fn test_app() -> Router {
 async fn test_app_with_auth() -> Router {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
-        // Safety: called once before any test that reads ADMIN_TOKEN runs.
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: serialized by `env_lock()`; called once before any test
+        // that reads ADMIN_TOKEN runs.
         unsafe { std::env::set_var("ADMIN_TOKEN", "test-secret-token") };
     });
     test_app().await
@@ -81,6 +96,41 @@ fn post_json_authed(uri: &str, body: serde_json::Value) -> Request<Body> {
         .header("authorization", "Bearer test-secret-token")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap()
+}
+
+/// Mint an admin access token signed by the same verifier the app uses,
+/// for the requested role (`super_admin` or `admin`). Per Plan 3 / BE-4:
+/// the helper is here so that BE-5's per-resource swap PRs can migrate
+/// tests off the legacy `Bearer test-secret-token` one resource at a
+/// time without having to thread the verifier through every call site.
+///
+/// The minted token references a synthetic `test-admin-user` subject with
+/// `token_version=0`. BE-5 sub-PRs that exercise the JWT path through the
+/// real `SuperAdminUser` / `GroupScopedAdmin` extractors are responsible
+/// for seeding a matching `user` row before calling this helper —
+/// `AdminOrLegacyToken` is the only consumer in BE-4 itself, and its
+/// integration coverage seeds its own users.
+#[allow(dead_code)]
+fn mint_admin_jwt(role: &str) -> String {
+    assert!(
+        matches!(role, "super_admin" | "admin"),
+        "mint_admin_jwt only mints admin-tier roles; got {role}"
+    );
+    // `shared_verifier()` fails closed if `APP_ENV` is not `test` /
+    // `development` and `JWT_KEYS` is absent. Callers in BE-5 may use
+    // this helper without going through `test_app()` first, so mirror
+    // the env init here to keep ordering-independent.
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: serialized by `env_lock()` with every other env mutator
+        // in this binary; called once before any caller reads APP_ENV
+        // through the verifier; other suite helpers set the same value.
+        unsafe { std::env::set_var("APP_ENV", "test") };
+    });
+    poolpay::api::shared_verifier()
+        .mint_access("test-admin-user", role, 0)
+        .expect("shared verifier must mint")
 }
 
 fn patch_json_authed(uri: &str, body: serde_json::Value) -> Request<Body> {
