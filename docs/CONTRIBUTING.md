@@ -64,7 +64,7 @@ pdftoppm -v
    ```env
    GREEN_API_INSTANCE_ID=<your_instance_id>
    GREEN_API_TOKEN=<your_api_token>
-   ADMIN_TOKEN=<generate with: openssl rand -hex 32>
+   NEXTAUTH_BACKEND_SECRET=<generate with: openssl rand -hex 32>
    ```
 
    See [Environment Variables](#environment-variables) below for all options.
@@ -190,7 +190,6 @@ src/
 ├── db.rs               — SurrealDB initialization and seeding
 ├── api/
 │   ├── mod.rs          — router setup, CORS configuration
-│   ├── auth.rs         — AdminToken extractor (Bearer token via ADMIN_TOKEN)
 │   ├── auth_endpoints.rs — HMAC-gated NextAuth endpoints (verify-credentials, ensure-user)
 │   ├── handlers.rs     — HTTP handlers (GET/POST/PATCH/DELETE)
 │   └── models.rs       — API request/response types, EntityId alias, DB/API structs
@@ -242,7 +241,6 @@ tests/
 |----------|----------|---------|-------------|
 | `GREEN_API_INSTANCE_ID` | Yes | — | Green API instance ID from dashboard |
 | `GREEN_API_TOKEN` | Yes | — | Green API authentication token |
-| `ADMIN_TOKEN` | Yes | — | Bearer token for all `/api/admin/*` endpoints. Generate with `openssl rand -hex 32` |
 | `NEXTAUTH_BACKEND_SECRET` | Yes | — | Shared secret for NextAuth→backend HMAC signing (min 32 bytes; panics in production if shorter). Generate with `openssl rand -hex 32` |
 | `APP_ENV` | No | unset | `production` enables strict CORS; `development` or `test` mounts `/api/test/reset`. Anything else (including unset) is treated as production for the reset gate |
 | `DASHBOARD_ORIGIN` | No (required if `APP_ENV=production`) | — | CORS origin for production (e.g., `https://dashboard.example.com`) |
