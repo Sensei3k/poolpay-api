@@ -46,6 +46,11 @@ fn init_env() {
             std::env::set_var("NEXTAUTH_BACKEND_SECRET", HMAC_SECRET);
             std::env::set_var("BOOTSTRAP_ADMIN_EMAIL", BOOTSTRAP_EMAIL);
             std::env::set_var("BOOTSTRAP_ADMIN_PASSWORD", BOOTSTRAP_PASSWORD);
+            // Pin APP_ENV so `StaticKeyVerifier::from_env` takes the ephemeral
+            // branch even when the host shell has `APP_ENV=production` or a
+            // real `JWT_KEYS` set. Keeps the suite hermetic.
+            std::env::set_var("APP_ENV", "test");
+            std::env::remove_var("JWT_KEYS");
         }
     });
 }
