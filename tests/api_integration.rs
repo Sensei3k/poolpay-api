@@ -173,7 +173,7 @@ async fn get_groups_returns_seeded_group() {
     let resp = call(test_app().await, get("/api/groups")).await;
     let groups: Vec<serde_json::Value> = json_body(resp).await;
     assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0]["name"], "Ajo Circle Alpha");
+    assert_eq!(groups[0]["name"], "PoolPay Group Alpha");
 }
 
 #[tokio::test]

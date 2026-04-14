@@ -164,9 +164,9 @@ const FIXTURE_GROUP_ID: &str = "1";
 fn fixture_groups() -> Vec<(&'static str, GroupContent)> {
     vec![
         (FIXTURE_GROUP_ID, GroupContent {
-            name: "Ajo Circle Alpha".into(),
+            name: "PoolPay Group Alpha".into(),
             status: "active".into(),
-            description: Some("First Ajo savings circle — 6 members, ₦10k monthly".into()),
+            description: Some("First PoolPay savings group — 6 members, ₦10k monthly".into()),
             created_at: "2025-06-15T00:00:00+00:00".into(),
             updated_at: "2025-06-15T00:00:00+00:00".into(),
             deleted_at: None,
