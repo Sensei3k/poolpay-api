@@ -13,7 +13,7 @@ use tower_http::cors::CorsLayer;
 use crate::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use crate::auth::rate_limit::{self, CredentialFailureLimiter, RateLimitConfig};
 use crate::db::DbConn;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use handlers::{
     confirm_receipt, create_cycle, create_group, create_member, create_payment,
     create_whatsapp_link, delete_cycle, delete_group, delete_member, delete_payment,
@@ -22,11 +22,21 @@ use handlers::{
 };
 
 /// Build the Axum router with all API routes and CORS middleware.
+///
+/// The verifier is built once per process and cached — rebuilding on every
+/// `router()` call would re-parse `JWT_KEYS` (or, in dev/test, generate a
+/// fresh RSA-2048 keypair) which is both expensive and breaks any caller
+/// that holds a previously-minted token across rebuilds.
 pub fn router(db: DbConn) -> Router {
-    let verifier: SharedVerifier = Arc::new(
-        StaticKeyVerifier::from_env(JwtConfig::from_env())
-            .expect("JWT_KEYS must be set or APP_ENV must permit an ephemeral key"),
-    );
+    static VERIFIER: OnceLock<SharedVerifier> = OnceLock::new();
+    let verifier = VERIFIER
+        .get_or_init(|| {
+            Arc::new(
+                StaticKeyVerifier::from_env(JwtConfig::from_env())
+                    .expect("JWT_KEYS must be set or APP_ENV must permit an ephemeral key"),
+            )
+        })
+        .clone();
     router_with_config(db, RateLimitConfig::from_env(), verifier)
 }
 
