@@ -48,7 +48,7 @@ async fn group_by_chat_id_returns_group_when_linked() {
     seed_link(&db, FIXTURE_CHAT_ID, FIXTURE_GROUP_ID).await;
     let g = find_group_by_chat_id(&db, FIXTURE_CHAT_ID).await.unwrap();
     let g = g.expect("expected group lookup to succeed");
-    assert_eq!(g.name, "Ajo Circle Alpha");
+    assert_eq!(g.name, "PoolPay Group Alpha");
 }
 
 #[tokio::test]
