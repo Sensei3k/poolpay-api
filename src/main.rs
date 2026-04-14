@@ -86,7 +86,13 @@ async fn main() {
             .await
             .expect("Failed to bind Axum listener");
         info!(addr = %addr, "API server listening");
-        if let Err(e) = axum::serve(listener, router).await {
+        // `into_make_service_with_connect_info` populates the `ConnectInfo`
+        // extension on every request — required by the per-IP rate-limit key
+        // extractor in `src/auth/rate_limit.rs`. Without it, every client
+        // would share a single bucket when sitting behind the default
+        // service factory.
+        let service = router.into_make_service_with_connect_info::<SocketAddr>();
+        if let Err(e) = axum::serve(listener, service).await {
             error!(error = %e, "API server error");
         }
     });

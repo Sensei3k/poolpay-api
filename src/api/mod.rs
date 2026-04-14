@@ -10,6 +10,7 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 
+use crate::auth::rate_limit::{self, RateLimitConfig};
 use crate::db::DbConn;
 use handlers::{
     confirm_receipt, create_cycle, create_group, create_member, create_payment,
@@ -20,7 +21,24 @@ use handlers::{
 
 /// Build the Axum router with all API routes and CORS middleware.
 pub fn router(db: DbConn) -> Router {
+    router_with_config(db, RateLimitConfig::from_env())
+}
+
+/// Build the router with an explicit rate-limit config — used by tests that
+/// need to inject tuned limits (e.g. small bucket sizes that are easy to
+/// exhaust without wall-clock delays).
+pub fn router_with_config(db: DbConn, rate_cfg: RateLimitConfig) -> Router {
     let cors = build_cors();
+
+    // Per-IP limiter mounted only on the auth endpoints — public reads and
+    // admin routes stay untouched. Sub-router keeps the layer scoped.
+    let auth_router = Router::new()
+        .route(
+            "/api/auth/verify-credentials",
+            post(auth_endpoints::verify_credentials),
+        )
+        .route("/api/auth/ensure-user", post(auth_endpoints::ensure_user))
+        .layer(rate_limit::build_per_ip_layer(&rate_cfg));
 
     let mut router = Router::new()
         // Public read endpoints
@@ -50,9 +68,8 @@ pub fn router(db: DbConn) -> Router {
         .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
         .route("/api/admin/whatsapp-links", post(create_whatsapp_link))
         .route("/api/admin/whatsapp-links/{id}", delete(delete_whatsapp_link))
-        // HMAC-gated auth endpoints (called by NextAuth)
-        .route("/api/auth/verify-credentials", post(auth_endpoints::verify_credentials))
-        .route("/api/auth/ensure-user", post(auth_endpoints::ensure_user));
+        // Auth endpoints (HMAC-gated, rate-limited) are merged below
+        .merge(auth_router);
 
     // Fail-closed: the destructive test reset endpoint is only mounted when
     // APP_ENV is explicitly "development" or "test". If the env var is
