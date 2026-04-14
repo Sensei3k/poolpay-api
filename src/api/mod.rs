@@ -97,7 +97,9 @@ pub fn router_with_config(
         .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
         .route("/api/admin/whatsapp-links", post(create_whatsapp_link))
         .route("/api/admin/whatsapp-links/{id}", delete(delete_whatsapp_link))
-        // Auth endpoints (HMAC-gated, rate-limited) are merged below
+        // Auth endpoints (rate-limited; verify-credentials/ensure-user are
+        // HMAC-gated, refresh/logout authenticate via the refresh token itself)
+        // are merged below
         .merge(auth_router);
 
     // Fail-closed: the destructive test reset endpoint is only mounted when
