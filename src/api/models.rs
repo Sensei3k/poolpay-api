@@ -1,5 +1,5 @@
 use axum::{
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -27,25 +27,41 @@ pub enum AppError {
     Unauthorized,
     Forbidden(String),
     Conflict(String),
+    /// `retry_after_secs` populates the `Retry-After` header when present.
+    TooManyRequests {
+        retry_after_secs: Option<u64>,
+    },
     Internal(String),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
-            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
-            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg),
+        match self {
+            AppError::NotFound(msg) => simple(StatusCode::NOT_FOUND, msg),
+            AppError::BadRequest(msg) => simple(StatusCode::BAD_REQUEST, msg),
+            AppError::Unauthorized => simple(StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+            AppError::Forbidden(msg) => simple(StatusCode::FORBIDDEN, msg),
+            AppError::Conflict(msg) => simple(StatusCode::CONFLICT, msg),
+            AppError::TooManyRequests { retry_after_secs } => {
+                let mut resp = simple(StatusCode::TOO_MANY_REQUESTS, "too many requests".to_string());
+                if let Some(secs) = retry_after_secs {
+                    if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                        resp.headers_mut().insert(header::RETRY_AFTER, v);
+                    }
+                }
+                resp
+            }
             // Don't leak internal error details to the caller.
-            AppError::Internal(_) => (
+            AppError::Internal(_) => simple(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "an internal error occurred".to_string(),
             ),
-        };
-        (status, Json(ErrorBody { error: message })).into_response()
+        }
     }
+}
+
+fn simple(status: StatusCode, message: String) -> Response {
+    (status, Json(ErrorBody { error: message })).into_response()
 }
 
 impl From<surrealdb::Error> for AppError {
