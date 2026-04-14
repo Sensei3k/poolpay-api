@@ -323,3 +323,156 @@ impl KeyEntry {
     #[allow(dead_code)]
     fn kid(&self) -> &str { &self.kid }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonwebtoken::{Algorithm, Header, encode};
+
+    fn test_config() -> JwtConfig {
+        JwtConfig {
+            audience: "poolpay-api".into(),
+            issuer: "poolpay-nextauth".into(),
+            access_ttl_secs: 900,
+            leeway_secs: 60,
+        }
+    }
+
+    fn build_verifier() -> StaticKeyVerifier {
+        StaticKeyVerifier::from_ephemeral(test_config()).expect("ephemeral verifier")
+    }
+
+    fn mint_with_claims(verifier: &StaticKeyVerifier, claims: &AccessClaims) -> String {
+        let kid = verifier.active_kid.as_ref().expect("active kid");
+        let entry = verifier.keys.get(kid).expect("entry");
+        let encoding = entry.encoding.as_ref().expect("encoding");
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.clone());
+        encode(&header, claims, encoding).expect("encode")
+    }
+
+    fn base_claims() -> AccessClaims {
+        let now = chrono::Utc::now().timestamp();
+        AccessClaims {
+            sub: "user:1".into(),
+            role: "super_admin".into(),
+            token_version: 1,
+            aud: "poolpay-api".into(),
+            iss: "poolpay-nextauth".into(),
+            exp: now + 300,
+            iat: now,
+            nbf: now,
+        }
+    }
+
+    #[test]
+    fn valid_token_round_trips() {
+        let v = build_verifier();
+        let token = v.mint_access("user:1", "super_admin", 7).expect("mint");
+        let claims = v.verify_access(&token).expect("verify");
+        assert_eq!(claims.sub, "user:1");
+        assert_eq!(claims.role, "super_admin");
+        assert_eq!(claims.token_version, 7);
+    }
+
+    #[test]
+    fn expired_token_rejected() {
+        let v = build_verifier();
+        let mut c = base_claims();
+        // Past-exp + outside the 60s leeway window.
+        c.exp = chrono::Utc::now().timestamp() - 120;
+        c.iat = c.exp - 900;
+        c.nbf = c.iat;
+        let token = mint_with_claims(&v, &c);
+        assert!(matches!(v.verify_access(&token), Err(JwtError::Invalid)));
+    }
+
+    #[test]
+    fn wrong_audience_rejected() {
+        let v = build_verifier();
+        let mut c = base_claims();
+        c.aud = "somebody-else".into();
+        let token = mint_with_claims(&v, &c);
+        assert!(matches!(v.verify_access(&token), Err(JwtError::Invalid)));
+    }
+
+    #[test]
+    fn wrong_issuer_rejected() {
+        let v = build_verifier();
+        let mut c = base_claims();
+        c.iss = "attacker-issuer".into();
+        let token = mint_with_claims(&v, &c);
+        assert!(matches!(v.verify_access(&token), Err(JwtError::Invalid)));
+    }
+
+    #[test]
+    fn unknown_kid_rejected() {
+        let v = build_verifier();
+        let c = base_claims();
+        // Sign with the verifier's active key but advertise a kid the map
+        // does not contain.
+        let kid = v.active_kid.as_ref().expect("active kid").clone();
+        let entry = v.keys.get(&kid).expect("entry");
+        let encoding = entry.encoding.as_ref().expect("encoding");
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("not-a-real-kid".into());
+        let token = encode(&header, &c, encoding).expect("encode");
+        assert!(matches!(v.verify_access(&token), Err(JwtError::UnknownKid)));
+    }
+
+    #[test]
+    fn tampered_signature_rejected() {
+        let v = build_verifier();
+        let token = v.mint_access("user:1", "admin", 1).expect("mint");
+        // Flip the last signature character — keeps a structurally valid JWT
+        // but invalidates the RS256 signature.
+        let mut bytes: Vec<char> = token.chars().collect();
+        let last = bytes.last_mut().expect("has chars");
+        *last = if *last == 'A' { 'B' } else { 'A' };
+        let tampered: String = bytes.into_iter().collect();
+        assert!(matches!(v.verify_access(&tampered), Err(JwtError::Invalid)));
+    }
+
+    #[test]
+    fn from_json_rejects_multiple_active_keys() {
+        let (priv_pem, pub_pem) = pem_pair();
+        let raw = format!(
+            r#"[
+                {{ "kid": "a", "private_pem": {priv_pem:?}, "public_pem": {pub_pem:?}, "active": true }},
+                {{ "kid": "b", "private_pem": {priv_pem:?}, "public_pem": {pub_pem:?}, "active": true }}
+            ]"#
+        );
+        let err = match StaticKeyVerifier::from_json(&raw, test_config()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for multi-active keys"),
+        };
+        assert!(err.contains("more than one active"), "got: {err}");
+    }
+
+    #[test]
+    fn from_json_rejects_zero_active_keys() {
+        let (priv_pem, pub_pem) = pem_pair();
+        let raw = format!(
+            r#"[{{ "kid": "a", "private_pem": {priv_pem:?}, "public_pem": {pub_pem:?}, "active": false }}]"#
+        );
+        let err = match StaticKeyVerifier::from_json(&raw, test_config()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for zero-active keys"),
+        };
+        assert!(err.contains("no active key"), "got: {err}");
+    }
+
+    /// Mint a matching (private, public) PEM pair for JSON-parser tests.
+    /// Generated fresh per test so no state leaks across them.
+    fn pem_pair() -> (String, String) {
+        let mut rng = rand::thread_rng();
+        let private = RsaPrivateKey::new(&mut rng, 2048).expect("gen");
+        let public = RsaPublicKey::from(&private);
+        let priv_pem = private
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("priv encode")
+            .to_string();
+        let pub_pem = public.to_public_key_pem(LineEnding::LF).expect("pub encode");
+        (priv_pem, pub_pem)
+    }
+}
