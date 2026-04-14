@@ -70,6 +70,13 @@ fn dummy_hash() -> &'static str {
     DUMMY.get_or_init(|| hash(DUMMY_PASSWORD).expect("dummy hash generation must succeed"))
 }
 
+/// Force the lazy `dummy_hash()` static to initialise now. Call once at boot
+/// so the first unknown-email login does not pay extra Argon2 CPU relative to
+/// the warm path — closes a subtle timing side channel.
+pub fn prewarm() {
+    let _ = dummy_hash();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

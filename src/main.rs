@@ -30,6 +30,11 @@ async fn main() {
         warn!("ADMIN_TOKEN is not set — all admin endpoints will return 401");
     }
 
+    // Pre-warm the dummy Argon2 hash so the first unknown-email login path is
+    // not measurably slower than subsequent ones (closes a timing side channel
+    // around user enumeration).
+    auth::password::prewarm();
+
     // Initialise embedded SurrealDB and, if SEED_ON_EMPTY=true and the DB is empty, seed fixture data.
     let surreal_db = db::init()
         .await
