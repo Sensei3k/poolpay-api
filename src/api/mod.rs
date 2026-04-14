@@ -13,8 +13,8 @@ use crate::db::DbConn;
 use handlers::{
     create_cycle, create_group, create_member, create_payment, create_whatsapp_link, delete_cycle,
     delete_group, delete_member, delete_payment, delete_whatsapp_link, get_cycles, get_groups,
-    get_members, get_payments, get_whatsapp_links, reset_db, update_cycle, update_group,
-    update_member,
+    get_members, get_payments, get_receipts, get_whatsapp_links, reset_db, update_cycle,
+    update_group, update_member,
 };
 
 /// Build the Axum router with all API routes and CORS middleware.
@@ -29,6 +29,7 @@ pub fn router(db: DbConn) -> Router {
         .route("/api/payments", get(get_payments))
         .route("/api/payments", post(create_payment))
         .route("/api/payments/{member_id}/{cycle_id}", delete(delete_payment))
+        .route("/api/receipts", get(get_receipts))
         // Admin group endpoints
         .route("/api/admin/groups", post(create_group))
         .route("/api/admin/groups/{id}", patch(update_group))

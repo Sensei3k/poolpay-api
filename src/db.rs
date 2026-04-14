@@ -5,8 +5,8 @@ use surrealdb::engine::local::{Db, RocksDb};
 use tracing::info;
 
 use crate::api::models::{
-    CycleContent, DbCycle, DbGroup, DbGroupLink, DbMember, DbPayment, GroupContent, MemberContent,
-    PaymentContent,
+    CycleContent, DbCycle, DbGroup, DbGroupLink, DbMember, DbPayment, DbReceipt, GroupContent,
+    MemberContent, PaymentContent, ReceiptContent,
 };
 
 /// The shared SurrealDB connection type — passed as Axum state.
@@ -50,7 +50,8 @@ async fn define_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
          DEFINE TABLE IF NOT EXISTS member SCHEMALESS;
          DEFINE TABLE IF NOT EXISTS cycle SCHEMALESS;
          DEFINE TABLE IF NOT EXISTS payment SCHEMALESS;
-         DEFINE TABLE IF NOT EXISTS group_link SCHEMALESS;",
+         DEFINE TABLE IF NOT EXISTS group_link SCHEMALESS;
+         DEFINE TABLE IF NOT EXISTS receipt SCHEMALESS;",
     )
     .await?
     .check()?;
@@ -67,12 +68,14 @@ async fn seed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
     let cycles: Vec<DbCycle> = select_or_empty(db, "cycle").await?;
     let payments: Vec<DbPayment> = select_or_empty(db, "payment").await?;
     let group_links: Vec<DbGroupLink> = select_or_empty(db, "group_link").await?;
+    let receipts: Vec<DbReceipt> = select_or_empty(db, "receipt").await?;
 
     if !groups.is_empty()
         || !members.is_empty()
         || !cycles.is_empty()
         || !payments.is_empty()
         || !group_links.is_empty()
+        || !receipts.is_empty()
     {
         info!("SurrealDB already has data — skipping seed");
         return Ok(());
@@ -80,13 +83,14 @@ async fn seed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 
     info!("Seeding SurrealDB with fixture data");
     insert_fixtures(db).await?;
-    let (g, m, c, p) = (
+    let (g, m, c, p, r) = (
         fixture_groups().len(),
         fixture_members().len(),
         fixture_cycles().len(),
         fixture_payments().len(),
+        fixture_receipts().len(),
     );
-    info!("Seed complete: {g} groups, {m} members, {c} cycles, {p} payments");
+    info!("Seed complete: {g} groups, {m} members, {c} cycles, {p} payments, {r} receipts");
     Ok(())
 }
 
@@ -100,16 +104,20 @@ pub async fn reseed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
     let _: Vec<DbCycle> = db.delete("cycle").await?;
     let _: Vec<DbPayment> = db.delete("payment").await?;
     let _: Vec<DbGroupLink> = db.delete("group_link").await?;
+    let _: Vec<DbReceipt> = db.delete("receipt").await?;
 
     insert_fixtures(db).await?;
 
-    let (g, m, c, p) = (
+    let (g, m, c, p, r) = (
         fixture_groups().len(),
         fixture_members().len(),
         fixture_cycles().len(),
         fixture_payments().len(),
+        fixture_receipts().len(),
     );
-    info!("Reseed complete: {g} groups, {m} members, {c} cycles, {p} payments restored");
+    info!(
+        "Reseed complete: {g} groups, {m} members, {c} cycles, {p} payments, {r} receipts restored"
+    );
     Ok(())
 }
 
@@ -126,6 +134,9 @@ async fn insert_fixtures(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
     }
     for (id, content) in fixture_payments() {
         let _: Option<DbPayment> = db.upsert(("payment", id)).content(content).await?;
+    }
+    for (id, content) in fixture_receipts() {
+        let _: Option<DbReceipt> = db.upsert(("receipt", id)).content(content).await?;
     }
     Ok(())
 }
@@ -308,5 +319,60 @@ fn fixture_payments() -> Vec<(&'static str, PaymentContent)> {
         ("48", payment("4", "9", "2025-12-06")),
         ("49", payment("5", "9", "2025-12-07")),
         ("50", payment("6", "9", "2025-12-09")),
+    ]
+}
+
+/// Two fixture receipts against the active cycle (9) — one pending (awaiting
+/// admin review) and one soft-deleted (to verify list filtering). The real
+/// pipeline will write these via Green API polling; until then the fixtures
+/// give the dashboard something to render.
+fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
+    let created_at = "2026-03-02T10:30:00+00:00";
+    let group_id = FIXTURE_GROUP_ID.to_string();
+    vec![
+        (
+            "1",
+            ReceiptContent {
+                whatsapp_message_id: "3EB0C123ABCD4567EF89".into(),
+                group_id: group_id.clone(),
+                chat_id: "2349000000001@g.us".into(),
+                sender_phone: "2348101234567".into(),
+                member_id: Some("1".into()),
+                cycle_id: Some("3".into()),
+                extracted_amount: Some(1_000_000),
+                expected_amount: Some(1_000_000),
+                amount_matches: Some(true),
+                status: "pending".into(),
+                ocr_text: Some("NGN 10,000.00\nFrom: Adaeze Okonkwo\nBank: GTBank".into()),
+                sender_label: Some("Adaeze Okonkwo".into()),
+                bank_label: Some("GTBank".into()),
+                received_at: "2026-03-02T10:29:45+00:00".into(),
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                deleted_at: None,
+            },
+        ),
+        (
+            "2",
+            ReceiptContent {
+                whatsapp_message_id: "3EB0C9876FEDC543210".into(),
+                group_id,
+                chat_id: "2349000000001@g.us".into(),
+                sender_phone: "2347031234567".into(),
+                member_id: Some("2".into()),
+                cycle_id: Some("3".into()),
+                extracted_amount: Some(500_000),
+                expected_amount: Some(1_000_000),
+                amount_matches: Some(false),
+                status: "rejected".into(),
+                ocr_text: Some("NGN 5,000.00\nFrom: Chukwuemeka Eze".into()),
+                sender_label: Some("Chukwuemeka Eze".into()),
+                bank_label: None,
+                received_at: "2026-03-03T14:15:00+00:00".into(),
+                created_at: "2026-03-03T14:15:30+00:00".into(),
+                updated_at: "2026-03-03T16:00:00+00:00".into(),
+                deleted_at: Some("2026-03-03T16:00:00+00:00".into()),
+            },
+        ),
     ]
 }

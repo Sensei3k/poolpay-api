@@ -10,9 +10,9 @@ use super::auth::AdminToken;
 use crate::api::models::{
     AppError, CreateCycleRequest, CreateGroupRequest, CreateMemberRequest, CreatePaymentRequest,
     CreateWhatsappLinkRequest, Cycle, CycleContent, DbCycle, DbGroup, DbGroupLink, DbMember,
-    DbPayment, EntityId, Group, GroupContent, GroupLink, GroupLinkContent, Member, MemberContent,
-    Payment, PaymentContent, UpdateCycleRequest, UpdateGroupRequest, UpdateMemberRequest, now_iso,
-    record_id_to_string,
+    DbPayment, DbReceipt, EntityId, Group, GroupContent, GroupLink, GroupLinkContent, Member,
+    MemberContent, Payment, PaymentContent, Receipt, ReceiptStatus, UpdateCycleRequest,
+    UpdateGroupRequest, UpdateMemberRequest, now_iso, record_id_to_string,
 };
 use crate::db::{DbConn, reseed};
 
@@ -28,6 +28,13 @@ pub struct GroupIdQuery {
 pub struct PaymentsQuery {
     #[serde(rename = "cycleId")]
     pub cycle_id: Option<EntityId>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReceiptsQuery {
+    #[serde(rename = "groupId")]
+    pub group_id: Option<EntityId>,
+    pub status: Option<String>,
 }
 
 // ── Public GET handlers ──────────────────────────────────────────────────────
@@ -89,6 +96,32 @@ pub async fn get_payments(
         .into_iter()
         .filter(|p| p.deleted_at.is_none())
         .filter(|p| params.cycle_id.as_ref().map_or(true, |cid| p.cycle_id == *cid))
+        .collect();
+
+    Ok(Json(filtered))
+}
+
+pub async fn get_receipts(
+    State(db): State<DbConn>,
+    Query(params): Query<ReceiptsQuery>,
+) -> Result<Json<Vec<Receipt>>, AppError> {
+    // Validate status filter up-front so an unknown value returns 400 rather
+    // than silently producing an empty list.
+    let status_filter: Option<ReceiptStatus> = match params.status.as_deref() {
+        None => None,
+        Some(s) => Some(s.parse::<ReceiptStatus>().map_err(AppError::BadRequest)?),
+    };
+
+    let rows: Vec<DbReceipt> = db.select("receipt").await?;
+    let receipts: Result<Vec<Receipt>, AppError> =
+        rows.into_iter().map(Receipt::try_from).collect();
+    let receipts = receipts?;
+
+    let filtered: Vec<Receipt> = receipts
+        .into_iter()
+        .filter(|r| r.deleted_at.is_none())
+        .filter(|r| params.group_id.as_ref().is_none_or(|gid| r.group_id == *gid))
+        .filter(|r| status_filter.as_ref().is_none_or(|s| r.status == *s))
         .collect();
 
     Ok(Json(filtered))
