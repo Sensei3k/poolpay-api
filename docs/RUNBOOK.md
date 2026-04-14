@@ -89,7 +89,49 @@ RECEIPT_DOWNLOAD_DIR=/tmp/receipts
 # Log verbosity (default: info)
 # Options: debug, info, warn, error
 RUST_LOG=info
+
+# --- Auth rate limiting (Plan 3 / BE-2) ---
+# Per-IP limiter on /api/auth/verify-credentials and /api/auth/ensure-user.
+AUTH_RATE_LIMIT_PER_MINUTE=60
+AUTH_RATE_LIMIT_BURST=10
+
+# Composite (ip, email) failure limiter on /api/auth/verify-credentials.
+# Only failed logins consume quota; successful logins never count.
+AUTH_CREDENTIAL_FAILURE_LIMIT=5
+AUTH_CREDENTIAL_FAILURE_WINDOW_SECS=900
+
+# Trust X-Forwarded-For as the client IP. Only set when the service sits
+# behind a reverse proxy that strips user-supplied copies of that header
+# (Fly, Vercel edge, nginx). Default false.
+TRUST_PROXY_HEADERS=false
 ```
+
+### Auth Rate Limiting
+
+Two layers protect the HMAC-gated auth surface:
+
+- **Per-IP (`tower_governor`)** — a steady quota of `AUTH_RATE_LIMIT_PER_MINUTE`
+  requests per minute with a burst of `AUTH_RATE_LIMIT_BURST`, applied to
+  both `/api/auth/verify-credentials` and `/api/auth/ensure-user`. Runs
+  before HMAC verification so anonymous floods are dropped cheaply.
+- **Composite `(ip, email_normalised)`** — in-handler limiter on
+  `/api/auth/verify-credentials`. Up to `AUTH_CREDENTIAL_FAILURE_LIMIT`
+  failures per `AUTH_CREDENTIAL_FAILURE_WINDOW_SECS`. Successful logins do
+  not consume quota, so legitimate users are never penalised.
+
+When a limit is hit the response is `429 Too Many Requests` with a
+`Retry-After` header in seconds. Legitimate callers should honour it.
+
+**Tuning:** raise the per-IP numbers if a single shared office NAT hits
+the limit; lower the credential-failure numbers if brute-force attempts
+show up in the `auth_event` log with `reason="rate_limited"`. Values are
+loaded at boot — restart the service after edits.
+
+**Trust headers only behind a trusted proxy.** With `TRUST_PROXY_HEADERS=false`
+(default), the limiter keys on the direct peer IP. Behind a proxy that
+leaves that as the proxy's own IP, set `TRUST_PROXY_HEADERS=true` so the
+proxy's `X-Forwarded-For` is honoured — but only if the proxy strips any
+client-supplied copy of that header, otherwise callers can spoof their IP.
 
 ### Production Security
 
