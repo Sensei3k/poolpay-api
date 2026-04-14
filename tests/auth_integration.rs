@@ -82,7 +82,7 @@ async fn verify_credentials_success_for_bootstrap_admin() {
     assert_eq!(resp.status(), StatusCode::OK);
     let v: serde_json::Value = json_body(resp).await;
     assert_eq!(v["email"], BOOTSTRAP_EMAIL);
-    assert_eq!(v["role"], "admin");
+    assert_eq!(v["role"], "super_admin");
     assert_eq!(v["mustResetPassword"], true);
     assert!(v["userId"].as_str().unwrap().len() > 0);
 }
@@ -246,7 +246,7 @@ async fn bootstrap_is_idempotent() {
         .expect("second bootstrap must succeed");
 
     let mut resp = db
-        .query("SELECT count() FROM user WHERE role = 'admin' GROUP ALL")
+        .query("SELECT count() FROM user WHERE role IN ['admin', 'super_admin'] GROUP ALL")
         .await
         .unwrap()
         .check()
