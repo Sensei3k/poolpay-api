@@ -18,8 +18,8 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::ConnectInfo;
-use axum::http::Request;
+use axum::extract::{ConnectInfo, FromRequestParts};
+use axum::http::{Extensions, HeaderMap, Request, request::Parts};
 use governor::clock::{Clock, DefaultClock};
 use governor::state::keyed::DashMapStateStore;
 use governor::{NotUntil, Quota, RateLimiter};
@@ -149,9 +149,20 @@ impl KeyExtractor for AuthIpKeyExtractor {
 }
 
 fn extract_ip<T>(req: &Request<T>, trust_proxy: bool, test_mode: bool) -> Option<IpAddr> {
+    resolve_client_ip(req.headers(), req.extensions(), trust_proxy, test_mode)
+}
+
+/// Resolve the client IP from already-borrowed header/extension views. Used
+/// both by the tower-governor key extractor and by the `ClientIp` handler
+/// extractor so the two limiters key on the same IP.
+pub fn resolve_client_ip(
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    trust_proxy: bool,
+    test_mode: bool,
+) -> Option<IpAddr> {
     if test_mode {
-        if let Some(ip) = req
-            .headers()
+        if let Some(ip) = headers
             .get(TEST_PEER_IP_HEADER)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<IpAddr>().ok())
@@ -160,8 +171,7 @@ fn extract_ip<T>(req: &Request<T>, trust_proxy: bool, test_mode: bool) -> Option
         }
     }
     if trust_proxy {
-        if let Some(ip) = req
-            .headers()
+        if let Some(ip) = headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.split(',').next())
@@ -171,9 +181,38 @@ fn extract_ip<T>(req: &Request<T>, trust_proxy: bool, test_mode: bool) -> Option
             return Some(ip);
         }
     }
-    req.extensions()
+    extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
+}
+
+/// Handler extractor that yields the caller's IP using the same rules as the
+/// per-IP rate limiter. Requires `RateLimitConfig` to be present as a request
+/// extension — mounted by the auth sub-router. Falls back to 127.0.0.1 when
+/// nothing is available so a broken extension layer cannot 500 every call.
+pub struct ClientIp(pub IpAddr);
+
+impl<S> FromRequestParts<S> for ClientIp
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let cfg = parts
+            .extensions
+            .get::<RateLimitConfig>()
+            .cloned()
+            .unwrap_or_else(RateLimitConfig::from_env);
+        let ip = resolve_client_ip(
+            &parts.headers,
+            &parts.extensions,
+            cfg.trust_proxy_headers,
+            cfg.test_mode,
+        )
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        Ok(ClientIp(ip))
+    }
 }
 
 // ── per-IP layer ──────────────────────────────────────────────────────────────
@@ -252,18 +291,9 @@ impl CredentialFailureLimiter {
         }
     }
 
-    /// Peek at the key without consuming a slot. Returns `Ok` when the caller
-    /// is still inside budget, `Err(retry_after_secs)` when the bucket is
-    /// empty.
-    pub fn check(&self, key: &CredentialFailureKey) -> Result<(), u64> {
-        match self.inner.check_key(key) {
-            Ok(_) => Ok(()),
-            Err(neg) => Err(retry_after_secs(&neg)),
-        }
-    }
-
-    /// Consume one slot to charge a failure. Returns `Err(retry_after_secs)`
-    /// if the bucket is already empty.
+    /// Consume one slot to charge a failed credential attempt. Returns
+    /// `Err(retry_after_secs)` when the bucket is already empty — the caller
+    /// should translate that into a 429 instead of the usual 401.
     pub fn charge_failure(&self, key: &CredentialFailureKey) -> Result<(), u64> {
         match self.inner.check_key(key) {
             Ok(_) => Ok(()),

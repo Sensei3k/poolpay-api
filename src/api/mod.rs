@@ -6,11 +6,11 @@ pub mod models;
 use axum::{
     http::{header, Method},
     routing::{delete, get, patch, post},
-    Router,
+    Extension, Router,
 };
 use tower_http::cors::CorsLayer;
 
-use crate::auth::rate_limit::{self, RateLimitConfig};
+use crate::auth::rate_limit::{self, CredentialFailureLimiter, RateLimitConfig};
 use crate::db::DbConn;
 use handlers::{
     confirm_receipt, create_cycle, create_group, create_member, create_payment,
@@ -30,6 +30,11 @@ pub fn router(db: DbConn) -> Router {
 pub fn router_with_config(db: DbConn, rate_cfg: RateLimitConfig) -> Router {
     let cors = build_cors();
 
+    // Composite (ip, email) failure limiter — charged only on 401 from
+    // verify_credentials. Scoped to the auth sub-router via Extension so
+    // other handlers cannot accidentally consume from it.
+    let credential_failure_limiter = CredentialFailureLimiter::new(&rate_cfg);
+
     // Per-IP limiter mounted only on the auth endpoints — public reads and
     // admin routes stay untouched. Sub-router keeps the layer scoped.
     let auth_router = Router::new()
@@ -38,7 +43,9 @@ pub fn router_with_config(db: DbConn, rate_cfg: RateLimitConfig) -> Router {
             post(auth_endpoints::verify_credentials),
         )
         .route("/api/auth/ensure-user", post(auth_endpoints::ensure_user))
-        .layer(rate_limit::build_per_ip_layer(&rate_cfg));
+        .layer(rate_limit::build_per_ip_layer(&rate_cfg))
+        .layer(Extension(credential_failure_limiter))
+        .layer(Extension(rate_cfg.clone()));
 
     let mut router = Router::new()
         // Public read endpoints
