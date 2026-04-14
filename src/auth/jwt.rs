@@ -141,7 +141,8 @@ impl JwtConfig {
                 .unwrap_or_else(|_| "poolpay-nextauth".to_string()),
             access_ttl_secs: std::env::var("JWT_ACCESS_TTL_SECS")
                 .ok()
-                .and_then(|s| s.parse().ok())
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|v| *v > 0)
                 .unwrap_or(900),
             leeway_secs: std::env::var("JWT_LEEWAY_SECS")
                 .ok()
