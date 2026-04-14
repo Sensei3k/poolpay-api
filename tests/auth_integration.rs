@@ -663,6 +663,46 @@ async fn refresh_reuse_bumps_token_version() {
 }
 
 #[tokio::test]
+async fn concurrent_refresh_rotation_detects_race_as_reuse() {
+    // Two callers present the same refresh token at the same time. The
+    // atomic conditional revoke guarantees exactly one wins; the other
+    // trips reuse detection and kills the family. If both walked away
+    // with live tokens in the same family we would have a working
+    // token-theft bypass — this test pins that behaviour down.
+    let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-race-1", "race1@example.com").await;
+    let issued = refresh::issue(&db, &user_id).await.expect("issue");
+
+    let a = tokio::spawn({
+        let app = app.clone();
+        let tok = issued.plaintext.clone();
+        async move { call(app, refresh_req(&tok)).await }
+    });
+    let b = tokio::spawn({
+        let app = app.clone();
+        let tok = issued.plaintext.clone();
+        async move { call(app, refresh_req(&tok)).await }
+    });
+    let (resp_a, resp_b) = (a.await.unwrap(), b.await.unwrap());
+
+    let mut statuses = [resp_a.status(), resp_b.status()];
+    statuses.sort_by_key(|s| s.as_u16());
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::UNAUTHORIZED],
+        "exactly one of the racing rotates must win; the other is reuse",
+    );
+
+    // The losing call must have killed the family: the winner's freshly
+    // rotated token is also dead now, just like the non-racing reuse path.
+    let version_after = user_token_version(&db, &user_id).await;
+    assert!(
+        version_after > 0,
+        "reuse detection on the racing call must bump token_version: got {version_after}"
+    );
+}
+
+#[tokio::test]
 async fn refresh_unknown_token_returns_401() {
     let (app, _db) = test_app().await;
     let resp = call(app, refresh_req("not-a-real-token")).await;
