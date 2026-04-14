@@ -15,7 +15,7 @@
 use axum::extract::{Extension, FromRef, FromRequestParts, State};
 use axum::http::request::Parts;
 use surrealdb::types::RecordId;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::api::models::{AppError, DbUser};
 use crate::auth::jwt::SharedVerifier;
@@ -52,7 +52,9 @@ where
                 .map_err(|_| AppError::Unauthorized)?;
 
         let claims = verifier.verify_access(&token).map_err(|e| {
-            warn!(error = %e, "JWT verification failed");
+            // Attacker-controlled input; keep at debug to avoid log-amplification.
+            // Reserve `warn!` for unexpected internal failures (e.g., DB errors).
+            debug!(error = %e, "JWT verification failed");
             AppError::Unauthorized
         })?;
 
