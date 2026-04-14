@@ -84,7 +84,7 @@ async fn verify_credentials_success_for_bootstrap_admin() {
     assert_eq!(v["email"], BOOTSTRAP_EMAIL);
     assert_eq!(v["role"], "super_admin");
     assert_eq!(v["mustResetPassword"], true);
-    assert!(v["userId"].as_str().unwrap().len() > 0);
+    assert!(!v["userId"].as_str().unwrap().is_empty());
 }
 
 #[tokio::test]

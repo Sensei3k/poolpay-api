@@ -227,7 +227,7 @@ fn fixture_members() -> Vec<(&'static str, MemberContent)> {
         ("3", MemberContent { name: "Ngozi Adeyemi".into(),   phone: "2349061234567".into(), position: 3, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
         ("4", MemberContent { name: "Tunde Bakare".into(),    phone: "2348031234567".into(), position: 4, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
         ("5", MemberContent { name: "Amaka Nwosu".into(),     phone: "2348161234567".into(), position: 5, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
-        ("6", MemberContent { name: "Seun Okafor".into(),     phone: "2347061234567".into(), position: 6, status: "active".into(), group_id: group_id, notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
+        ("6", MemberContent { name: "Seun Okafor".into(),     phone: "2347061234567".into(), position: 6, status: "active".into(), group_id, notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
     ]
 }
 
@@ -288,7 +288,7 @@ fn fixture_cycles() -> Vec<(&'static str, CycleContent)> {
         ("3", CycleContent {
             cycle_number: 9, start_date: "2026-03-01".into(), end_date: "2026-03-31".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "3".into(), status: "active".into(), group_id: group_id, notes: None,
+            recipient_member_id: "3".into(), status: "active".into(), group_id, notes: None,
             created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
     ]
