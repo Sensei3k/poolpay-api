@@ -43,7 +43,10 @@ pub async fn ensure_admin_user(db: &DbConn) -> Result<(), surrealdb::Error> {
         email: email.clone(),
         email_normalised: email_normalised.clone(),
         password_hash: Some(password_hash),
-        role: "admin".into(),
+        // Seed the first operator as super_admin — they vet and admit all
+        // subsequent admins. Only super_admins can manage other admin users
+        // (add, promote, disable, assign/revoke group access).
+        role: "super_admin".into(),
         status: "active".into(),
         token_version: 0,
         must_reset_password: true,
@@ -84,7 +87,7 @@ pub async fn ensure_admin_user(db: &DbConn) -> Result<(), surrealdb::Error> {
 
 async fn active_admin_exists(db: &DbConn) -> Result<bool, surrealdb::Error> {
     let mut resp = db
-        .query("SELECT count() FROM user WHERE role = 'admin' AND deleted_at IS NONE GROUP ALL")
+        .query("SELECT count() FROM user WHERE role IN ['admin', 'super_admin'] AND deleted_at IS NONE GROUP ALL")
         .await?
         .check()?;
     let rows: Vec<i64> = resp.take("count").unwrap_or_default();
