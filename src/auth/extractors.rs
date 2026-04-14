@@ -3,26 +3,24 @@
 //! Three guards land in BE-3 but sit behind `#[allow(dead_code)]` until
 //! BE-4 mints real tokens and BE-5 flips handlers to consume them:
 //!
-//! * `AuthenticatedUser` — any active user with a valid, fresh access
-//!   token (sig + exp + token_version + status checks).
+//! * `AuthenticatedUser` — any active user with a valid, fresh access token
+//!   (signature + exp + token_version + status checks).
 //! * `SuperAdminUser` — `AuthenticatedUser` narrowed to `role == "super_admin"`.
-//! * `require_group_scope(&user, group_id, db)` — callable guard that
+//! * `require_group_scope(&user, group_id, db)` — handler-called guard that
 //!   super-admins bypass and scoped admins pass iff a matching
 //!   `group_admin(user_id, group_id)` row exists. Kept as a helper (not a
-//!   typed extractor) because the `group_id` often comes from a parent
-//!   record, so the handler resolves it first and then calls the guard.
+//!   typed extractor) because the `group_id` is often resolved from a
+//!   parent record (payment → cycle → group) inside the handler.
 
-use axum::extract::{FromRef, FromRequestParts};
+use axum::extract::{Extension, FromRef, FromRequestParts, State};
 use axum::http::request::Parts;
 use surrealdb::types::RecordId;
 use tracing::warn;
 
 use crate::api::models::{AppError, DbUser};
-use crate::auth::jwt::{SharedVerifier, TokenVerifier};
+use crate::auth::jwt::SharedVerifier;
 use crate::db::DbConn;
 
-/// A verified, still-active user. The `token_version` is carried so tests
-/// and audit rows can record exactly which version the bearer was on.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
@@ -31,8 +29,6 @@ pub struct AuthenticatedUser {
     pub token_version: i64,
 }
 
-/// Narrowing extractor for `super_admin`-only endpoints. Unused until BE-5
-/// flips `/api/admin/groups/*` and `/api/admin/whatsapp-links/*` to it.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SuperAdminUser(pub AuthenticatedUser);
@@ -41,19 +37,29 @@ impl<S> FromRequestParts<S> for AuthenticatedUser
 where
     S: Send + Sync,
     DbConn: FromRef<S>,
-    SharedVerifier: FromRef<S>,
 {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let token = extract_bearer(parts)?;
-        let verifier = SharedVerifier::from_ref(state);
+
+        // The verifier is injected via Extension so it can be shared across
+        // handlers without forcing every existing route onto a new state
+        // type. Missing extension = misconfigured router = refuse.
+        let Extension(verifier): Extension<SharedVerifier> =
+            Extension::from_request_parts(parts, state)
+                .await
+                .map_err(|_| AppError::Unauthorized)?;
+
         let claims = verifier.verify_access(&token).map_err(|e| {
             warn!(error = %e, "JWT verification failed");
             AppError::Unauthorized
         })?;
 
-        let db = DbConn::from_ref(state);
+        let State(db): State<DbConn> = State::from_request_parts(parts, state)
+            .await
+            .map_err(|_| AppError::Internal("db state missing".into()))?;
+
         let user = load_user(&db, &claims.sub).await.map_err(|e| {
             warn!(error = %e, user = %claims.sub, "user lookup during auth failed");
             AppError::Internal(e.to_string())
@@ -64,23 +70,14 @@ where
             AppError::Unauthorized
         })?;
 
-        // token_version mismatch = the user's JWTs were invalidated server-side
-        // (password change, role change, admin-initiated kill). Fail closed.
-        if user.token_version != claims.token_version {
-            return Err(AppError::Unauthorized);
-        }
-        if user.status != "active" {
-            return Err(AppError::Unauthorized);
-        }
-        if user.deleted_at.is_some() {
+        if user.token_version != claims.token_version
+            || user.status != "active"
+            || user.deleted_at.is_some()
+        {
             return Err(AppError::Unauthorized);
         }
 
-        Ok(Self {
-            user_id: claims.sub,
-            role: user.role,
-            token_version: user.token_version,
-        })
+        Ok(Self { user_id: claims.sub, role: user.role, token_version: user.token_version })
     }
 }
 
@@ -88,7 +85,6 @@ impl<S> FromRequestParts<S> for SuperAdminUser
 where
     S: Send + Sync,
     DbConn: FromRef<S>,
-    SharedVerifier: FromRef<S>,
 {
     type Rejection = AppError;
 
@@ -101,12 +97,6 @@ where
     }
 }
 
-/// Handler-called guard. `super_admin` bypasses; `admin` passes iff a
-/// `group_admin(user_id, group_id)` row exists; anything else is forbidden.
-///
-/// Lives as a helper rather than a typed `FromRequestParts` extractor because
-/// the `group_id` is often resolved from a parent record (payment → cycle →
-/// group) inside the handler before the guard can be called.
 #[allow(dead_code)]
 pub async fn require_group_scope(
     user: &AuthenticatedUser,
@@ -170,25 +160,3 @@ async fn has_group_admin(db: &DbConn, user_id: &str, group_id: &str) -> Result<b
         .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(counts.first().copied().unwrap_or(0) > 0)
 }
-
-/// Concrete router state that carries both the DB handle and the token
-/// verifier. Extractors read it via `FromRef`; handlers that only need the
-/// DB continue to use `State<DbConn>` unchanged.
-#[derive(Clone)]
-pub struct AuthState {
-    pub db: DbConn,
-    pub verifier: SharedVerifier,
-}
-
-impl FromRef<AuthState> for DbConn {
-    fn from_ref(s: &AuthState) -> Self { s.db.clone() }
-}
-
-impl FromRef<AuthState> for SharedVerifier {
-    fn from_ref(s: &AuthState) -> Self { s.verifier.clone() }
-}
-
-// Silence the rust/axum unused-state warning: until BE-5 flips handlers to
-// the extractors, nothing reads `AuthState` directly.
-#[allow(dead_code)]
-pub(crate) fn _touch(_: &dyn TokenVerifier) {}
