@@ -61,7 +61,7 @@ governor = "0.10"
 dashmap = "6"
 
 # JWT verification + signing — RS256, kid-indexed key map for rotation (Plan 3 / BE-3)
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 
 # RSA keygen — only used to mint an ephemeral dev/test keypair when JWT_KEYS is
 # unset outside production. Prod panics at boot without JWT_KEYS, so this dep is
