@@ -420,17 +420,24 @@ pub async fn refresh_token_endpoint(
             return Err(AppError::Unauthorized);
         }
         Err(e @ (RefreshError::Db(_) | RefreshError::Internal(_))) => {
+            // Log internally but collapse to 401 so the response shape cannot
+            // be used as an oracle distinguishing server-side failures from
+            // invalid/expired/reused tokens.
             tracing::error!(error = %e, "refresh rotate failed");
-            return Err(AppError::Internal("refresh failed".into()));
+            return Err(AppError::Unauthorized);
         }
     };
 
     // Mint a matching access token. The user row is loaded fresh to pick up
     // the latest role + token_version — those can change between refreshes.
-    let user = refresh::load_user(&db, &user_id)
-        .await
-        .map_err(AppError::from)?
-        .ok_or(AppError::Unauthorized)?;
+    let user = match refresh::load_user(&db, &user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return Err(AppError::Unauthorized),
+        Err(e) => {
+            tracing::error!(error = %e, "refresh load_user failed");
+            return Err(AppError::Unauthorized);
+        }
+    };
 
     if user.status != "active" || user.deleted_at.is_some() {
         return Err(AppError::Unauthorized);
@@ -440,7 +447,7 @@ pub async fn refresh_token_endpoint(
         .mint_access(&user_id, &user.role, user.token_version)
         .map_err(|e| {
             tracing::error!(error = %e, "mint access on refresh failed");
-            AppError::Internal("refresh failed".into())
+            AppError::Unauthorized
         })?;
 
     record_auth_event(&db, Some(user_id), "refresh_success", true, None, Some(&ip)).await;
