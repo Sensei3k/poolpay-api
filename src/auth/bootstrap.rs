@@ -17,7 +17,10 @@ const BOOTSTRAP_EVENT_TYPE: &str = "bootstrap_admin_created";
 /// Seed the initial admin account if none exists and the required env vars
 /// are set. Safe to call on every boot.
 pub async fn ensure_admin_user(db: &DbConn) -> Result<(), surrealdb::Error> {
-    let email = std::env::var("BOOTSTRAP_ADMIN_EMAIL").unwrap_or_default();
+    let email = std::env::var("BOOTSTRAP_ADMIN_EMAIL")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let password_plain = std::env::var("BOOTSTRAP_ADMIN_PASSWORD").unwrap_or_default();
 
     if email.is_empty() || password_plain.is_empty() {
@@ -55,23 +58,30 @@ pub async fn ensure_admin_user(db: &DbConn) -> Result<(), surrealdb::Error> {
         deleted_at: None,
     };
     let created: Option<DbUser> = db.create("user").content(content).await?;
-    let user_id = created.map(|u| record_id_to_string(u.id));
+    let user_id = match created {
+        Some(u) => record_id_to_string(u.id),
+        None => {
+            warn!(
+                email_redacted = redact(&email),
+                "Bootstrap admin user create returned no record — skipping seed"
+            );
+            return Ok(());
+        }
+    };
 
     // Identity row keyed on ('credentials', email_normalised) — this is how
     // verify-credentials finds the admin. Without it, login would 401.
-    if let Some(uid) = user_id.as_deref() {
-        let identity = UserIdentityContent {
-            user_id: uid.to_string(),
-            provider: "credentials".into(),
-            provider_subject: email_normalised,
-            email_at_link: email.clone(),
-            created_at: now.clone(),
-        };
-        let _: Option<DbUserIdentity> = db.create("user_identity").content(identity).await?;
-    }
+    let identity = UserIdentityContent {
+        user_id: user_id.clone(),
+        provider: "credentials".into(),
+        provider_subject: email_normalised,
+        email_at_link: email.clone(),
+        created_at: now.clone(),
+    };
+    let _: Option<DbUserIdentity> = db.create("user_identity").content(identity).await?;
 
     let event = AuthEventContent {
-        user_id,
+        user_id: Some(user_id),
         event_type: BOOTSTRAP_EVENT_TYPE.into(),
         ip: None,
         user_agent: None,
@@ -87,7 +97,7 @@ pub async fn ensure_admin_user(db: &DbConn) -> Result<(), surrealdb::Error> {
 
 async fn active_admin_exists(db: &DbConn) -> Result<bool, surrealdb::Error> {
     let mut resp = db
-        .query("SELECT count() FROM user WHERE role IN ['admin', 'super_admin'] AND deleted_at IS NONE GROUP ALL")
+        .query("SELECT count() FROM user WHERE role IN ['admin', 'super_admin'] AND status = 'active' AND deleted_at IS NONE GROUP ALL")
         .await?
         .check()?;
     let rows: Vec<i64> = resp.take("count").unwrap_or_default();
