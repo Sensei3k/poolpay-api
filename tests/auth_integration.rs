@@ -155,13 +155,12 @@ async fn verify_credentials_stale_timestamp_returns_401() {
 // ── ensure-user ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn ensure_user_creates_and_reuses_on_verified_email() {
+async fn ensure_user_creates_and_reuses_for_same_provider_subject() {
     let (app, _db) = test_app().await;
     let body = serde_json::json!({
         "provider": "google",
         "providerSubject": "google-sub-12345",
         "email": "Alice@Example.com",
-        "emailVerified": true,
     });
     let resp1 = call(app.clone(), hmac_request("/api/auth/ensure-user", &body)).await;
     assert_eq!(resp1.status(), StatusCode::OK);
@@ -188,7 +187,6 @@ async fn ensure_user_second_provider_does_not_auto_link_on_email() {
         "provider": "google",
         "providerSubject": "sub-google-1",
         "email": "bob@example.com",
-        "emailVerified": true,
     });
     let r1 = call(app.clone(), hmac_request("/api/auth/ensure-user", &first)).await;
     let v1: serde_json::Value = json_body(r1).await;
@@ -198,7 +196,6 @@ async fn ensure_user_second_provider_does_not_auto_link_on_email() {
         "provider": "github",
         "providerSubject": "sub-github-1",
         "email": "bob@example.com",
-        "emailVerified": true,
     });
     let r2 = call(app, hmac_request("/api/auth/ensure-user", &second)).await;
     assert_eq!(r2.status(), StatusCode::OK);
@@ -208,31 +205,29 @@ async fn ensure_user_second_provider_does_not_auto_link_on_email() {
 }
 
 #[tokio::test]
-async fn ensure_user_unverified_email_never_links_to_existing_account() {
+async fn ensure_user_never_links_across_providers_even_on_matching_email() {
     let (app, _db) = test_app().await;
-    // Seed via verified Google.
-    let verified = serde_json::json!({
+    // Seed via Google.
+    let first = serde_json::json!({
         "provider": "google",
         "providerSubject": "sub-google-2",
         "email": "carol@example.com",
-        "emailVerified": true,
     });
-    let r1 = call(app.clone(), hmac_request("/api/auth/ensure-user", &verified)).await;
+    let r1 = call(app.clone(), hmac_request("/api/auth/ensure-user", &first)).await;
     let v1: serde_json::Value = json_body(r1).await;
-    let verified_id = v1["userId"].as_str().unwrap().to_string();
+    let first_id = v1["userId"].as_str().unwrap().to_string();
 
-    // Now an UNVERIFIED GitHub signup with the same email must not link.
-    let unverified = serde_json::json!({
+    // GitHub signup with the same email must produce a new user, not link.
+    let second = serde_json::json!({
         "provider": "github",
         "providerSubject": "sub-github-2",
         "email": "carol@example.com",
-        "emailVerified": false,
     });
-    let r2 = call(app, hmac_request("/api/auth/ensure-user", &unverified)).await;
+    let r2 = call(app, hmac_request("/api/auth/ensure-user", &second)).await;
     assert_eq!(r2.status(), StatusCode::OK);
     let v2: serde_json::Value = json_body(r2).await;
     assert_eq!(v2["created"], true);
-    assert_ne!(v2["userId"].as_str().unwrap(), verified_id);
+    assert_ne!(v2["userId"].as_str().unwrap(), first_id);
 }
 
 // ── Field length caps (H-2) ───────────────────────────────────────────────────
@@ -266,7 +261,6 @@ async fn ensure_user_rejects_oversized_provider_subject() {
         "provider": "google",
         "providerSubject": "s".repeat(300),
         "email": "long-sub@example.com",
-        "emailVerified": true,
     });
     let resp = call(app, hmac_request("/api/auth/ensure-user", &body)).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
