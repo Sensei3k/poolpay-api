@@ -8,6 +8,7 @@ use surrealdb_types::SurrealValue;
 use tracing::error;
 
 use super::auth::AdminToken;
+use crate::auth::extractors::SuperAdminUser;
 use crate::api::models::{
     AppError, CreateCycleRequest, CreateGroupRequest, CreateMemberRequest, CreatePaymentRequest,
     CreateWhatsappLinkRequest, Cycle, CycleContent, DbCycle, DbGroup, DbGroupLink, DbMember,
@@ -131,7 +132,7 @@ pub async fn get_receipts(
 // ── Admin Group handlers ─────────────────────────────────────────────────────
 
 pub async fn create_group(
-    _auth: AdminToken,
+    _auth: SuperAdminUser,
     State(db): State<DbConn>,
     Json(body): Json<CreateGroupRequest>,
 ) -> Result<(StatusCode, Json<Group>), AppError> {
@@ -155,7 +156,7 @@ pub async fn create_group(
 }
 
 pub async fn update_group(
-    _auth: AdminToken,
+    _auth: SuperAdminUser,
     State(db): State<DbConn>,
     Path(id): Path<EntityId>,
     Json(body): Json<UpdateGroupRequest>,
@@ -188,7 +189,7 @@ pub async fn update_group(
 }
 
 pub async fn delete_group(
-    _auth: AdminToken,
+    _auth: SuperAdminUser,
     State(db): State<DbConn>,
     Path(id): Path<EntityId>,
 ) -> Result<StatusCode, AppError> {
@@ -818,7 +819,7 @@ pub async fn reject_receipt(
 // ── Admin WhatsApp link handlers ─────────────────────────────────────────────
 
 pub async fn get_whatsapp_links(
-    _auth: AdminToken,
+    _auth: SuperAdminUser,
     State(db): State<DbConn>,
 ) -> Result<Json<Vec<GroupLink>>, AppError> {
     let rows: Vec<DbGroupLink> = db.select("group_link").await?;
@@ -831,7 +832,7 @@ pub async fn get_whatsapp_links(
 }
 
 pub async fn create_whatsapp_link(
-    _auth: AdminToken,
+    _auth: SuperAdminUser,
     State(db): State<DbConn>,
     Json(body): Json<CreateWhatsappLinkRequest>,
 ) -> Result<(StatusCode, Json<GroupLink>), AppError> {
@@ -878,7 +879,7 @@ pub async fn create_whatsapp_link(
 }
 
 pub async fn delete_whatsapp_link(
-    _auth: AdminToken,
+    _auth: SuperAdminUser,
     State(db): State<DbConn>,
     Path(id): Path<EntityId>,
 ) -> Result<StatusCode, AppError> {
