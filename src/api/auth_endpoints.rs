@@ -8,7 +8,11 @@
 //! never auto-linked on email match. A second provider for the same person
 //! becomes a deliberate, authenticated FE linking flow (not in BE-1).
 
-use axum::{Extension, Json, extract::State, extract::rejection::JsonRejection};
+use axum::{
+    Extension, Json,
+    body::to_bytes,
+    extract::{Request, State},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::api::models::{
@@ -376,6 +380,13 @@ async fn find_identity(
 
 const MAX_REFRESH_TOKEN_LEN: usize = 128;
 
+// Hard cap on the raw request body for the public refresh/logout endpoints.
+// `MAX_REFRESH_TOKEN_LEN` bounds the *field* but `Json` would still buffer
+// an arbitrarily large body before rejecting it, which is a trivial memory
+// DoS vector on un-authenticated routes. 4 KiB easily fits a 128-char token
+// plus JSON framing.
+const MAX_REFRESH_BODY_BYTES: usize = 4 * 1024;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshRequest {
@@ -400,12 +411,17 @@ pub async fn refresh_token_endpoint(
     State(db): State<DbConn>,
     Extension(verifier): Extension<SharedVerifier>,
     ClientIp(client_ip): ClientIp,
-    req: Result<Json<RefreshRequest>, JsonRejection>,
+    http_req: Request,
 ) -> Result<Json<RefreshResponse>, AppError> {
-    // Malformed JSON / wrong content-type must not leak a distinguishing
-    // 400/415 — collapse every decode failure to the same 401 the rest of
-    // this handler returns.
-    let Json(req) = req.map_err(|_| AppError::Unauthorized)?;
+    // Malformed JSON / wrong content-type / oversized bodies must not leak a
+    // distinguishing 400/413/415 — collapse every decode failure to the same
+    // 401 the rest of this handler returns. Reading bytes manually also caps
+    // buffer size at `MAX_REFRESH_BODY_BYTES` to bound parser memory.
+    let body = to_bytes(http_req.into_body(), MAX_REFRESH_BODY_BYTES)
+        .await
+        .map_err(|_| AppError::Unauthorized)?;
+    let req: RefreshRequest =
+        serde_json::from_slice(&body).map_err(|_| AppError::Unauthorized)?;
     if req.refresh_token.is_empty() || req.refresh_token.len() > MAX_REFRESH_TOKEN_LEN {
         return Err(AppError::Unauthorized);
     }
@@ -475,13 +491,18 @@ pub struct LogoutRequest {
 pub async fn logout_endpoint(
     State(db): State<DbConn>,
     ClientIp(client_ip): ClientIp,
-    req: Result<Json<LogoutRequest>, JsonRejection>,
+    http_req: Request,
 ) -> Result<axum::http::StatusCode, AppError> {
-    // Strict "always 204" contract: malformed JSON / wrong content-type
-    // must not surface Axum's default 400/415 — silently return 204 so
-    // logout cannot be probed as an oracle.
-    let Json(req) = match req {
-        Ok(j) => j,
+    // Strict "always 204" contract: malformed JSON / wrong content-type /
+    // oversized bodies must not surface Axum's default 400/413/415 —
+    // silently return 204 so logout cannot be probed as an oracle, while
+    // still bounding parser memory via `MAX_REFRESH_BODY_BYTES`.
+    let body = match to_bytes(http_req.into_body(), MAX_REFRESH_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(_) => return Ok(axum::http::StatusCode::NO_CONTENT),
+    };
+    let req: LogoutRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
         Err(_) => return Ok(axum::http::StatusCode::NO_CONTENT),
     };
     if req.refresh_token.is_empty() || req.refresh_token.len() > MAX_REFRESH_TOKEN_LEN {
