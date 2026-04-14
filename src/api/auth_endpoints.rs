@@ -67,11 +67,19 @@ pub async fn verify_credentials(
     // emit a precise `auth_event` and charge the composite limiter.
     let result = authenticate_credentials(&db, &email_normalised, &req.password).await;
 
+    let client_ip_str = client_ip.to_string();
     match result {
         Ok(user) => {
             let user_id = record_id_to_string(user.id);
-            let _ =
-                record_auth_event(&db, Some(user_id.clone()), "login_success", true, None).await;
+            let _ = record_auth_event(
+                &db,
+                Some(user_id.clone()),
+                "login_success",
+                true,
+                None,
+                Some(&client_ip_str),
+            )
+            .await;
             Ok(Json(VerifyCredentialsResponse {
                 user_id,
                 email: user.email,
@@ -87,8 +95,15 @@ pub async fn verify_credentials(
             let key = (client_ip, email_normalised.clone());
             match limiter.charge_failure(&key) {
                 Ok(()) => {
-                    let _ =
-                        record_auth_event(&db, user_id, "login_failure", false, Some(reason)).await;
+                    let _ = record_auth_event(
+                        &db,
+                        user_id,
+                        "login_failure",
+                        false,
+                        Some(reason),
+                        Some(&client_ip_str),
+                    )
+                    .await;
                     Err(AppError::Unauthorized)
                 }
                 Err(retry_after_secs) => {
@@ -98,6 +113,7 @@ pub async fn verify_credentials(
                         "login_failure",
                         false,
                         Some("rate_limited"),
+                        Some(&client_ip_str),
                     )
                     .await;
                     Err(AppError::TooManyRequests {
@@ -360,11 +376,12 @@ async fn record_auth_event(
     event_type: &str,
     success: bool,
     reason: Option<&str>,
+    ip: Option<&str>,
 ) -> Result<(), AppError> {
     let content = AuthEventContent {
         user_id,
         event_type: event_type.into(),
-        ip: None,
+        ip: ip.map(str::to_string),
         user_agent: None,
         success,
         reason: reason.map(str::to_string),
