@@ -79,15 +79,23 @@ async fn build_app_full(
 }
 
 fn test_verifier() -> SharedVerifier {
-    Arc::new(
-        StaticKeyVerifier::from_env(JwtConfig {
-            audience: "poolpay-api".into(),
-            issuer: "poolpay-nextauth".into(),
-            access_ttl_secs: 900,
-            leeway_secs: 60,
+    // `StaticKeyVerifier::from_env` generates a fresh RSA-2048 keypair when
+    // `JWT_KEYS` is unset, which is expensive enough to dominate test runtime
+    // if we rebuild it per call. Build once per process and clone the `Arc`.
+    static VERIFIER: OnceLock<SharedVerifier> = OnceLock::new();
+    VERIFIER
+        .get_or_init(|| {
+            Arc::new(
+                StaticKeyVerifier::from_env(JwtConfig {
+                    audience: "poolpay-api".into(),
+                    issuer: "poolpay-nextauth".into(),
+                    access_ttl_secs: 900,
+                    leeway_secs: 60,
+                })
+                .expect("test verifier"),
+            )
         })
-        .expect("test verifier"),
-    )
+        .clone()
 }
 
 /// Non-restrictive config used by every non-rate-limit test. Large buckets so
