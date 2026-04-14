@@ -46,15 +46,16 @@ async fn test_app() -> Router {
     api::router(conn)
 }
 
-/// Build a fresh app with `ADMIN_TOKEN` set and two pre-seeded admin users
-/// (`TEST_SUPER_ADMIN_SUB` as `super_admin`, `TEST_ADMIN_SUB` as `admin`).
+/// Build a fresh app with three pre-seeded admin users:
+/// `TEST_SUPER_ADMIN_SUB` as `super_admin`, `TEST_ADMIN_SUB` as a
+/// role-only `admin` with no group grants, and `TEST_SCOPED_ADMIN_SUB`
+/// as an `admin` with a matching `group_admin` row for the fixture group.
 ///
-/// `ADMIN_TOKEN` keeps every still-legacy admin handler reachable via
-/// `Bearer test-secret-token`. The seeded users let the BE-5 swap targets
-/// (currently `groups` and WhatsApp links) authenticate via JWTs minted by
-/// `mint_admin_jwt`, since `SuperAdminUser` re-reads `user.role` from the
-/// DB on every request — so the 403 test needs a real `admin` row, not just
-/// a JWT claiming `role: admin`.
+/// The seeded users back every admin test in the suite: `SuperAdminUser`
+/// re-reads `user.role` from the DB on every request, and
+/// `GroupScopedAdmin::ensure` re-reads the `group_admin` join row, so the
+/// JWT alone is not enough — each claim needs a real user (and, for
+/// scoped flows, a real grant) to succeed or fail predictably.
 ///
 /// `OnceLock` keeps `set_var` to a single mutation per process; `env_lock()`
 /// serialises that mutation against every other env writer in this binary.
@@ -63,13 +64,10 @@ async fn test_app_with_auth() -> Router {
     INIT.get_or_init(|| {
         let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
         // Safety: serialized by `env_lock()`; called once before any test
-        // that reads ADMIN_TOKEN or APP_ENV runs. APP_ENV must be set
-        // before the first `api::router()` call so the JWT verifier can
-        // generate ephemeral RSA keys (prod fail-closed gate).
-        unsafe {
-            std::env::set_var("ADMIN_TOKEN", "test-secret-token");
-            std::env::set_var("APP_ENV", "test");
-        }
+        // that reads APP_ENV runs. APP_ENV must be set before the first
+        // `api::router()` call so the JWT verifier can generate ephemeral
+        // RSA keys (prod fail-closed gate).
+        unsafe { std::env::set_var("APP_ENV", "test") };
     });
     let conn = db::init_memory().await.expect("failed to init test DB");
     seed_test_admin_users(&conn).await;

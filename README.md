@@ -36,7 +36,6 @@ src/
 ├── db.rs          — SurrealDB initialization and seeding
 ├── api/
 │   ├── mod.rs     — router setup, CORS configuration
-│   ├── auth.rs    — AdminToken extractor (Bearer token via ADMIN_TOKEN)
 │   ├── handlers.rs — HTTP handlers (GET/POST/PATCH/DELETE)
 │   └── models.rs  — API request/response types, EntityId alias, DB/API structs
 tests/
@@ -67,7 +66,7 @@ brew install tesseract poppler pkgconf
    ```bash
    cp .env.example .env
    ```
-   Fill in your Green API credentials and admin token (see [Environment variables](#environment-variables) below).
+   Fill in your Green API credentials and NextAuth backend HMAC secret (see [Environment variables](#environment-variables) below).
 
 2. Build and run:
    ```bash
@@ -90,7 +89,6 @@ brew install tesseract poppler pkgconf
 |----------|----------|---------|-------------|
 | `GREEN_API_INSTANCE_ID` | Yes | — | Instance ID from the Green API dashboard |
 | `GREEN_API_TOKEN` | Yes | — | API token shown next to your instance |
-| `ADMIN_TOKEN` | Yes | — | Bearer token for `/api/admin/*` endpoints. Generate with `openssl rand -hex 32` |
 | `APP_ENV` | No | `development` | Set to `production` to enable CORS restrictions and disable `/api/test/reset` |
 | `DASHBOARD_ORIGIN` | No (required if `APP_ENV=production`) | — | CORS origin for the dashboard (e.g., `https://dashboard.example.com`) |
 | `API_BIND_ADDR` | No | `0.0.0.0:8080` | Socket address for the HTTP server |

@@ -49,10 +49,6 @@ APP_ENV=production DASHBOARD_ORIGIN=https://dashboard.example.com \
 GREEN_API_INSTANCE_ID=your_instance_id_here
 GREEN_API_TOKEN=your_api_token_here
 
-# Admin bearer token for all /api/admin/* endpoints
-# Generate with: openssl rand -hex 32
-ADMIN_TOKEN=your_admin_token_here
-
 # Shared secret for NextAuth → backend HMAC signing
 # Must be at least 32 bytes; panics at boot in production if shorter
 # Generate with: openssl rand -hex 32
@@ -202,7 +198,6 @@ a generic 401 so the signal is not exposed to the attacker.
 
 - Set `APP_ENV=production` to enable CORS restrictions
 - Set `DASHBOARD_ORIGIN` to the dashboard URL
-- Set a strong `ADMIN_TOKEN` (at least 32 hex characters)
 - Set `NEXTAUTH_BACKEND_SECRET` to a value with ≥ 32 bytes — the process panics at boot in production if it is shorter or unset
 - Set `JWT_KEYS` with at least one active RS256 entry — the process panics at boot in production if it is missing (ephemeral-key fallback is disabled outside dev/test)
 - The `/api/test/reset` endpoint is fail-closed: it only mounts when `APP_ENV=development` or `APP_ENV=test`. Unset `APP_ENV` on a staging/prod host and the endpoint stays unreachable
@@ -224,7 +219,7 @@ The service runs two concurrent tasks:
 ### API Server (Async Task)
 - Serves HTTP API on port 8080
 - Public read endpoints for groups, members, cycles, and payments
-- Admin write endpoints (behind `ADMIN_TOKEN` bearer auth) for CRUD operations
+- Admin write endpoints guarded by RS256 admin JWTs — `SuperAdminUser` for group/WhatsApp-link CRUD, `GroupScopedAdmin` for member/cycle/payment/receipt CRUD
 - HMAC-gated auth endpoints (`/api/auth/verify-credentials`, `/api/auth/ensure-user`) called by NextAuth — signed with `NEXTAUTH_BACKEND_SECRET`
 - Dev/test-only `/api/test/reset` endpoint (fail-closed gate on `APP_ENV`)
 - CORS configured based on `APP_ENV`
@@ -319,7 +314,7 @@ All IDs are SurrealDB-generated strings (not integers). The `EntityId` type alia
 
 ## API Routes
 
-All routes return JSON. Admin endpoints require `Authorization: Bearer <ADMIN_TOKEN>` header.
+All routes return JSON. Admin endpoints require an RS256 admin access token in `Authorization: Bearer <jwt>` — minted by NextAuth via `/api/auth/verify-credentials` and verified against `JWT_KEYS`. Group/WhatsApp-link CRUD requires `role: super_admin`; member/cycle/payment/receipt CRUD requires `role: super_admin` or a matching `group_admin(user_id, group_id)` grant.
 
 ### Public Read Endpoints
 
@@ -341,7 +336,7 @@ List all active payments. Optional `cycleId` query parameter filters by cycle.
 
 ### Admin Group Endpoints
 
-All require `Authorization: Bearer <ADMIN_TOKEN>`.
+All require an admin access token (see [API Routes](#api-routes)).
 
 #### POST /api/admin/groups
 

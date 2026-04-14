@@ -29,10 +29,6 @@ async fn main() {
     let api_token = env::var("GREEN_API_TOKEN")
         .expect("GREEN_API_TOKEN must be set in .env");
 
-    if env::var("ADMIN_TOKEN").unwrap_or_default().is_empty() {
-        warn!("ADMIN_TOKEN is not set — all admin endpoints will return 401");
-    }
-
     // HMAC strength depends on key entropy. hmac.rs only rejects an empty
     // secret, so a 6-char value would silently pass. Fail fast on anything
     // shorter than 32 bytes (matches `openssl rand -hex 32` in .env.example).
