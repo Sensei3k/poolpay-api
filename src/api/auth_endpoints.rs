@@ -238,9 +238,10 @@ async fn create_social_user(
     email: &str,
 ) -> Result<(String, String, String), AppError> {
     let now = now_iso();
+    let trimmed_email = email.trim().to_string();
     let content = UserContent {
-        email: email.to_string(),
-        email_normalised: email.trim().to_lowercase(),
+        email: trimmed_email.clone(),
+        email_normalised: trimmed_email.to_lowercase(),
         password_hash: None,
         role: "member".into(),
         status: "active".into(),
