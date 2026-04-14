@@ -1,3 +1,4 @@
+use poolpay::auth::rate_limit::RateLimitConfig;
 use poolpay::{api, auth, db, extractor, ingestion, parser, replies, whatsapp};
 use poolpay::api::models::now_iso;
 
@@ -58,21 +59,20 @@ async fn main() {
         }
     }
 
+    // Parse rate-limit config once at boot and reuse the same instance for
+    // both the boot-time safety warning and the router. Previously main.rs
+    // duplicated `TRUST_PROXY_HEADERS` parsing which drifted from
+    // `parse_bool()` semantics — reusing `RateLimitConfig::from_env()` here
+    // guarantees the warning fires for exactly the same inputs the limiter
+    // actually trusts.
+    let rate_cfg = RateLimitConfig::from_env();
+
     // When the per-IP limiter is configured to trust proxy headers, the
     // deployed proxy MUST strip any client-supplied X-Forwarded-For before
     // setting its own — otherwise a client can spoof their source IP and
     // bypass per-IP rate limiting. Emit a prominent warning at boot so a
     // misconfigured proxy cannot silently neutralise the limiter.
-    let trust_proxy = env::var("TRUST_PROXY_HEADERS")
-        .ok()
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "true" | "1" | "yes"
-            )
-        })
-        .unwrap_or(false);
-    if trust_proxy && env::var("APP_ENV").as_deref() == Ok("production") {
+    if rate_cfg.trust_proxy_headers && env::var("APP_ENV").as_deref() == Ok("production") {
         warn!(
             "TRUST_PROXY_HEADERS=true in production — confirm the upstream proxy \
              strips client-supplied X-Forwarded-For before appending; otherwise \
@@ -103,7 +103,7 @@ async fn main() {
         let addr: SocketAddr = bind_addr
             .parse()
             .expect("API_BIND_ADDR is not a valid socket address");
-        let router = api::router(api_db);
+        let router = api::router_with_config(api_db, rate_cfg);
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .expect("Failed to bind Axum listener");
