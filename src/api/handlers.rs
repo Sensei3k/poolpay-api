@@ -304,8 +304,14 @@ pub async fn update_member(
     body.validate()?;
 
     let existing: Option<DbMember> = db.select(("member", id.as_str())).await?;
-    let existing = existing.ok_or_else(|| AppError::NotFound(format!("member {id} does not exist")))?;
-    let _auth = GroupScopedAdmin::ensure(user, existing.group_id.as_str(), &db).await?;
+    let _auth = GroupScopedAdmin::ensure_or_deny(
+        user,
+        existing.as_ref().map(|m| m.group_id.as_str()),
+        &db,
+        AppError::NotFound(format!("member {id} does not exist")),
+    )
+    .await?;
+    let existing = existing.expect("ensure_or_deny returns missing_err when None");
 
     if existing.version != body.version {
         return Err(AppError::Conflict(
@@ -356,8 +362,14 @@ pub async fn delete_member(
     Path(id): Path<EntityId>,
 ) -> Result<StatusCode, AppError> {
     let existing: Option<DbMember> = db.select(("member", id.as_str())).await?;
-    let existing = existing.ok_or_else(|| AppError::NotFound(format!("member {id} does not exist")))?;
-    let _auth = GroupScopedAdmin::ensure(user, existing.group_id.as_str(), &db).await?;
+    let _auth = GroupScopedAdmin::ensure_or_deny(
+        user,
+        existing.as_ref().map(|m| m.group_id.as_str()),
+        &db,
+        AppError::NotFound(format!("member {id} does not exist")),
+    )
+    .await?;
+    let existing = existing.expect("ensure_or_deny returns missing_err when None");
 
     // Check if member is a recipient of any active cycle.
     let active_cycles: Vec<DbCycle> = db
@@ -475,8 +487,14 @@ pub async fn update_cycle(
     body.validate()?;
 
     let existing: Option<DbCycle> = db.select(("cycle", id.as_str())).await?;
-    let existing = existing.ok_or_else(|| AppError::NotFound(format!("cycle {id} does not exist")))?;
-    let _auth = GroupScopedAdmin::ensure(user, existing.group_id.as_str(), &db).await?;
+    let _auth = GroupScopedAdmin::ensure_or_deny(
+        user,
+        existing.as_ref().map(|c| c.group_id.as_str()),
+        &db,
+        AppError::NotFound(format!("cycle {id} does not exist")),
+    )
+    .await?;
+    let existing = existing.expect("ensure_or_deny returns missing_err when None");
 
     if existing.version != body.version {
         return Err(AppError::Conflict(
@@ -548,8 +566,13 @@ pub async fn delete_cycle(
     Path(id): Path<EntityId>,
 ) -> Result<StatusCode, AppError> {
     let existing: Option<DbCycle> = db.select(("cycle", id.as_str())).await?;
-    let existing = existing.ok_or_else(|| AppError::NotFound(format!("cycle {id} does not exist")))?;
-    let _auth = GroupScopedAdmin::ensure(user, existing.group_id.as_str(), &db).await?;
+    let _auth = GroupScopedAdmin::ensure_or_deny(
+        user,
+        existing.as_ref().map(|c| c.group_id.as_str()),
+        &db,
+        AppError::NotFound(format!("cycle {id} does not exist")),
+    )
+    .await?;
 
     // Check if cycle has payments.
     let payments: Vec<DbPayment> = db
@@ -579,10 +602,20 @@ pub async fn create_payment(
 ) -> Result<(StatusCode, Json<Payment>), AppError> {
     body.validate()?;
 
+    // Load the member first, then gate on its group *before* any other
+    // existence/state checks. Any earlier ordering lets a non-scoped
+    // admin enumerate members, soft-delete state, cycles, and cross-group
+    // combinations across every tenant by flipping ids in the body.
     let member: Option<DbMember> = db.select(("member", body.member_id.as_str())).await?;
-    let member = member.ok_or_else(|| {
-        AppError::NotFound(format!("member {} does not exist", body.member_id))
-    })?;
+    let _auth = GroupScopedAdmin::ensure_or_deny(
+        user,
+        member.as_ref().map(|m| m.group_id.as_str()),
+        &db,
+        AppError::NotFound(format!("member {} does not exist", body.member_id)),
+    )
+    .await?;
+    let member = member.expect("ensure_or_deny returns missing_err when None");
+
     if member.deleted_at.is_some() {
         return Err(AppError::BadRequest(format!(
             "member {} has been deleted",
@@ -599,10 +632,6 @@ pub async fn create_payment(
             "member and cycle must belong to the same group".into(),
         ));
     }
-
-    // Scope check against the cycle's group — member and cycle have already
-    // been verified to share it above, so either id is equivalent.
-    let _auth = GroupScopedAdmin::ensure(user, cycle.group_id.as_str(), &db).await?;
 
     let now = now_iso();
     let content = PaymentContent {
@@ -635,13 +664,17 @@ pub async fn delete_payment(
     Path((member_id, cycle_id)): Path<(EntityId, EntityId)>,
 ) -> Result<StatusCode, AppError> {
     // Resolve the group through the cycle so `GroupScopedAdmin` can gate
-    // the delete before any mutation. 404 on unknown cycle mirrors the
-    // "no payment found" response below.
+    // the delete before any mutation or existence response. Missing cycles
+    // return an opaque 403 to non-super-admins to avoid leaking which
+    // cycle ids exist across groups.
     let cycle: Option<DbCycle> = db.select(("cycle", cycle_id.as_str())).await?;
-    let cycle = cycle.ok_or_else(|| {
-        AppError::NotFound(format!("cycle {cycle_id} does not exist"))
-    })?;
-    let _auth = GroupScopedAdmin::ensure(user, cycle.group_id.as_str(), &db).await?;
+    let _auth = GroupScopedAdmin::ensure_or_deny(
+        user,
+        cycle.as_ref().map(|c| c.group_id.as_str()),
+        &db,
+        AppError::NotFound(format!("cycle {cycle_id} does not exist")),
+    )
+    .await?;
 
     let rows: Vec<DbPayment> = db
         .query("SELECT * FROM payment WHERE member_id = $mid AND cycle_id = $cid AND deleted_at IS NONE")
@@ -681,14 +714,10 @@ pub async fn delete_payment(
 
 // ── Admin Receipt handlers ───────────────────────────────────────────────────
 
-/// Load a receipt by id, rejecting soft-deleted rows as 404.
-async fn load_active_receipt(db: &DbConn, id: &str) -> Result<DbReceipt, AppError> {
+/// Load a receipt by id, treating soft-deleted rows as absent.
+async fn load_active_receipt_opt(db: &DbConn, id: &str) -> Result<Option<DbReceipt>, AppError> {
     let row: Option<DbReceipt> = db.select(("receipt", id)).await?;
-    let row = row.ok_or_else(|| AppError::NotFound(format!("receipt {id} does not exist")))?;
-    if row.deleted_at.is_some() {
-        return Err(AppError::NotFound(format!("receipt {id} does not exist")));
-    }
-    Ok(row)
+    Ok(row.filter(|r| r.deleted_at.is_none()))
 }
 
 fn receipt_content_from(row: &DbReceipt, status: &str, updated_at: String) -> ReceiptContent {
@@ -718,8 +747,15 @@ pub async fn confirm_receipt(
     State(db): State<DbConn>,
     Path(id): Path<EntityId>,
 ) -> Result<Json<Receipt>, AppError> {
-    let receipt = load_active_receipt(&db, id.as_str()).await?;
-    let _auth = GroupScopedAdmin::ensure(user, receipt.group_id.as_str(), &db).await?;
+    let receipt = load_active_receipt_opt(&db, id.as_str()).await?;
+    let _auth = GroupScopedAdmin::ensure_or_deny(
+        user,
+        receipt.as_ref().map(|r| r.group_id.as_str()),
+        &db,
+        AppError::NotFound(format!("receipt {id} does not exist")),
+    )
+    .await?;
+    let receipt = receipt.expect("ensure_or_deny returns missing_err when None");
 
     if receipt.status != "pending" {
         return Err(AppError::Conflict(format!(
@@ -817,8 +853,15 @@ pub async fn reject_receipt(
     State(db): State<DbConn>,
     Path(id): Path<EntityId>,
 ) -> Result<Json<Receipt>, AppError> {
-    let receipt = load_active_receipt(&db, id.as_str()).await?;
-    let _auth = GroupScopedAdmin::ensure(user, receipt.group_id.as_str(), &db).await?;
+    let receipt = load_active_receipt_opt(&db, id.as_str()).await?;
+    let _auth = GroupScopedAdmin::ensure_or_deny(
+        user,
+        receipt.as_ref().map(|r| r.group_id.as_str()),
+        &db,
+        AppError::NotFound(format!("receipt {id} does not exist")),
+    )
+    .await?;
+    let receipt = receipt.expect("ensure_or_deny returns missing_err when None");
 
     if receipt.status != "pending" {
         return Err(AppError::Conflict(format!(

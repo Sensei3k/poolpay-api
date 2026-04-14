@@ -2123,3 +2123,80 @@ async fn reject_receipt_scoped_admin_proceeds() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+// ── Opaque-denial for unknown ids (cross-tenant existence probing) ───────────
+//
+// A non-scoped `admin` must not be able to distinguish "this id doesn't
+// exist" from "this id exists in a group you can't touch" — both collapse
+// to 403. Super-admins still see 404 for truly missing ids (covered by
+// the existing `*_unknown_*_returns_404` tests that run under
+// `super_admin_bearer()`).
+
+#[tokio::test]
+async fn update_member_unknown_id_denies_non_scoped_admin_opaquely() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt_with(
+            "/api/admin/members/does-not-exist",
+            serde_json::json!({"name": "x", "version": 1}),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn delete_cycle_unknown_id_denies_non_scoped_admin_opaquely() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        delete_req_jwt_with("/api/admin/cycles/does-not-exist", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn confirm_receipt_unknown_id_denies_non_scoped_admin_opaquely() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_empty_jwt_with("/api/admin/receipts/does-not-exist/confirm", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_payment_unknown_member_denies_non_scoped_admin_opaquely() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        post_json_jwt_with(
+            "/api/payments",
+            serde_json::json!({
+                "memberId": "does-not-exist",
+                "cycleId": "3",
+                "amount": 1_000_000,
+                "currency": "NGN",
+                "paymentDate": "2026-03-10",
+            }),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn delete_payment_unknown_cycle_denies_non_scoped_admin_opaquely() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        delete_req_jwt_with("/api/payments/1/does-not-exist", &admin_bearer()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}

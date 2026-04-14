@@ -47,6 +47,25 @@ impl GroupScopedAdmin {
         require_group_scope(&user, group_id, db).await?;
         Ok(Self(user))
     }
+
+    /// Resolve the scope when the parent record may be missing. Passing
+    /// `None` for `group_id` means the target record was not found — in
+    /// that case super-admins receive `missing_err` (they already know
+    /// every id in the system) while non-super-admins receive the same
+    /// opaque 403 they would get for a cross-tenant record, so that
+    /// 404 vs 403 can't be used to probe existence across groups.
+    pub async fn ensure_or_deny(
+        user: AuthenticatedUser,
+        group_id: Option<&str>,
+        db: &DbConn,
+        missing_err: AppError,
+    ) -> Result<Self, AppError> {
+        match group_id {
+            Some(gid) => Self::ensure(user, gid, db).await,
+            None if user.role == "super_admin" => Err(missing_err),
+            None => Err(AppError::Forbidden("forbidden".into())),
+        }
+    }
 }
 
 impl AuthenticatedUser {
