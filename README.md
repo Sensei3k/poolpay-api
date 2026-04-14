@@ -1,10 +1,10 @@
 # poolpay
 
-A Rust service that manages Ajo savings circles with a REST API and WhatsApp receipt OCR. Built with Axum, SurrealDB, and Green API.
+A Rust service that manages PoolPay savings groups with a REST API and WhatsApp receipt OCR. Built with Axum, SurrealDB, and Green API.
 
 ## What it does
 
-**REST API** for managing multi-group Ajo circles:
+**REST API** for managing multi-group PoolPay savings groups:
 - CRUD for groups, members, cycles, and payments
 - Admin endpoints secured with bearer token auth
 - Soft delete for groups/members/payments, hard delete for cycles
