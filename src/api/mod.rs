@@ -54,7 +54,11 @@ pub fn router(db: DbConn) -> Router {
         .route("/api/auth/verify-credentials", post(auth_endpoints::verify_credentials))
         .route("/api/auth/ensure-user", post(auth_endpoints::ensure_user));
 
-    if std::env::var("APP_ENV").as_deref() != Ok("production") {
+    // Fail-closed: the destructive test reset endpoint is only mounted when
+    // APP_ENV is explicitly "development" or "test". If the env var is
+    // misconfigured or missing on a staging/prod deploy, the endpoint stays
+    // unreachable — previously an unset APP_ENV exposed it by default.
+    if matches!(std::env::var("APP_ENV").as_deref(), Ok("development" | "test")) {
         router = router.route("/api/test/reset", post(reset_db));
     }
 

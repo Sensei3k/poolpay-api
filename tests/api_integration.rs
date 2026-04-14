@@ -22,6 +22,13 @@ use tower::ServiceExt;
 
 /// Build a fresh app backed by an isolated in-memory DB.
 async fn test_app() -> Router {
+    // The /api/test/reset endpoint is only mounted when APP_ENV is "test" or
+    // "development" (fail-closed). Set it once for the whole suite.
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        // Safety: called once before any test reads APP_ENV.
+        unsafe { std::env::set_var("APP_ENV", "test") };
+    });
     let conn = db::init_memory().await.expect("failed to init test DB");
     api::router(conn)
 }
