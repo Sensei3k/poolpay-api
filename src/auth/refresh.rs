@@ -11,7 +11,7 @@
 //!   the entire `family_id` is revoked, the user's `token_version` is
 //!   bumped (invalidating any in-flight access tokens within the 15-min
 //!   access TTL), and an `auth_event{refresh_reuse_detected}` is written.
-//!   This is RFC 6749 BCP section 4.12.
+//!   This follows OAuth 2.0 Security BCP (RFC 9700) section 4.12.
 //! * Logout revokes every row in the family in one shot.
 
 use base64::Engine as _;

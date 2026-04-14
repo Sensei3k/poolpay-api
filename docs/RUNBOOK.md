@@ -190,7 +190,7 @@ restart invalidates every outstanding token). Missing or unrecognised
 explicitly.
 
 **Refresh rotation = theft detection.** The rotation endpoint follows
-RFC 6749 BCP §4.12: every use of a refresh token revokes the original
+OAuth 2.0 Security BCP (RFC 9700) §4.12: every use of a refresh token revokes the original
 row and issues a new one in the same family. Presenting an already-
 rotated token is treated as evidence of compromise — the entire family
 is revoked, the user's `token_version` is bumped (which invalidates any
