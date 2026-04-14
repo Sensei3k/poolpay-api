@@ -27,7 +27,7 @@ use crate::api::models::{
 };
 use crate::db::DbConn;
 
-/// 14 days — matches the default refresh TTL in `JwtConfig`.
+/// 14 days — module default used when `JWT_REFRESH_TTL_SECS` is not set.
 const DEFAULT_REFRESH_TTL_SECS: i64 = 14 * 24 * 60 * 60;
 
 /// Plaintext refresh token material handed to the client. Never persisted.
