@@ -1,6 +1,6 @@
 # Documentation Index
 
-Last Updated: 2026-04-01
+Last Updated: 2026-04-14
 
 Quick reference to all documentation for the PoolPay project.
 
@@ -34,7 +34,7 @@ Start here if you're deploying, running, or troubleshooting the service in produ
 - **[README.md](../README.md)** (in root) — Project overview
   - What the service does
   - Architecture and structure
-  - Testing overview (106 tests)
+  - Testing overview (193 tests)
   - Known limitations
 
 ## Key Topics at a Glance
@@ -113,8 +113,9 @@ Two concurrent tasks:
 2. **API Server** (port 8080)
    - Public read endpoints for groups, members, cycles, payments
    - Admin write endpoints (bearer token auth) for CRUD operations
+   - HMAC-gated auth endpoints for NextAuth (`verify-credentials`, `ensure-user`)
    - Manages multi-group PoolPay savings groups with soft delete and version control
-   - Development-only database reset endpoint
+   - Dev/test-only database reset endpoint (fail-closed on `APP_ENV`)
 
 See [RUNBOOK.md - Service Architecture](./RUNBOOK.md#service-architecture) for details.
 

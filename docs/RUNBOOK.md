@@ -1,6 +1,6 @@
 # Runbook: PoolPay Service
 
-Last Updated: 2026-04-01
+Last Updated: 2026-04-14
 
 Operational guide for running and troubleshooting the PoolPay service in development and production.
 
@@ -46,20 +46,33 @@ APP_ENV=production DASHBOARD_ORIGIN=https://dashboard.example.com \
 
 ```env
 # Green API credentials (from https://green-api.com/en/)
-GREEN_API_INSTANCE_ID=7103538567
-GREEN_API_TOKEN=68e409f84c9f47549a370f0ca1ba5bd01122559cdfce45a180
+GREEN_API_INSTANCE_ID=your_instance_id_here
+GREEN_API_TOKEN=your_api_token_here
 
 # Admin bearer token for all /api/admin/* endpoints
 # Generate with: openssl rand -hex 32
 ADMIN_TOKEN=your_admin_token_here
+
+# Shared secret for NextAuth → backend HMAC signing
+# Must be at least 32 bytes; panics at boot in production if shorter
+# Generate with: openssl rand -hex 32
+NEXTAUTH_BACKEND_SECRET=your_nextauth_backend_secret_here
 ```
 
 ### Optional Variables
 
 ```env
-# Environment mode (default: development)
-# Set to "production" to enable CORS restrictions and disable /api/test/reset
+# Environment mode (default: unset)
+# - "production" enables strict CORS (requires DASHBOARD_ORIGIN)
+# - "development" or "test" mounts the destructive /api/test/reset endpoint
+# - Anything else (including unset) is treated as production for the reset gate (fail-closed)
 APP_ENV=development
+
+# Bootstrap admin — seeded on first boot if no active admin user exists.
+# The seeded user is flagged must_reset_password=true; remove these from
+# deployed env once the first rotation has happened.
+BOOTSTRAP_ADMIN_EMAIL=admin@example.com
+BOOTSTRAP_ADMIN_PASSWORD=change-me-immediately
 
 # CORS origin for production (required if APP_ENV=production)
 DASHBOARD_ORIGIN=https://dashboard.example.com
@@ -83,7 +96,9 @@ RUST_LOG=info
 - Set `APP_ENV=production` to enable CORS restrictions
 - Set `DASHBOARD_ORIGIN` to the dashboard URL
 - Set a strong `ADMIN_TOKEN` (at least 32 hex characters)
-- The `/api/test/reset` endpoint is disabled in production
+- Set `NEXTAUTH_BACKEND_SECRET` to a value with ≥ 32 bytes — the process panics at boot in production if it is shorter or unset
+- The `/api/test/reset` endpoint is fail-closed: it only mounts when `APP_ENV=development` or `APP_ENV=test`. Unset `APP_ENV` on a staging/prod host and the endpoint stays unreachable
+- After the bootstrap admin's first password rotation, remove `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` from deployed env
 - Never commit `.env` with real credentials
 
 ## Service Architecture
@@ -102,7 +117,8 @@ The service runs two concurrent tasks:
 - Serves HTTP API on port 8080
 - Public read endpoints for groups, members, cycles, and payments
 - Admin write endpoints (behind `ADMIN_TOKEN` bearer auth) for CRUD operations
-- Dev-only `/api/test/reset` endpoint to reset database to fixture state
+- HMAC-gated auth endpoints (`/api/auth/verify-credentials`, `/api/auth/ensure-user`) called by NextAuth — signed with `NEXTAUTH_BACKEND_SECRET`
+- Dev/test-only `/api/test/reset` endpoint (fail-closed gate on `APP_ENV`)
 - CORS configured based on `APP_ENV`
 
 Both tasks are monitored — if either fails, the process exits rather than silently degrading.
@@ -339,11 +355,52 @@ Soft-delete all payments for a member in a cycle. Requires admin auth.
 
 Returns `204 No Content`.
 
+### HMAC-Gated Auth Endpoints (NextAuth)
+
+All requests must carry `x-timestamp` (unix seconds, within ±60s) and
+`x-signature: sha256=<hex>` where the signature is
+`HMAC-SHA256(NEXTAUTH_BACKEND_SECRET, "<ts>.<body>")`. Any signing, replay,
+or body-parse failure returns `401`.
+
+#### POST /api/auth/verify-credentials
+
+Verify a password against the stored Argon2id hash. Constant-time regardless
+of whether the email exists (dummy-hash verify pre-warmed at boot).
+
+**Request:**
+```json
+{ "email": "user@example.com", "password": "..." }
+```
+
+**Response (200):**
+```json
+{ "userId": "abc123", "email": "user@example.com", "role": "super_admin", "mustResetPassword": true }
+```
+
+Returns `401` on bad password, unknown email, or disabled user.
+
+#### POST /api/auth/ensure-user
+
+Idempotent JIT provisioning for social providers. Never auto-links on email —
+a new `(provider, providerSubject)` always creates a fresh user.
+
+**Request:**
+```json
+{ "provider": "google", "providerSubject": "sub-12345", "email": "user@example.com" }
+```
+
+**Response (200):**
+```json
+{ "userId": "abc123", "email": "user@example.com", "role": "member", "created": true }
+```
+
 ### Dev-Only Endpoint
 
 #### POST /api/test/reset
 
-Reset the database to fixture state. Only available when `APP_ENV != production`.
+Reset the database to fixture state. Fail-closed: only mounted when
+`APP_ENV` is explicitly `development` or `test`. Any other value (including
+unset) leaves the route unreachable.
 
 Returns `200 OK`.
 
