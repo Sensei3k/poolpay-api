@@ -128,7 +128,7 @@ Two layers protect the HMAC-gated auth surface:
 
 - **Per-IP (`tower_governor`)** — a steady quota of `AUTH_RATE_LIMIT_PER_MINUTE`
   requests per minute with a burst of `AUTH_RATE_LIMIT_BURST`, applied to
-  both `/api/auth/verify-credentials` and `/api/auth/ensure-user`. Runs
+  both `/api/auth/verify-credentials`, `/api/auth/ensure-user`, and `/api/auth/issue`. Runs
   before HMAC verification so anonymous floods are dropped cheaply.
 - **Composite `(ip, email_normalised)`** — in-handler limiter on
   `/api/auth/verify-credentials`. Token-bucket with burst
@@ -496,6 +496,24 @@ a new `(provider, providerSubject)` always creates a fresh user.
 ```json
 { "userId": "abc123", "email": "user@example.com", "role": "member", "created": true }
 ```
+
+#### POST /api/auth/issue
+
+HMAC-gated. Mints the initial `(accessToken, refreshToken)` pair for a user
+just authenticated via `/api/auth/verify-credentials`. Used by the NextAuth
+`jwt` callback on first sign-in so subsequent requests can silent-refresh.
+
+**Request:**
+```json
+{ "userId": "abc123" }
+```
+
+**Response (200):** same shape as `/api/auth/refresh` (`accessToken`,
+`refreshToken`, `expiresAt`).
+
+Returns `401` on HMAC failure, unknown user, disabled user, or soft-deleted
+user (writes a `token_issue_failure` audit event). `400` on empty or
+oversized `userId` (>128 chars).
 
 ### Dev-Only Endpoint
 
