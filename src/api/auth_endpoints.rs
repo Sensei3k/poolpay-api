@@ -387,8 +387,8 @@ const MAX_USER_ID_LEN: usize = 128;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct IssueTokenRequest {
-    pub user_id: String,
+pub(crate) struct IssueTokenRequest {
+    pub(crate) user_id: String,
 }
 
 /// Mint the initial `(access_token, refresh_token)` pair for a user that the
@@ -401,7 +401,7 @@ pub struct IssueTokenRequest {
 ///
 /// Response shape mirrors `/api/auth/refresh` so the FE can reuse a single
 /// typed client for both the initial issue and subsequent rotations.
-pub async fn issue_token_endpoint(
+pub(crate) async fn issue_token_endpoint(
     State(db): State<DbConn>,
     Extension(verifier): Extension<SharedVerifier>,
     ClientIp(client_ip): ClientIp,
