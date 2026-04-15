@@ -754,6 +754,208 @@ async fn logout_revokes_family_and_always_returns_204() {
     assert_eq!(unknown.status(), StatusCode::NO_CONTENT);
 }
 
+// ── Issue endpoint (Plan 3 / BE-7) ────────────────────────────────────────────
+
+fn issue_req(user_id: &str) -> Request<Body> {
+    let body = serde_json::json!({ "userId": user_id });
+    hmac_request("/api/auth/issue", &body)
+}
+
+async fn count_auth_events(
+    db: &poolpay::db::DbConn,
+    user_id: &str,
+    event_type: &str,
+) -> i64 {
+    let mut resp = db
+        .query(
+            "SELECT count() FROM auth_event \
+             WHERE user_id = $uid AND event_type = $t GROUP ALL",
+        )
+        .bind(("uid", user_id.to_string()))
+        .bind(("t", event_type.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp
+        .take("count")
+        .expect("auth_event count query returned unexpected shape");
+    rows.first().copied().unwrap_or(0)
+}
+
+#[tokio::test]
+async fn issue_returns_tokens_that_round_trip_through_refresh() {
+    let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-issue-1", "issue1@example.com").await;
+
+    let resp = call(app.clone(), issue_req(&user_id)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    let access = v["accessToken"].as_str().unwrap().to_string();
+    let refresh_tok = v["refreshToken"].as_str().unwrap().to_string();
+    let expires_at = v["expiresAt"].as_str().unwrap().to_string();
+    assert!(!access.is_empty());
+    assert!(!refresh_tok.is_empty());
+    // ISO-8601 with timezone — chrono can parse it.
+    assert!(chrono::DateTime::parse_from_rfc3339(&expires_at).is_ok());
+
+    // Round-trip proves the refresh row was persisted correctly.
+    let rotate = call(app, refresh_req(&refresh_tok)).await;
+    assert_eq!(rotate.status(), StatusCode::OK);
+
+    let issued_count = count_auth_events(&db, &user_id, "token_issued").await;
+    assert_eq!(issued_count, 1, "exactly one token_issued row on success");
+}
+
+#[tokio::test]
+async fn issue_access_token_carries_users_token_version() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-issue-tv", "issuetv@example.com").await;
+
+    // Bump the user's token_version so the default 0 isn't incidentally correct.
+    use surrealdb::types::RecordId;
+    db.query("UPDATE $id SET token_version = 9")
+        .bind(("id", RecordId::new("user", user_id.clone())))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let resp = call(app, issue_req(&user_id)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    let access = v["accessToken"].as_str().unwrap();
+
+    let claims = verifier.verify_access(access).expect("verify");
+    assert_eq!(claims.token_version, 9);
+    assert_eq!(claims.sub, user_id);
+    assert_eq!(claims.role, "member");
+}
+
+#[tokio::test]
+async fn issue_access_token_carries_role_for_super_admin() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+
+    let resp = call(app, issue_req(&admin_id)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    let claims = verifier
+        .verify_access(v["accessToken"].as_str().unwrap())
+        .expect("verify");
+    assert_eq!(claims.role, "super_admin");
+}
+
+#[tokio::test]
+async fn issue_access_token_carries_role_for_admin() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-issue-admin", "issueadmin@example.com").await;
+    set_user_role(&db, &user_id, "admin").await;
+
+    let resp = call(app, issue_req(&user_id)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    let claims = verifier
+        .verify_access(v["accessToken"].as_str().unwrap())
+        .expect("verify");
+    assert_eq!(claims.role, "admin");
+}
+
+#[tokio::test]
+async fn issue_unknown_user_returns_401_and_writes_failure_event() {
+    let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
+
+    let resp = call(app, issue_req("nonexistent-user-id")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Unknown user: failure audit row is written with user_id = NONE, so we
+    // cannot filter by user_id — scan for the event_type directly.
+    let mut resp = db
+        .query(
+            "SELECT count() FROM auth_event \
+             WHERE event_type = 'token_issue_failure' \
+               AND reason = 'unknown_user' GROUP ALL",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp
+        .take("count")
+        .expect("auth_event count query returned unexpected shape");
+    assert_eq!(rows.first().copied().unwrap_or(0), 1);
+}
+
+#[tokio::test]
+async fn issue_disabled_user_returns_401_and_writes_failure_event() {
+    let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-issue-dis", "issuedis@example.com").await;
+    set_user_status(&db, &user_id, "disabled").await;
+
+    let resp = call(app, issue_req(&user_id)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let failures =
+        count_auth_events(&db, &user_id, "token_issue_failure").await;
+    assert_eq!(failures, 1);
+    // And no success row was written.
+    let successes = count_auth_events(&db, &user_id, "token_issued").await;
+    assert_eq!(successes, 0);
+}
+
+#[tokio::test]
+async fn issue_soft_deleted_user_returns_401() {
+    let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-issue-del", "issuedel@example.com").await;
+
+    use surrealdb::types::RecordId;
+    db.query("UPDATE $id SET deleted_at = $n")
+        .bind(("id", RecordId::new("user", user_id.clone())))
+        .bind(("n", poolpay::api::models::now_iso()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let resp = call(app, issue_req(&user_id)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let failures =
+        count_auth_events(&db, &user_id, "token_issue_failure").await;
+    assert_eq!(failures, 1);
+    let successes = count_auth_events(&db, &user_id, "token_issued").await;
+    assert_eq!(successes, 0);
+}
+
+#[tokio::test]
+async fn issue_without_hmac_headers_returns_401() {
+    let (app, _db, _v) = build_app_full(lax_rate_cfg()).await;
+    let body = serde_json::json!({ "userId": "anything" });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/issue")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = call(app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn issue_empty_user_id_returns_400() {
+    let (app, _db, _v) = build_app_full(lax_rate_cfg()).await;
+    let resp = call(app, issue_req("")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn issue_oversized_user_id_returns_400() {
+    let (app, _db, _v) = build_app_full(lax_rate_cfg()).await;
+    let huge = "x".repeat(200);
+    let resp = call(app, issue_req(&huge)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 // ── Extractors (Plan 3 / BE-3) ────────────────────────────────────────────────
 
 /// Tiny inline router that exercises the extractors so we can verify their

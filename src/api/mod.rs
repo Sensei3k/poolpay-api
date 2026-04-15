@@ -69,6 +69,7 @@ pub fn router_with_config(
             post(auth_endpoints::verify_credentials),
         )
         .route("/api/auth/ensure-user", post(auth_endpoints::ensure_user))
+        .route("/api/auth/issue", post(auth_endpoints::issue_token_endpoint))
         .route("/api/auth/refresh", post(auth_endpoints::refresh_token_endpoint))
         .route("/api/auth/logout", post(auth_endpoints::logout_endpoint))
         .layer(rate_limit::build_per_ip_layer(&rate_cfg))

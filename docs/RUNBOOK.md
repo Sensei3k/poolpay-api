@@ -87,7 +87,8 @@ RECEIPT_DOWNLOAD_DIR=/tmp/receipts
 RUST_LOG=info
 
 # --- Auth rate limiting (Plan 3 / BE-2) ---
-# Per-IP limiter on /api/auth/verify-credentials and /api/auth/ensure-user.
+# Per-IP limiter on the full /api/auth/* sub-router — /api/auth/verify-credentials,
+# /api/auth/ensure-user, /api/auth/issue, /api/auth/refresh, and /api/auth/logout.
 AUTH_RATE_LIMIT_PER_MINUTE=60
 AUTH_RATE_LIMIT_BURST=10
 
@@ -124,12 +125,14 @@ JWT_REFRESH_TTL_SECS=1209600
 
 ### Auth Rate Limiting
 
-Two layers protect the HMAC-gated auth surface:
+Two layers protect the `/api/auth/*` surface (per-IP covers the full sub-router; the composite limiter covers only `verify-credentials`):
 
 - **Per-IP (`tower_governor`)** — a steady quota of `AUTH_RATE_LIMIT_PER_MINUTE`
-  requests per minute with a burst of `AUTH_RATE_LIMIT_BURST`, applied to
-  both `/api/auth/verify-credentials` and `/api/auth/ensure-user`. Runs
-  before HMAC verification so anonymous floods are dropped cheaply.
+  requests per minute with a burst of `AUTH_RATE_LIMIT_BURST`, applied to the
+  entire `/api/auth/*` sub-router: `/api/auth/verify-credentials`,
+  `/api/auth/ensure-user`, `/api/auth/issue`, `/api/auth/refresh`, and
+  `/api/auth/logout`. Runs before HMAC / refresh-token verification so
+  anonymous floods are dropped cheaply.
 - **Composite `(ip, email_normalised)`** — in-handler limiter on
   `/api/auth/verify-credentials`. Token-bucket with burst
   `AUTH_CREDENTIAL_FAILURE_LIMIT` that refills one slot every
@@ -220,7 +223,7 @@ The service runs two concurrent tasks:
 - Serves HTTP API on port 8080
 - Public read endpoints for groups, members, cycles, and payments
 - Admin write endpoints guarded by RS256 admin JWTs — `SuperAdminUser` for group/WhatsApp-link CRUD, `GroupScopedAdmin` for member/cycle/payment/receipt CRUD
-- HMAC-gated auth endpoints (`/api/auth/verify-credentials`, `/api/auth/ensure-user`) called by NextAuth — signed with `NEXTAUTH_BACKEND_SECRET`
+- HMAC-gated auth endpoints (`/api/auth/verify-credentials`, `/api/auth/ensure-user`, `/api/auth/issue`) called by NextAuth — signed with `NEXTAUTH_BACKEND_SECRET`
 - Dev/test-only `/api/test/reset` endpoint (fail-closed gate on `APP_ENV`)
 - CORS configured based on `APP_ENV`
 
@@ -496,6 +499,29 @@ a new `(provider, providerSubject)` always creates a fresh user.
 ```json
 { "userId": "abc123", "email": "user@example.com", "role": "member", "created": true }
 ```
+
+#### POST /api/auth/issue
+
+HMAC-gated. Mints the initial `(accessToken, refreshToken)` pair for a user
+just authenticated via `/api/auth/verify-credentials` (credentials sign-in)
+or `/api/auth/ensure-user` (social sign-in). Used by the NextAuth `jwt`
+callback on first sign-in so subsequent requests can silent-refresh.
+
+**Request:**
+```json
+{ "userId": "abc123" }
+```
+
+**Response (200):** same shape as `/api/auth/refresh` (`accessToken`,
+`refreshToken`, `expiresAt`).
+
+Returns `401` on HMAC failure (rejected inside `HmacVerifiedJson` before
+the handler runs — no audit event) and on unknown, disabled, or
+soft-deleted users (handler writes a `token_issue_failure` audit event
+with `reason` in `{unknown_user, disabled, soft_deleted}`). `500` on DB
+or signing failure, also with a `token_issue_failure` audit row
+(`reason` in `{db_error, mint_access_failed}`). `400` on empty or
+oversized `userId` (>128 chars).
 
 ### Dev-Only Endpoint
 
