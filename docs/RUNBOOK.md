@@ -87,7 +87,7 @@ RECEIPT_DOWNLOAD_DIR=/tmp/receipts
 RUST_LOG=info
 
 # --- Auth rate limiting (Plan 3 / BE-2) ---
-# Per-IP limiter on /api/auth/verify-credentials and /api/auth/ensure-user.
+# Per-IP limiter on /api/auth/verify-credentials, /api/auth/ensure-user, and /api/auth/issue.
 AUTH_RATE_LIMIT_PER_MINUTE=60
 AUTH_RATE_LIMIT_BURST=10
 
@@ -220,7 +220,7 @@ The service runs two concurrent tasks:
 - Serves HTTP API on port 8080
 - Public read endpoints for groups, members, cycles, and payments
 - Admin write endpoints guarded by RS256 admin JWTs — `SuperAdminUser` for group/WhatsApp-link CRUD, `GroupScopedAdmin` for member/cycle/payment/receipt CRUD
-- HMAC-gated auth endpoints (`/api/auth/verify-credentials`, `/api/auth/ensure-user`) called by NextAuth — signed with `NEXTAUTH_BACKEND_SECRET`
+- HMAC-gated auth endpoints (`/api/auth/verify-credentials`, `/api/auth/ensure-user`, `/api/auth/issue`) called by NextAuth — signed with `NEXTAUTH_BACKEND_SECRET`
 - Dev/test-only `/api/test/reset` endpoint (fail-closed gate on `APP_ENV`)
 - CORS configured based on `APP_ENV`
 
