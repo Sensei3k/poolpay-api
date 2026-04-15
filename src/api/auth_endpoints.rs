@@ -394,9 +394,10 @@ pub struct IssueTokenRequest {
 /// Mint the initial `(access_token, refresh_token)` pair for a user that the
 /// NextAuth layer has just authenticated — either via
 /// `/api/auth/verify-credentials` (credentials sign-in) or
-/// `/api/auth/ensure-user` (social sign-in). HMAC-gated at the sub-router so only NextAuth
-/// can call it — the `user_id` in the body is server-trusted after the HMAC
-/// check, there is no password re-verification here by design.
+/// `/api/auth/ensure-user` (social sign-in). HMAC-gated by the
+/// `HmacVerifiedJson` extractor on this handler so only NextAuth can call it —
+/// the `user_id` in the body is server-trusted after the HMAC check, there is
+/// no password re-verification here by design.
 ///
 /// Response shape mirrors `/api/auth/refresh` so the FE can reuse a single
 /// typed client for both the initial issue and subsequent rotations.
@@ -474,17 +475,42 @@ pub async fn issue_token_endpoint(
         return Err(AppError::Unauthorized);
     }
 
-    let issued = refresh::issue(&db, &user_id).await.map_err(|e| {
-        tracing::error!(error = %e, "issue refresh failed");
-        AppError::Internal("token issue failed".into())
-    })?;
-
-    let access = verifier
-        .mint_access(&user_id, &user.role, user.token_version)
-        .map_err(|e| {
+    // Mint the access token *before* persisting a refresh row so a signing
+    // failure (misconfigured keys, etc.) cannot leave an orphan refresh token
+    // in the DB that no client ever received.
+    let access = match verifier.mint_access(&user_id, &user.role, user.token_version) {
+        Ok(a) => a,
+        Err(e) => {
             tracing::error!(error = %e, "mint access on issue failed");
-            AppError::Internal("token issue failed".into())
-        })?;
+            record_auth_event(
+                &db,
+                Some(user_id.clone()),
+                "token_issue_failure",
+                false,
+                Some("mint_access_failed"),
+                Some(&ip),
+            )
+            .await;
+            return Err(AppError::Internal("token issue failed".into()));
+        }
+    };
+
+    let issued = match refresh::issue(&db, &user_id).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::error!(error = %e, "issue refresh failed");
+            record_auth_event(
+                &db,
+                Some(user_id.clone()),
+                "token_issue_failure",
+                false,
+                Some("db_error"),
+                Some(&ip),
+            )
+            .await;
+            return Err(AppError::Internal("token issue failed".into()));
+        }
+    };
 
     record_auth_event(&db, Some(user_id), "token_issued", true, None, Some(&ip)).await;
 
