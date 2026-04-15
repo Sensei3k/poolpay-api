@@ -376,6 +376,101 @@ async fn find_identity(
     Ok(rows.into_iter().next())
 }
 
+// ── issue (initial token pair) ────────────────────────────────────────────────
+
+/// Upper bound on the user-id field accepted by `/api/auth/issue`. Matches the
+/// 128-char cap used on the refresh-token field below so the body-size budget
+/// is symmetric and a single `MAX_REFRESH_BODY_BYTES` covers both handlers.
+const MAX_USER_ID_LEN: usize = 128;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueTokenRequest {
+    pub user_id: String,
+}
+
+/// Mint the initial `(access_token, refresh_token)` pair for a user that the
+/// NextAuth layer has just authenticated via `/api/auth/verify-credentials`
+/// or `/api/auth/ensure-user`. HMAC-gated at the sub-router so only NextAuth
+/// can call it — the `user_id` in the body is server-trusted after the HMAC
+/// check, there is no password re-verification here by design.
+///
+/// Response shape mirrors `/api/auth/refresh` so the FE can reuse a single
+/// typed client for both the initial issue and subsequent rotations.
+pub async fn issue_token_endpoint(
+    State(db): State<DbConn>,
+    Extension(verifier): Extension<SharedVerifier>,
+    ClientIp(client_ip): ClientIp,
+    HmacVerifiedJson(req): HmacVerifiedJson<IssueTokenRequest>,
+) -> Result<Json<RefreshResponse>, AppError> {
+    let user_id = req.user_id.trim().to_string();
+    if user_id.is_empty() {
+        return Err(AppError::BadRequest("userId required".into()));
+    }
+    if user_id.len() > MAX_USER_ID_LEN {
+        return Err(AppError::BadRequest("userId too long".into()));
+    }
+
+    let ip = client_ip.to_string();
+
+    // Load fresh — role and token_version are authoritative only at load time.
+    let user = match refresh::load_user(&db, &user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            // Mirror the `/refresh` precedent: write a single failure audit
+            // row for unknown subject so ops can alert on credential-spray
+            // patterns against this endpoint, then 401 uniformly.
+            record_auth_event(
+                &db,
+                None,
+                "token_issue_failure",
+                false,
+                Some("unknown_user"),
+                Some(&ip),
+            )
+            .await;
+            return Err(AppError::Unauthorized);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "issue load_user failed");
+            return Err(AppError::Unauthorized);
+        }
+    };
+
+    if user.status != "active" || user.deleted_at.is_some() {
+        record_auth_event(
+            &db,
+            Some(user_id.clone()),
+            "token_issue_failure",
+            false,
+            Some("disabled"),
+            Some(&ip),
+        )
+        .await;
+        return Err(AppError::Unauthorized);
+    }
+
+    let issued = refresh::issue(&db, &user_id).await.map_err(|e| {
+        tracing::error!(error = %e, "issue refresh failed");
+        AppError::Internal("token issue failed".into())
+    })?;
+
+    let access = verifier
+        .mint_access(&user_id, &user.role, user.token_version)
+        .map_err(|e| {
+            tracing::error!(error = %e, "mint access on issue failed");
+            AppError::Internal("token issue failed".into())
+        })?;
+
+    record_auth_event(&db, Some(user_id), "token_issued", true, None, Some(&ip)).await;
+
+    Ok(Json(RefreshResponse {
+        access_token: access,
+        refresh_token: issued.plaintext,
+        expires_at: issued.expires_at,
+    }))
+}
+
 // ── refresh + logout ──────────────────────────────────────────────────────────
 
 const MAX_REFRESH_TOKEN_LEN: usize = 128;
