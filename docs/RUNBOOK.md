@@ -512,8 +512,12 @@ callback on first sign-in so subsequent requests can silent-refresh.
 **Response (200):** same shape as `/api/auth/refresh` (`accessToken`,
 `refreshToken`, `expiresAt`).
 
-Returns `401` on HMAC failure, unknown user, disabled user, or soft-deleted
-user (writes a `token_issue_failure` audit event). `400` on empty or
+Returns `401` on HMAC failure (rejected inside `HmacVerifiedJson` before
+the handler runs — no audit event) and on unknown, disabled, or
+soft-deleted users (handler writes a `token_issue_failure` audit event
+with `reason` in `{unknown_user, disabled, soft_deleted}`). `500` on DB
+or signing failure, also with a `token_issue_failure` audit row
+(`reason` in `{db_error, mint_access_failed}`). `400` on empty or
 oversized `userId` (>128 chars).
 
 ### Dev-Only Endpoint
