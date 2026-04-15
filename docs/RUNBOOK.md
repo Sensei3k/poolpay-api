@@ -175,7 +175,10 @@ wires NextAuth to call this surface; today the extractors ride behind
   is a hard 401 with no body hint.
 - **`JWT_ACCESS_TTL_SECS`** — access-token lifetime. Default 900 (15 min).
   Short on purpose: `token_version` bumps on role changes and refresh
-  reuse detection take effect within this window.
+  reuse detection take effect within this window. Keep comfortably above
+  360; the FE proactively refreshes at 360s remaining (see poolpay-app
+  `auth.ts` `REFRESH_SKEW_SECS`), and a TTL at or below 360s causes every
+  session read to hit `/api/auth/refresh`.
 - **`JWT_LEEWAY_SECS`** — clock-skew tolerance for exp/nbf/iat. Default 60.
 - **`JWT_REFRESH_TTL_SECS`** — refresh-token lifetime. Default 1209600 (14 days).
 

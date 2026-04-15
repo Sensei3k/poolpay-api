@@ -139,6 +139,10 @@ impl JwtConfig {
                 .unwrap_or_else(|_| "poolpay-api".to_string()),
             issuer: std::env::var("JWT_ISSUER")
                 .unwrap_or_else(|_| "poolpay-nextauth".to_string()),
+            // FE-side silent-refresh window is 360s (poolpay-app `auth.ts`
+            // REFRESH_SKEW_SECS) — the FE proactively rotates when a token has
+            // ≤360s of life left. Values at or below 360 cause the FE to refresh
+            // on every jwt() callback — keep this well above 360 (default 900 is fine).
             access_ttl_secs: std::env::var("JWT_ACCESS_TTL_SECS")
                 .ok()
                 .and_then(|s| s.parse::<i64>().ok())
