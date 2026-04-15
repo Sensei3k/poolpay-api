@@ -880,7 +880,9 @@ async fn issue_unknown_user_returns_401_and_writes_failure_event() {
         .unwrap()
         .check()
         .unwrap();
-    let rows: Vec<i64> = resp.take("count").unwrap_or_default();
+    let rows: Vec<i64> = resp
+        .take("count")
+        .expect("auth_event count query returned unexpected shape");
     assert_eq!(rows.first().copied().unwrap_or(0), 1);
 }
 
