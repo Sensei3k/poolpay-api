@@ -777,7 +777,9 @@ async fn count_auth_events(
         .unwrap()
         .check()
         .unwrap();
-    let rows: Vec<i64> = resp.take("count").unwrap_or_default();
+    let rows: Vec<i64> = resp
+        .take("count")
+        .expect("auth_event count query returned unexpected shape");
     rows.first().copied().unwrap_or(0)
 }
 
