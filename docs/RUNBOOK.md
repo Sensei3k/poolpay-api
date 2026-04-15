@@ -87,7 +87,8 @@ RECEIPT_DOWNLOAD_DIR=/tmp/receipts
 RUST_LOG=info
 
 # --- Auth rate limiting (Plan 3 / BE-2) ---
-# Per-IP limiter on /api/auth/verify-credentials, /api/auth/ensure-user, and /api/auth/issue.
+# Per-IP limiter on the full /api/auth/* sub-router — /api/auth/verify-credentials,
+# /api/auth/ensure-user, /api/auth/issue, /api/auth/refresh, and /api/auth/logout.
 AUTH_RATE_LIMIT_PER_MINUTE=60
 AUTH_RATE_LIMIT_BURST=10
 
@@ -127,9 +128,11 @@ JWT_REFRESH_TTL_SECS=1209600
 Two layers protect the HMAC-gated auth surface:
 
 - **Per-IP (`tower_governor`)** — a steady quota of `AUTH_RATE_LIMIT_PER_MINUTE`
-  requests per minute with a burst of `AUTH_RATE_LIMIT_BURST`, applied to
-  both `/api/auth/verify-credentials`, `/api/auth/ensure-user`, and `/api/auth/issue`. Runs
-  before HMAC verification so anonymous floods are dropped cheaply.
+  requests per minute with a burst of `AUTH_RATE_LIMIT_BURST`, applied to the
+  entire `/api/auth/*` sub-router: `/api/auth/verify-credentials`,
+  `/api/auth/ensure-user`, `/api/auth/issue`, `/api/auth/refresh`, and
+  `/api/auth/logout`. Runs before HMAC / refresh-token verification so
+  anonymous floods are dropped cheaply.
 - **Composite `(ip, email_normalised)`** — in-handler limiter on
   `/api/auth/verify-credentials`. Token-bucket with burst
   `AUTH_CREDENTIAL_FAILURE_LIMIT` that refills one slot every
