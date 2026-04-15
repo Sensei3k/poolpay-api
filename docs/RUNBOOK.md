@@ -125,7 +125,7 @@ JWT_REFRESH_TTL_SECS=1209600
 
 ### Auth Rate Limiting
 
-Two layers protect the HMAC-gated auth surface:
+Two layers protect the `/api/auth/*` surface (per-IP covers the full sub-router; the composite limiter covers only `verify-credentials`):
 
 - **Per-IP (`tower_governor`)** — a steady quota of `AUTH_RATE_LIMIT_PER_MINUTE`
   requests per minute with a burst of `AUTH_RATE_LIMIT_BURST`, applied to the
