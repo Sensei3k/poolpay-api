@@ -500,8 +500,9 @@ a new `(provider, providerSubject)` always creates a fresh user.
 #### POST /api/auth/issue
 
 HMAC-gated. Mints the initial `(accessToken, refreshToken)` pair for a user
-just authenticated via `/api/auth/verify-credentials`. Used by the NextAuth
-`jwt` callback on first sign-in so subsequent requests can silent-refresh.
+just authenticated via `/api/auth/verify-credentials` (credentials sign-in)
+or `/api/auth/ensure-user` (social sign-in). Used by the NextAuth `jwt`
+callback on first sign-in so subsequent requests can silent-refresh.
 
 **Request:**
 ```json
