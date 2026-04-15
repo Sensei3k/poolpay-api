@@ -379,8 +379,10 @@ async fn find_identity(
 // ── issue (initial token pair) ────────────────────────────────────────────────
 
 /// Upper bound on the user-id field accepted by `/api/auth/issue`. Matches the
-/// 128-char cap used on the refresh-token field below so the body-size budget
-/// is symmetric and a single `MAX_REFRESH_BODY_BYTES` covers both handlers.
+/// 128-char cap used on the refresh-token field below to keep the field-level
+/// budget symmetric across both token-minting handlers. The raw body cap for
+/// `/api/auth/issue` is enforced upstream by `HmacVerifiedJson`
+/// (`MAX_BODY_BYTES` = 1 MiB in `auth::hmac`), not by `MAX_REFRESH_BODY_BYTES`.
 const MAX_USER_ID_LEN: usize = 128;
 
 #[derive(Debug, Deserialize)]
@@ -390,8 +392,9 @@ pub struct IssueTokenRequest {
 }
 
 /// Mint the initial `(access_token, refresh_token)` pair for a user that the
-/// NextAuth layer has just authenticated via `/api/auth/verify-credentials`
-/// or `/api/auth/ensure-user`. HMAC-gated at the sub-router so only NextAuth
+/// NextAuth layer has just authenticated — either via
+/// `/api/auth/verify-credentials` (credentials sign-in) or
+/// `/api/auth/ensure-user` (social sign-in). HMAC-gated at the sub-router so only NextAuth
 /// can call it — the `user_id` in the body is server-trusted after the HMAC
 /// check, there is no password re-verification here by design.
 ///
@@ -433,11 +436,32 @@ pub async fn issue_token_endpoint(
         }
         Err(e) => {
             tracing::error!(error = %e, "issue load_user failed");
-            return Err(AppError::Unauthorized);
+            record_auth_event(
+                &db,
+                Some(user_id.clone()),
+                "token_issue_failure",
+                false,
+                Some("db_error"),
+                Some(&ip),
+            )
+            .await;
+            return Err(AppError::Internal("token issue failed".into()));
         }
     };
 
-    if user.status != "active" || user.deleted_at.is_some() {
+    if user.deleted_at.is_some() {
+        record_auth_event(
+            &db,
+            Some(user_id.clone()),
+            "token_issue_failure",
+            false,
+            Some("soft_deleted"),
+            Some(&ip),
+        )
+        .await;
+        return Err(AppError::Unauthorized);
+    }
+    if user.status != "active" {
         record_auth_event(
             &db,
             Some(user_id.clone()),

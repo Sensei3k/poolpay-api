@@ -915,6 +915,12 @@ async fn issue_soft_deleted_user_returns_401() {
 
     let resp = call(app, issue_req(&user_id)).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let failures =
+        count_auth_events(&db, &user_id, "token_issue_failure").await;
+    assert_eq!(failures, 1);
+    let successes = count_auth_events(&db, &user_id, "token_issued").await;
+    assert_eq!(successes, 0);
 }
 
 #[tokio::test]
