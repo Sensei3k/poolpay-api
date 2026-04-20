@@ -1186,3 +1186,279 @@ fn argon2_hash_is_phc_formatted() {
     assert!(h.starts_with("$argon2id$"), "expected PHC format, got: {h}");
     assert!(password::verify("some password", &h).unwrap());
 }
+
+// ── Change-password (Plan 3 / BE-8 PR 2) ─────────────────────────────────────
+
+fn change_password_req(token: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/change-password")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap()
+}
+
+async fn user_password_hash(db: &poolpay::db::DbConn, user_id: &str) -> Option<String> {
+    use surrealdb::types::RecordId;
+    let mut resp = db
+        .query("SELECT password_hash FROM $id")
+        .bind(("id", RecordId::new("user", user_id.to_string())))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<Option<String>> = resp.take("password_hash").unwrap_or_default();
+    rows.into_iter().next().flatten()
+}
+
+async fn user_must_reset_password(db: &poolpay::db::DbConn, user_id: &str) -> bool {
+    use surrealdb::types::RecordId;
+    let mut resp = db
+        .query("SELECT must_reset_password FROM $id")
+        .bind(("id", RecordId::new("user", user_id.to_string())))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<bool> = resp.take("must_reset_password").unwrap_or_default();
+    rows.into_iter().next().unwrap_or(false)
+}
+
+async fn credentials_identity_exists(db: &poolpay::db::DbConn, email_normalised: &str) -> bool {
+    let mut resp = db
+        .query(
+            "SELECT count() FROM user_identity \
+             WHERE provider = 'credentials' AND provider_subject = $e GROUP ALL",
+        )
+        .bind(("e", email_normalised.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp.take("count").unwrap_or_default();
+    rows.first().copied().unwrap_or(0) > 0
+}
+
+#[tokio::test]
+async fn change_password_rotates_hash_bumps_token_version_and_clears_must_reset() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let access = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint");
+
+    let version_before = user_token_version(&db, &admin_id).await;
+    let hash_before = user_password_hash(&db, &admin_id)
+        .await
+        .expect("bootstrap admin must have a hash");
+    assert!(user_must_reset_password(&db, &admin_id).await);
+
+    let body = serde_json::json!({
+        "currentPassword": BOOTSTRAP_PASSWORD,
+        "newPassword": "brand-new-secret-passphrase",
+    });
+    let resp = call(app.clone(), change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let version_after = user_token_version(&db, &admin_id).await;
+    assert!(
+        version_after > version_before,
+        "change_password must bump token_version: before={version_before} after={version_after}"
+    );
+
+    let hash_after = user_password_hash(&db, &admin_id)
+        .await
+        .expect("hash must still be set after change");
+    assert_ne!(hash_after, hash_before, "password hash must rotate");
+
+    assert!(
+        !user_must_reset_password(&db, &admin_id).await,
+        "must_reset_password should clear on successful change"
+    );
+
+    // Old bearer now rejects — token_version bump invalidates in-flight access.
+    let replay = call(app.clone(), change_password_req(&access, &body)).await;
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+
+    // New password verifies via the public credentials endpoint.
+    let verify_body = serde_json::json!({
+        "email": BOOTSTRAP_EMAIL,
+        "password": "brand-new-secret-passphrase",
+    });
+    let verify_resp = call(app, hmac_request("/api/auth/verify-credentials", &verify_body)).await;
+    assert_eq!(verify_resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn change_password_wrong_current_returns_401_and_does_not_mutate() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let access = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint");
+
+    let hash_before = user_password_hash(&db, &admin_id).await;
+    let version_before = user_token_version(&db, &admin_id).await;
+
+    let body = serde_json::json!({
+        "currentPassword": "this-is-not-the-real-password",
+        "newPassword": "some-new-password",
+    });
+    let resp = call(app, change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    assert_eq!(user_password_hash(&db, &admin_id).await, hash_before);
+    assert_eq!(user_token_version(&db, &admin_id).await, version_before);
+}
+
+#[tokio::test]
+async fn change_password_missing_current_when_hash_exists_returns_400() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let access = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({ "newPassword": "some-new-password" });
+    let resp = call(app, change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn change_password_rejects_empty_new_password() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let access = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({
+        "currentPassword": BOOTSTRAP_PASSWORD,
+        "newPassword": "",
+    });
+    let resp = call(app, change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn change_password_rejects_oversized_new_password() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let access = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint");
+
+    let huge = "a".repeat(1025);
+    let body = serde_json::json!({
+        "currentPassword": BOOTSTRAP_PASSWORD,
+        "newPassword": huge,
+    });
+    let resp = call(app, change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn change_password_sets_hash_for_social_upgrade_without_current_password() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-change-social", "social1@example.com").await;
+    let access = verifier.mint_access(&user_id, "member", 0).expect("mint");
+
+    assert!(user_password_hash(&db, &user_id).await.is_none());
+    assert!(
+        !credentials_identity_exists(&db, "social1@example.com").await,
+        "social user must not have a credentials identity before upgrade"
+    );
+
+    let body = serde_json::json!({ "newPassword": "first-time-password-set" });
+    let resp = call(app.clone(), change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    assert!(user_password_hash(&db, &user_id).await.is_some());
+    assert!(
+        credentials_identity_exists(&db, "social1@example.com").await,
+        "set path must insert a credentials user_identity row"
+    );
+
+    // Verify-credentials now works with the new password + the user's email.
+    let verify_body = serde_json::json!({
+        "email": "social1@example.com",
+        "password": "first-time-password-set",
+    });
+    let verify_resp = call(app, hmac_request("/api/auth/verify-credentials", &verify_body)).await;
+    assert_eq!(verify_resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn change_password_revokes_refresh_tokens_on_change() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let access = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint");
+
+    // Issue a refresh token before the password change.
+    let issued = refresh::issue(&db, &admin_id).await.expect("issue");
+
+    let body = serde_json::json!({
+        "currentPassword": BOOTSTRAP_PASSWORD,
+        "newPassword": "rotation-secret-passphrase",
+    });
+    let resp = call(app.clone(), change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Pre-existing refresh token must now be dead.
+    let after = call(app, refresh_req(&issued.plaintext)).await;
+    assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn change_password_does_not_revoke_refresh_tokens_on_set_path() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let user_id = seed_member(&app, "sub-change-set", "set1@example.com").await;
+    let access = verifier.mint_access(&user_id, "member", 0).expect("mint");
+
+    let issued = refresh::issue(&db, &user_id).await.expect("issue");
+
+    let body = serde_json::json!({ "newPassword": "set-path-password" });
+    let resp = call(app.clone(), change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Set path is a social upgrade, not a re-auth trigger — refresh stays live.
+    let after = call(app, refresh_req(&issued.plaintext)).await;
+    assert_eq!(after.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn change_password_without_bearer_returns_401() {
+    let (app, _db, _v) = build_app_full(lax_rate_cfg()).await;
+    let body = serde_json::json!({ "newPassword": "whatever" });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/change-password")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = call(app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn change_password_writes_password_changed_auth_event() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let access = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint");
+
+    let before = count_auth_events(&db, &admin_id, "password_changed").await;
+    let body = serde_json::json!({
+        "currentPassword": BOOTSTRAP_PASSWORD,
+        "newPassword": "audit-trail-passphrase",
+    });
+    let resp = call(app, change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let after = count_auth_events(&db, &admin_id, "password_changed").await;
+    assert_eq!(after, before + 1, "expected exactly one password_changed event");
+}

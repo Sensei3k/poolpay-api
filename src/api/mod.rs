@@ -104,6 +104,14 @@ pub fn router_with_config(
         .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
         .route("/api/admin/whatsapp-links", post(create_whatsapp_link))
         .route("/api/admin/whatsapp-links/{id}", delete(delete_whatsapp_link))
+        // Bearer-authenticated auth endpoints. Change-password is gated by
+        // the `AuthenticatedUser` extractor — mounting it on the unrestricted
+        // router avoids double-charging tower-governor's per-IP bucket for
+        // callers who already hold a valid JWT.
+        .route(
+            "/api/auth/change-password",
+            post(auth_endpoints::change_password),
+        )
         // Auth endpoints (rate-limited; verify-credentials/ensure-user are
         // HMAC-gated, refresh/logout authenticate via the refresh token itself)
         // are merged below

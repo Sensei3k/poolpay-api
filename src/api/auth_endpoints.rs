@@ -19,12 +19,14 @@ use crate::api::models::{
     AppError, AuthEventContent, DbAuthEvent, DbUser, DbUserIdentity, UserContent,
     UserIdentityContent, now_iso, record_id_to_string,
 };
+use crate::auth::extractors::AuthenticatedUser;
 use crate::auth::hmac::HmacVerifiedJson;
 use crate::auth::jwt::SharedVerifier;
 use crate::auth::password;
 use crate::auth::rate_limit::{ClientIp, CredentialFailureLimiter};
 use crate::auth::refresh::{self, RefreshError};
 use crate::db::DbConn;
+use surrealdb::types::RecordId;
 
 const CREDENTIALS_PROVIDER: &str = "credentials";
 
@@ -349,6 +351,155 @@ async fn create_social_user(
     let created: Option<DbUser> = db.create("user").content(content).await?;
     let created = created.ok_or_else(|| AppError::Internal("user insert returned none".into()))?;
     Ok((record_id_to_string(created.id), created.email, created.role))
+}
+
+// ── change-password ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangePasswordRequest {
+    #[serde(default)]
+    pub current_password: Option<String>,
+    pub new_password: String,
+}
+
+/// Bearer-authenticated password change. Two branches keyed on whether the
+/// user currently has a credentials hash:
+///
+/// * **Change** (hash present): requires `currentPassword`, verifies it,
+///   rotates the hash, bumps `token_version`, and revokes every live
+///   refresh token for the user so any sibling session dies — the classic
+///   re-auth trigger after a credential rotation.
+/// * **Set** (hash is `None`): a social-only user adding a password as a
+///   second sign-in method. Accepts without `currentPassword`, inserts a
+///   `credentials` identity row, bumps `token_version`. Does NOT revoke
+///   refresh tokens: this is additive, not a re-auth event.
+///
+/// Returns `204 No Content` on success. Mounted outside the HMAC
+/// sub-router so `AuthenticatedUser` is the sole gate — per-IP limiting
+/// is not doubled-charged against already-authenticated callers.
+pub async fn change_password(
+    user: AuthenticatedUser,
+    State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<axum::http::StatusCode, AppError> {
+    if req.new_password.is_empty() {
+        return Err(AppError::BadRequest("newPassword required".into()));
+    }
+    if req.new_password.len() > MAX_PASSWORD_LEN {
+        return Err(AppError::BadRequest("newPassword too long".into()));
+    }
+
+    let db_user = find_user_by_id(&db, &user.user_id)
+        .await?
+        .ok_or_else(|| AppError::Internal("authenticated user not found".into()))?;
+
+    let ip = client_ip.to_string();
+    let new_hash = password::hash(&req.new_password)?;
+    let now = now_iso();
+
+    match db_user.password_hash.as_deref() {
+        Some(existing_hash) => {
+            // Change path: verify current then rotate. Every failure path
+            // writes an audit row before returning so brute-force probes are
+            // observable even when the client keeps receiving 401s.
+            let Some(current) = req.current_password.as_deref() else {
+                return Err(AppError::BadRequest(
+                    "currentPassword required to change an existing password".into(),
+                ));
+            };
+            if !password::verify(current, existing_hash)? {
+                record_auth_event(
+                    &db,
+                    Some(user.user_id.clone()),
+                    "password_change_failure",
+                    false,
+                    Some("bad_current"),
+                    Some(&ip),
+                )
+                .await;
+                return Err(AppError::Unauthorized);
+            }
+
+            update_password_hash(&db, &user.user_id, Some(&new_hash), &now).await?;
+            refresh::bump_token_version(&db, &user.user_id)
+                .await
+                .map_err(|e| AppError::Internal(format!("token_version bump failed: {e}")))?;
+            refresh::revoke_all_for_user(&db, &user.user_id)
+                .await
+                .map_err(|e| AppError::Internal(format!("refresh revoke failed: {e}")))?;
+
+            record_auth_event(
+                &db,
+                Some(user.user_id),
+                "password_changed",
+                true,
+                None,
+                Some(&ip),
+            )
+            .await;
+        }
+        None => {
+            // Set path: social user adding a credentials identity. No
+            // currentPassword required by design (there is none to verify).
+            update_password_hash(&db, &user.user_id, Some(&new_hash), &now).await?;
+
+            let identity = UserIdentityContent {
+                user_id: user.user_id.clone(),
+                provider: CREDENTIALS_PROVIDER.into(),
+                provider_subject: db_user.email_normalised.clone(),
+                email_at_link: db_user.email.clone(),
+                created_at: now.clone(),
+            };
+            match db
+                .create::<Option<DbUserIdentity>>("user_identity")
+                .content(identity)
+                .await
+            {
+                Ok(_) => {}
+                Err(err) if is_unique_constraint_error(&err.to_string()) => {
+                    // A prior set attempt already inserted the identity —
+                    // rotating the hash alone is the correct idempotent
+                    // outcome, no error to surface.
+                }
+                Err(err) => return Err(err.into()),
+            }
+
+            refresh::bump_token_version(&db, &user.user_id)
+                .await
+                .map_err(|e| AppError::Internal(format!("token_version bump failed: {e}")))?;
+
+            record_auth_event(
+                &db,
+                Some(user.user_id),
+                "password_changed",
+                true,
+                Some("set"),
+                Some(&ip),
+            )
+            .await;
+        }
+    }
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+async fn update_password_hash(
+    db: &DbConn,
+    user_id: &str,
+    new_hash: Option<&str>,
+    now_rfc3339: &str,
+) -> Result<(), AppError> {
+    db.query(
+        "UPDATE $id SET password_hash = $h, must_reset_password = false, updated_at = $now",
+    )
+    .bind(("id", RecordId::new("user", user_id.to_string())))
+    .bind(("h", new_hash.map(str::to_string)))
+    .bind(("now", now_rfc3339.to_string()))
+    .await?
+    .check()?;
+    Ok(())
 }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
