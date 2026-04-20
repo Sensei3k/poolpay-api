@@ -128,7 +128,17 @@ pub fn router_with_config(
     // The verifier is injected as a request Extension so every handler
     // (including the auth extractors landing in BE-5) can reach it without
     // forcing a state-type migration on the existing DbConn-state router.
-    router.layer(cors).layer(Extension(verifier)).with_state(db)
+    //
+    // `RateLimitConfig` is also layered at the top level (without the
+    // tower-governor layer) so the `ClientIp` extractor used by bearer-gated
+    // handlers like `change_password` picks up the injected config instead of
+    // falling back to `RateLimitConfig::from_env` — otherwise tests and any
+    // non-env configuration would key IP resolution on the wrong flags.
+    router
+        .layer(cors)
+        .layer(Extension(verifier))
+        .layer(Extension(rate_cfg))
+        .with_state(db)
 }
 
 fn build_cors() -> CorsLayer {
