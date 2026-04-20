@@ -73,6 +73,7 @@ async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
          DEFINE FIELD IF NOT EXISTS token_version ON user TYPE int;
          DEFINE FIELD IF NOT EXISTS must_reset_password ON user TYPE bool;
          DEFINE FIELD IF NOT EXISTS version ON user TYPE int;
+         UPDATE user SET version = 1 WHERE version IS NONE;
          DEFINE FIELD IF NOT EXISTS created_at ON user TYPE string;
          DEFINE FIELD IF NOT EXISTS updated_at ON user TYPE string;
          DEFINE FIELD IF NOT EXISTS deleted_at ON user TYPE option<string>;
