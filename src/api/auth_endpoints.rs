@@ -363,11 +363,14 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
-// Two bounded string fields (each capped at `MAX_PASSWORD_LEN` = 1 KiB) plus
-// JSON framing comfortably fit inside 4 KiB. Bound the buffer before
-// deserialisation so an authenticated caller cannot force the server to hold
-// an arbitrarily large body in memory just because the route is bearer-gated.
-const MAX_CHANGE_PASSWORD_BODY_BYTES: usize = 4 * 1024;
+// Two bounded string fields (each capped at `MAX_PASSWORD_LEN` = 1 KiB) can
+// still exceed 4 KiB once encoded as JSON because `\` and `"` are escaped —
+// each of those characters doubles on the wire, so a fully-escaped password
+// roughly doubles its per-field length. Allow enough room for two fully
+// escaped passwords plus JSON object/key framing while still bounding the
+// buffer before deserialisation, so a bearer-authenticated caller cannot
+// force the server to buffer an arbitrarily large body.
+const MAX_CHANGE_PASSWORD_BODY_BYTES: usize = 5 * 1024;
 
 /// Bearer-authenticated password change. Two branches keyed on whether the
 /// user currently has a credentials hash:
