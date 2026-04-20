@@ -1,14 +1,18 @@
 //! Super-admin-gated user management (BE-8 PR 3).
 //!
 //! The three endpoints live behind the `SuperAdminUser` extractor so only
-//! callers with `role = "super_admin"` can create, modify, or soft-delete
-//! admin-tier users. Every mutation that changes `role`, `status`, or
-//! deletes a row bumps `user.token_version` so in-flight JWTs for the
-//! affected user reject within one access-token TTL. A super-admin
-//! cannot mutate or delete their own record — the self-mutation guard
-//! forces at least one other super-admin to act, which avoids the
-//! accidental lock-out path a count-based "last super_admin" check
-//! would have needed.
+//! callers with `role = "super_admin"` can act. `POST` is scoped to
+//! provisioning admin-tier users (`admin` | `super_admin`) — member
+//! users are minted by the social/credentials sign-in paths, not this
+//! surface. `PATCH` and `DELETE` operate on any non-deleted user row
+//! regardless of current role, so a super-admin can demote an admin to
+//! `member`, disable a member, or soft-delete any user. Every mutation
+//! that changes `role`, `status`, or deletes a row bumps
+//! `user.token_version` so in-flight JWTs for the affected user reject
+//! within one access-token TTL. A super-admin cannot mutate or delete
+//! their own record — the self-mutation guard forces at least one
+//! other super-admin to act, which avoids the accidental lock-out
+//! path a count-based "last super_admin" check would have needed.
 //!
 //! Uniqueness lives on `user_identity(provider, provider_subject)`. A
 //! duplicate email returns 409 via a pre-check against the credentials
