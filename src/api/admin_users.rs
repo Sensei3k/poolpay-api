@@ -22,6 +22,7 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
+use surrealdb::types::RecordId;
 
 use crate::api::models::{
     AppError, DbUser, DbUserIdentity, EntityId, UserContent, UserIdentityContent, now_iso,
@@ -262,28 +263,41 @@ pub async fn update_admin_user(
     let bump_token = role_changed || status_changed;
 
     let now = now_iso();
-    let updated_content = UserContent {
-        email: existing.email.clone(),
-        email_normalised: existing.email_normalised.clone(),
-        password_hash: existing.password_hash.clone(),
-        role: new_role.clone(),
-        status: new_status.clone(),
-        token_version: if bump_token {
-            existing.token_version + 1
-        } else {
-            existing.token_version
-        },
-        must_reset_password: existing.must_reset_password,
-        version: existing.version + 1,
-        created_at: existing.created_at.clone(),
-        updated_at: now,
-        deleted_at: None,
-    };
-    let updated: Option<DbUser> = db
-        .upsert(("user", id.as_str()))
-        .content(updated_content)
-        .await?;
-    let updated = updated.ok_or_else(|| AppError::Internal("user update returned none".into()))?;
+    // Targeted atomic UPDATE guarded by the caller's expected `version`.
+    // Only touches the fields this endpoint owns (role, status, updated_at,
+    // version, token_version) so a concurrent subsystem (e.g. refresh-reuse
+    // detection bumping `token_version`, or `/change-password`) can't be
+    // clobbered by a snapshot-derived write. `token_version` increments
+    // relative to the current DB value rather than the stale snapshot.
+    let mut response = db
+        .query(
+            "UPDATE $id SET \
+                 role = $role, \
+                 status = $status, \
+                 updated_at = $now, \
+                 version = version + 1, \
+                 token_version = IF $bump_token THEN token_version + 1 ELSE token_version END \
+             WHERE version = $expected_version AND deleted_at IS NONE \
+             RETURN AFTER",
+        )
+        .bind(("id", RecordId::new("user", id.as_str().to_string())))
+        .bind(("role", new_role.clone()))
+        .bind(("status", new_status.clone()))
+        .bind(("now", now))
+        .bind(("expected_version", existing.version))
+        .bind(("bump_token", bump_token))
+        .await?
+        .check()?;
+    let rows: Vec<DbUser> = response.take(0)?;
+    let updated = rows.into_iter().next().ok_or_else(|| {
+        // Row existed at SELECT time but the guarded UPDATE matched nothing:
+        // a concurrent writer advanced `version` or soft-deleted the row
+        // between read and write. Surface as a version mismatch so the
+        // caller refetches and retries.
+        AppError::Conflict(
+            "version mismatch — record was modified by another request".into(),
+        )
+    })?;
 
     if role_changed {
         record_auth_event(
@@ -335,29 +349,33 @@ pub async fn delete_admin_user(
         ));
     }
 
-    let existing: Option<DbUser> = db.select(("user", id.as_str())).await?;
-    let existing = existing
-        .filter(|u| u.deleted_at.is_none())
-        .ok_or_else(|| AppError::NotFound(format!("user {id} does not exist")))?;
-
     let now = now_iso();
-    let updated_content = UserContent {
-        email: existing.email,
-        email_normalised: existing.email_normalised,
-        password_hash: existing.password_hash,
-        role: existing.role,
-        status: existing.status,
-        token_version: existing.token_version + 1,
-        must_reset_password: existing.must_reset_password,
-        version: existing.version + 1,
-        created_at: existing.created_at,
-        updated_at: now.clone(),
-        deleted_at: Some(now),
-    };
-    let _: Option<DbUser> = db
-        .upsert(("user", id.as_str()))
-        .content(updated_content)
-        .await?;
+    // Targeted atomic soft-delete — only touches the fields this endpoint
+    // owns. Increments `token_version` relative to the DB value so a
+    // concurrent bump (e.g. refresh-reuse detection) can't be clobbered
+    // into a lower value and re-validate already-rejected JWTs. The
+    // `WHERE deleted_at IS NONE` clause also makes this a 404 (not an
+    // accidental re-delete) if the row vanished or was already deleted.
+    let mut resp = db
+        .query(
+            "UPDATE $id SET \
+                 deleted_at = $now, \
+                 updated_at = $now, \
+                 version = version + 1, \
+                 token_version = token_version + 1 \
+             WHERE deleted_at IS NONE \
+             RETURN AFTER",
+        )
+        .bind(("id", RecordId::new("user", id.as_str().to_string())))
+        .bind(("now", now))
+        .await?
+        .check()?;
+    let updated: Vec<DbUser> = resp.take(0)?;
+    if updated.is_empty() {
+        // Either the row doesn't exist or it's already soft-deleted. Both
+        // return 404 — idempotent from the caller's perspective.
+        return Err(AppError::NotFound(format!("user {id} does not exist")));
+    }
 
     if let Err(e) = refresh::revoke_all_for_user(&db, id.as_str()).await {
         tracing::warn!(error = %e, user_id = %id.as_str(), "revoke_all_for_user on delete failed");
