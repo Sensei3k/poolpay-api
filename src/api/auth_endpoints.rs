@@ -405,18 +405,23 @@ pub async fn change_password(
         return Err(AppError::BadRequest("newPassword too long".into()));
     }
 
+    // `AuthenticatedUser` already proved the user exists when this request was
+    // extracted. If the row is missing here the session is effectively invalid
+    // (hard-deleted between extraction and handler), so fall back to 401
+    // rather than leaking a 500 for what is really an auth failure.
     let db_user = find_user_by_id(&db, &user.user_id)
         .await?
-        .ok_or_else(|| AppError::Internal("authenticated user not found".into()))?;
+        .ok_or(AppError::Unauthorized)?;
 
     let ip = client_ip.to_string();
     let now = now_iso();
 
     match db_user.password_hash.as_deref() {
         Some(existing_hash) => {
-            // Change path: verify current then rotate. Every failure path
-            // writes an audit row before returning so brute-force probes are
-            // observable even when the client keeps receiving 401s.
+            // Change path: verify current then rotate. Bad-current-password
+            // failures write an audit row before returning 401 so brute-force
+            // probes remain observable (shape-level 400s from missing fields
+            // or policy violations are intentionally not audited).
             let Some(current) = req.current_password.as_deref() else {
                 return Err(AppError::BadRequest(
                     "currentPassword required to change an existing password".into(),
@@ -480,9 +485,33 @@ pub async fn change_password(
             {
                 Ok(_) => {}
                 Err(err) if is_unique_constraint_error(&err.to_string()) => {
-                    // A prior set attempt already inserted the identity —
-                    // rotating the hash alone is the correct idempotent
-                    // outcome, no error to surface.
+                    // UNIQUE here is idempotent only if the existing
+                    // credentials identity already belongs to this user.
+                    // `user.email_normalised` is not unique across users, so
+                    // the conflicting row may belong to a different account
+                    // that already linked credentials for this email. In that
+                    // case, rotating the hash on this user would leave them
+                    // with a password hash but no credentials identity while
+                    // `/api/auth/verify-credentials` continues to resolve the
+                    // email to the other account — refuse instead.
+                    let existing =
+                        find_identity(&db, CREDENTIALS_PROVIDER, &db_user.email_normalised)
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::Internal(
+                                    "credentials identity insert reported a unique conflict, \
+                                     but no existing identity could be loaded"
+                                        .into(),
+                                )
+                            })?;
+                    if existing.user_id != user.user_id {
+                        return Err(AppError::Conflict(
+                            "email already has credentials on another account".into(),
+                        ));
+                    }
+                    // Same user — prior set attempt already inserted the
+                    // identity, so rotating the hash below is the correct
+                    // idempotent outcome.
                 }
                 Err(err) => return Err(err.into()),
             }
