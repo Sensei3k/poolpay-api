@@ -363,6 +363,12 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
+// Two bounded string fields (each capped at `MAX_PASSWORD_LEN` = 1 KiB) plus
+// JSON framing comfortably fit inside 4 KiB. Bound the buffer before
+// deserialisation so an authenticated caller cannot force the server to hold
+// an arbitrarily large body in memory just because the route is bearer-gated.
+const MAX_CHANGE_PASSWORD_BODY_BYTES: usize = 4 * 1024;
+
 /// Bearer-authenticated password change. Two branches keyed on whether the
 /// user currently has a credentials hash:
 ///
@@ -382,8 +388,16 @@ pub async fn change_password(
     user: AuthenticatedUser,
     State(db): State<DbConn>,
     ClientIp(client_ip): ClientIp,
-    Json(req): Json<ChangePasswordRequest>,
+    http_req: Request,
 ) -> Result<axum::http::StatusCode, AppError> {
+    // Cap the body before deserialising so a malicious authenticated caller
+    // cannot buffer a multi-MB payload behind the bearer gate.
+    let body = to_bytes(http_req.into_body(), MAX_CHANGE_PASSWORD_BODY_BYTES)
+        .await
+        .map_err(|_| AppError::BadRequest("request body too large".into()))?;
+    let req: ChangePasswordRequest =
+        serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid JSON body".into()))?;
+
     if req.new_password.is_empty() {
         return Err(AppError::BadRequest("newPassword required".into()));
     }
@@ -396,7 +410,6 @@ pub async fn change_password(
         .ok_or_else(|| AppError::Internal("authenticated user not found".into()))?;
 
     let ip = client_ip.to_string();
-    let new_hash = password::hash(&req.new_password)?;
     let now = now_iso();
 
     match db_user.password_hash.as_deref() {
@@ -422,6 +435,11 @@ pub async fn change_password(
                 return Err(AppError::Unauthorized);
             }
 
+            // Only hash the new password once the current one is verified —
+            // keeps Argon2 CPU off the failure path so bad-currentPassword
+            // probes cannot be used as a DoS amplifier.
+            let new_hash = password::hash(&req.new_password)?;
+
             update_password_hash(&db, &user.user_id, Some(&new_hash), &now).await?;
             refresh::bump_token_version(&db, &user.user_id)
                 .await
@@ -443,8 +461,11 @@ pub async fn change_password(
         None => {
             // Set path: social user adding a credentials identity. No
             // currentPassword required by design (there is none to verify).
-            update_password_hash(&db, &user.user_id, Some(&new_hash), &now).await?;
-
+            //
+            // Insert the identity row *before* touching `password_hash` so a
+            // transient DB failure on the identity write cannot leave the
+            // user with a hash but no credentials identity — which would make
+            // `/api/auth/verify-credentials` unable to locate them by email.
             let identity = UserIdentityContent {
                 user_id: user.user_id.clone(),
                 provider: CREDENTIALS_PROVIDER.into(),
@@ -465,6 +486,9 @@ pub async fn change_password(
                 }
                 Err(err) => return Err(err.into()),
             }
+
+            let new_hash = password::hash(&req.new_password)?;
+            update_password_hash(&db, &user.user_id, Some(&new_hash), &now).await?;
 
             refresh::bump_token_version(&db, &user.user_id)
                 .await
