@@ -345,6 +345,7 @@ async fn create_social_user(
         status: "active".into(),
         token_version: 0,
         must_reset_password: false,
+        version: 1,
         created_at: now.clone(),
         updated_at: now,
         deleted_at: None,
