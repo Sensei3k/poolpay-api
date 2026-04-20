@@ -241,6 +241,9 @@ pub struct DbReceipt {
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
+    pub confirmed_by: Option<String>,
+    pub rejected_by: Option<String>,
+    pub deleted_by: Option<String>,
 }
 
 #[derive(Debug, Deserialize, SurrealValue)]
@@ -268,6 +271,8 @@ pub struct DbPayment {
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
+    pub rejected_by: Option<String>,
+    pub deleted_by: Option<String>,
 }
 
 // ── API response structs (serialized to JSON for the frontend) ──────────────
@@ -364,6 +369,10 @@ pub struct Payment {
     pub updated_at: String,
     #[serde(rename = "deletedAt", skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<String>,
+    #[serde(rename = "rejectedBy", skip_serializing_if = "Option::is_none")]
+    pub rejected_by: Option<String>,
+    #[serde(rename = "deletedBy", skip_serializing_if = "Option::is_none")]
+    pub deleted_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,6 +411,12 @@ pub struct Receipt {
     pub updated_at: String,
     #[serde(rename = "deletedAt", skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<String>,
+    #[serde(rename = "confirmedBy", skip_serializing_if = "Option::is_none")]
+    pub confirmed_by: Option<String>,
+    #[serde(rename = "rejectedBy", skip_serializing_if = "Option::is_none")]
+    pub rejected_by: Option<String>,
+    #[serde(rename = "deletedBy", skip_serializing_if = "Option::is_none")]
+    pub deleted_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -504,6 +519,8 @@ impl TryFrom<DbPayment> for Payment {
             created_at: db.created_at,
             updated_at: db.updated_at,
             deleted_at: db.deleted_at,
+            rejected_by: db.rejected_by,
+            deleted_by: db.deleted_by,
         })
     }
 }
@@ -530,6 +547,9 @@ impl TryFrom<DbReceipt> for Receipt {
             created_at: db.created_at,
             updated_at: db.updated_at,
             deleted_at: db.deleted_at,
+            confirmed_by: db.confirmed_by,
+            rejected_by: db.rejected_by,
+            deleted_by: db.deleted_by,
         })
     }
 }
@@ -605,6 +625,8 @@ pub struct PaymentContent {
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
+    pub rejected_by: Option<String>,
+    pub deleted_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, SurrealValue)]
@@ -626,6 +648,9 @@ pub struct ReceiptContent {
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
+    pub confirmed_by: Option<String>,
+    pub rejected_by: Option<String>,
+    pub deleted_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, SurrealValue)]

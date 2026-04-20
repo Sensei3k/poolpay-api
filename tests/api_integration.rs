@@ -60,6 +60,13 @@ async fn test_app() -> Router {
 /// `OnceLock` keeps `set_var` to a single mutation per process; `env_lock()`
 /// serialises that mutation against every other env writer in this binary.
 async fn test_app_with_auth() -> Router {
+    test_app_with_auth_and_db().await.0
+}
+
+/// Same setup as `test_app_with_auth`, but also returns the shared `DbConn`
+/// so tests can inspect rows the public API hides (e.g. soft-deleted
+/// payments that get filtered out of `/api/payments`).
+async fn test_app_with_auth_and_db() -> (Router, db::DbConn) {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
         let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
@@ -71,7 +78,8 @@ async fn test_app_with_auth() -> Router {
     });
     let conn = db::init_memory().await.expect("failed to init test DB");
     seed_test_admin_users(&conn).await;
-    api::router(conn)
+    let router = api::router(conn.clone());
+    (router, conn)
 }
 
 const TEST_SUPER_ADMIN_SUB: &str = "test-super-admin";
@@ -1268,6 +1276,32 @@ async fn delete_payment_soft_deletes_record() {
 }
 
 #[tokio::test]
+async fn delete_payment_populates_deleted_by() {
+    // The public list filters soft-deleted rows out, so reach into the DB
+    // directly to confirm the audit column was populated from the caller's
+    // JWT subject.
+    use poolpay::api::models::DbPayment;
+
+    let (app, conn) = test_app_with_auth_and_db().await;
+    let resp = call(app, delete_req_jwt("/api/payments/1/3")).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let rows: Vec<DbPayment> = conn
+        .query("SELECT * FROM payment WHERE member_id = $mid AND cycle_id = $cid")
+        .bind(("mid", "1".to_string()))
+        .bind(("cid", "3".to_string()))
+        .await
+        .expect("select payment")
+        .take(0)
+        .expect("decode payments");
+    let deleted = rows
+        .into_iter()
+        .find(|p| p.deleted_at.is_some())
+        .expect("soft-deleted payment row should exist");
+    assert_eq!(deleted.deleted_by.as_deref(), Some(TEST_SUPER_ADMIN_SUB));
+}
+
+#[tokio::test]
 async fn delete_payment_unknown_member_returns_404() {
     let app = test_app_with_auth().await;
     let resp = call(app, delete_req_jwt("/api/payments/999/3")).await;
@@ -1792,6 +1826,8 @@ async fn confirm_receipt_marks_status_and_creates_payment() {
     let updated: serde_json::Value = json_body(resp).await;
     assert_eq!(updated["status"], "confirmed");
     assert_eq!(updated["id"], "1");
+    // Audit: the confirming admin is recorded on the receipt row itself.
+    assert_eq!(updated["confirmedBy"], TEST_SUPER_ADMIN_SUB);
 
     let payments_after: Vec<serde_json::Value> =
         json_body(call(app, get("/api/payments")).await).await;
@@ -1806,6 +1842,8 @@ async fn confirm_receipt_marks_status_and_creates_payment() {
     assert_eq!(new_payment["amount"], 1_000_000);
     assert_eq!(new_payment["currency"], "NGN");
     assert!(new_payment["confirmedAt"].is_string());
+    // Audit: same admin is attributed on the payment created from the receipt.
+    assert_eq!(new_payment["confirmedBy"], TEST_SUPER_ADMIN_SUB);
 }
 
 #[tokio::test]
@@ -1867,6 +1905,8 @@ async fn reject_receipt_marks_status_and_creates_no_payment() {
     assert_eq!(resp.status(), StatusCode::OK);
     let updated: serde_json::Value = json_body(resp).await;
     assert_eq!(updated["status"], "rejected");
+    // Audit: rejecting admin is recorded so later reviewers can attribute the decision.
+    assert_eq!(updated["rejectedBy"], TEST_SUPER_ADMIN_SUB);
 
     let payments_after: Vec<serde_json::Value> =
         json_body(call(app, get("/api/payments")).await).await;

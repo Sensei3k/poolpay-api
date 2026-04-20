@@ -647,6 +647,8 @@ pub async fn create_payment(
         created_at: now.clone(),
         updated_at: now,
         deleted_at: None,
+        rejected_by: None,
+        deleted_by: None,
     };
 
     let db_payment: Option<DbPayment> = db.create("payment").content(content).await?;
@@ -668,7 +670,7 @@ pub async fn delete_payment(
     // return an opaque 403 to non-super-admins to avoid leaking which
     // cycle ids exist across groups.
     let cycle: Option<DbCycle> = db.select(("cycle", cycle_id.as_str())).await?;
-    let _auth = GroupScopedAdmin::ensure_or_deny(
+    let auth = GroupScopedAdmin::ensure_or_deny(
         user,
         cycle.as_ref().map(|c| c.group_id.as_str()),
         &db,
@@ -705,6 +707,8 @@ pub async fn delete_payment(
             created_at: row.created_at,
             updated_at: now.clone(),
             deleted_at: Some(now.clone()),
+            rejected_by: row.rejected_by,
+            deleted_by: Some(auth.0.user_id.clone()),
         };
         let _: Option<DbPayment> = db.upsert(("payment", id.as_str())).content(content).await?;
     }
@@ -720,7 +724,13 @@ async fn load_active_receipt_opt(db: &DbConn, id: &str) -> Result<Option<DbRecei
     Ok(row.filter(|r| r.deleted_at.is_none()))
 }
 
-fn receipt_content_from(row: &DbReceipt, status: &str, updated_at: String) -> ReceiptContent {
+fn receipt_content_from(
+    row: &DbReceipt,
+    status: &str,
+    updated_at: String,
+    confirmed_by: Option<String>,
+    rejected_by: Option<String>,
+) -> ReceiptContent {
     ReceiptContent {
         whatsapp_message_id: row.whatsapp_message_id.clone(),
         group_id: row.group_id.clone(),
@@ -739,6 +749,9 @@ fn receipt_content_from(row: &DbReceipt, status: &str, updated_at: String) -> Re
         created_at: row.created_at.clone(),
         updated_at,
         deleted_at: row.deleted_at.clone(),
+        confirmed_by,
+        rejected_by,
+        deleted_by: row.deleted_by.clone(),
     }
 }
 
@@ -748,7 +761,7 @@ pub async fn confirm_receipt(
     Path(id): Path<EntityId>,
 ) -> Result<Json<Receipt>, AppError> {
     let receipt = load_active_receipt_opt(&db, id.as_str()).await?;
-    let _auth = GroupScopedAdmin::ensure_or_deny(
+    let auth = GroupScopedAdmin::ensure_or_deny(
         user,
         receipt.as_ref().map(|r| r.group_id.as_str()),
         &db,
@@ -823,6 +836,7 @@ pub async fn confirm_receipt(
             ))
         })?;
 
+    let actor_id = auth.0.user_id.clone();
     let payment_content = PaymentContent {
         member_id: member_id.clone(),
         cycle_id: cycle_id.clone(),
@@ -832,16 +846,24 @@ pub async fn confirm_receipt(
         payment_method: Some("whatsapp_receipt".into()),
         reference: Some(receipt.whatsapp_message_id.clone()),
         confirmed_at: Some(now.clone()),
-        confirmed_by: None,
+        confirmed_by: Some(actor_id.clone()),
         created_at: now.clone(),
         updated_at: now.clone(),
         deleted_at: None,
+        rejected_by: None,
+        deleted_by: None,
     };
 
     let created: Option<DbPayment> = db.create("payment").content(payment_content).await?;
     created.ok_or_else(|| AppError::Internal("payment was not created".into()))?;
 
-    let content = receipt_content_from(&receipt, "confirmed", now);
+    let content = receipt_content_from(
+        &receipt,
+        "confirmed",
+        now,
+        Some(actor_id),
+        receipt.rejected_by.clone(),
+    );
     let updated: Option<DbReceipt> = db.upsert(("receipt", id.as_str())).content(content).await?;
     let updated = updated.ok_or_else(|| AppError::Internal("receipt update failed".into()))?;
 
@@ -854,7 +876,7 @@ pub async fn reject_receipt(
     Path(id): Path<EntityId>,
 ) -> Result<Json<Receipt>, AppError> {
     let receipt = load_active_receipt_opt(&db, id.as_str()).await?;
-    let _auth = GroupScopedAdmin::ensure_or_deny(
+    let auth = GroupScopedAdmin::ensure_or_deny(
         user,
         receipt.as_ref().map(|r| r.group_id.as_str()),
         &db,
@@ -870,7 +892,13 @@ pub async fn reject_receipt(
         )));
     }
 
-    let content = receipt_content_from(&receipt, "rejected", now_iso());
+    let content = receipt_content_from(
+        &receipt,
+        "rejected",
+        now_iso(),
+        receipt.confirmed_by.clone(),
+        Some(auth.0.user_id.clone()),
+    );
     let updated: Option<DbReceipt> = db.upsert(("receipt", id.as_str())).content(content).await?;
     let updated = updated.ok_or_else(|| AppError::Internal("receipt update failed".into()))?;
 
