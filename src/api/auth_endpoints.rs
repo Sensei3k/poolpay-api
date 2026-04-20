@@ -16,9 +16,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::api::models::{
-    AppError, AuthEventContent, DbAuthEvent, DbUser, DbUserIdentity, UserContent,
-    UserIdentityContent, now_iso, record_id_to_string,
+    AppError, DbUser, DbUserIdentity, UserContent, UserIdentityContent, now_iso,
+    record_id_to_string,
 };
+use crate::auth::audit::record_auth_event;
 use crate::auth::extractors::AuthenticatedUser;
 use crate::auth::hmac::HmacVerifiedJson;
 use crate::auth::jwt::SharedVerifier;
@@ -873,35 +874,4 @@ pub async fn logout_endpoint(
         }
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
-}
-
-async fn record_auth_event(
-    db: &DbConn,
-    user_id: Option<String>,
-    event_type: &str,
-    success: bool,
-    reason: Option<&str>,
-    ip: Option<&str>,
-) {
-    let content = AuthEventContent {
-        user_id,
-        event_type: event_type.into(),
-        ip: ip.map(str::to_string),
-        user_agent: None,
-        success,
-        reason: reason.map(str::to_string),
-        created_at: now_iso(),
-    };
-    // auth_event writes are fire-and-forget at every callsite: telemetry
-    // failure must never block a login. We still warn so ops can alert on
-    // "auth_event insert failed" without the error propagating into the
-    // request path. Returning `()` makes that contract explicit — callers
-    // cannot mistake this for a fallible operation worth handling.
-    if let Err(e) = db
-        .create::<Option<DbAuthEvent>>("auth_event")
-        .content(content)
-        .await
-    {
-        tracing::warn!(error = %e, event_type, "auth_event insert failed");
-    }
 }
