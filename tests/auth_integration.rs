@@ -1462,3 +1462,51 @@ async fn change_password_writes_password_changed_auth_event() {
     let after = count_auth_events(&db, &admin_id, "password_changed").await;
     assert_eq!(after, before + 1, "expected exactly one password_changed event");
 }
+
+/// `user.email_normalised` is intentionally non-unique, so two social users
+/// can share an email. Only one of them may own the
+/// (`provider='credentials'`, `provider_subject=email_normalised`) identity —
+/// the second user attempting to set a password must be refused with 409,
+/// and critically must not end up with a `password_hash` that lets them pass
+/// `/api/auth/verify-credentials` even though the credentials identity is
+/// resolved to a *different* account.
+#[tokio::test]
+async fn change_password_set_path_refuses_when_another_user_owns_credentials_identity() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+
+    let shared_email = "shared-credentials@example.com";
+    let user_a = seed_member(&app, "sub-shared-a", shared_email).await;
+    let user_b = seed_member(&app, "sub-shared-b", shared_email).await;
+    assert_ne!(user_a, user_b, "distinct providerSubjects must produce distinct users");
+
+    // User A sets a password first — this inserts the single credentials
+    // identity row for `shared_email`.
+    let access_a = verifier.mint_access(&user_a, "member", 0).expect("mint");
+    let body_a = serde_json::json!({ "newPassword": "owner-password" });
+    let resp_a = call(app.clone(), change_password_req(&access_a, &body_a)).await;
+    assert_eq!(resp_a.status(), StatusCode::NO_CONTENT);
+
+    // User B now tries to set a password for the same email — the credentials
+    // identity already exists and belongs to someone else.
+    let access_b = verifier.mint_access(&user_b, "member", 0).expect("mint");
+    let body_b = serde_json::json!({ "newPassword": "interloper-password" });
+    let resp_b = call(app.clone(), change_password_req(&access_b, &body_b)).await;
+    assert_eq!(resp_b.status(), StatusCode::CONFLICT);
+
+    // User B must NOT have a password hash — otherwise future refactors could
+    // silently let B authenticate through credentials even though the
+    // identity resolves to A.
+    assert!(
+        user_password_hash(&db, &user_b).await.is_none(),
+        "conflicting set attempt must not write a password_hash for the losing user"
+    );
+
+    // The owning user's password must still work via verify-credentials —
+    // the identity row was not rewired.
+    let verify_body = serde_json::json!({
+        "email": shared_email,
+        "password": "owner-password",
+    });
+    let verify_resp = call(app, hmac_request("/api/auth/verify-credentials", &verify_body)).await;
+    assert_eq!(verify_resp.status(), StatusCode::OK);
+}
