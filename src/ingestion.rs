@@ -115,6 +115,9 @@ pub async fn ingest_receipt(
         created_at: now.clone(),
         updated_at: now,
         deleted_at: None,
+        confirmed_by: None,
+        rejected_by: None,
+        deleted_by: None,
     };
 
     // `create` returns the inserted row(s) so we can surface the generated id.

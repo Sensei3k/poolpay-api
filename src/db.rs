@@ -324,6 +324,7 @@ fn fixture_payments() -> Vec<(&'static str, PaymentContent)> {
         payment_method: None, reference: None,
         confirmed_at: None, confirmed_by: None,
         created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None,
+        rejected_by: None, deleted_by: None,
     };
     vec![
         // Cycle 3 — March 2026 (Ngozi excluded as recipient; 3 of 5 contributing paid)
@@ -415,6 +416,9 @@ fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
                 created_at: created_at.into(),
                 updated_at: created_at.into(),
                 deleted_at: None,
+                confirmed_by: None,
+                rejected_by: None,
+                deleted_by: None,
             },
         ),
         (
@@ -437,6 +441,9 @@ fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
                 created_at: "2026-03-03T14:15:30+00:00".into(),
                 updated_at: "2026-03-03T16:00:00+00:00".into(),
                 deleted_at: Some("2026-03-03T16:00:00+00:00".into()),
+                confirmed_by: None,
+                rejected_by: None,
+                deleted_by: None,
             },
         ),
     ]
