@@ -1771,17 +1771,20 @@ async fn create_admin_user_rejects_non_super_admin_with_403() {
     let member_id = seed_member(&app, "sub-post-forbidden", "postforbid@example.com").await;
     let member_token = verifier.mint_access(&member_id, "member", 0).expect("mint");
 
-    set_user_role(&db, &member_id, "admin").await;
-    let admin_token = verifier.mint_access(&member_id, "admin", 0).expect("mint");
-
     let body = serde_json::json!({
         "email": "should-not-exist@example.com",
         "initialPassword": "seed-password",
         "role": "admin",
     });
 
+    // Exercise the member path before the DB role is promoted — the extractor
+    // derives the role from the DB row, so flipping it first would turn this
+    // into a second admin-caller assertion.
     let member_resp = call(app.clone(), admin_users_post_req(&member_token, &body)).await;
     assert_eq!(member_resp.status(), StatusCode::FORBIDDEN);
+
+    set_user_role(&db, &member_id, "admin").await;
+    let admin_token = verifier.mint_access(&member_id, "admin", 0).expect("mint");
 
     let admin_resp = call(app, admin_users_post_req(&admin_token, &body)).await;
     assert_eq!(admin_resp.status(), StatusCode::FORBIDDEN);
