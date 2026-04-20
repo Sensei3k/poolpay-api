@@ -196,6 +196,21 @@ pub async fn revoke_family(db: &DbConn, family_id: &str) -> Result<(), RefreshEr
     Ok(())
 }
 
+/// Revoke every live refresh token owned by `user_id`, across all families.
+/// Used when a security-relevant event (password change, role downgrade,
+/// soft-delete) must terminate every active session for the user. Pairs
+/// with a `token_version` bump so in-flight access tokens die within one
+/// access-TTL and holders of old refresh tokens cannot mint replacements.
+pub async fn revoke_all_for_user(db: &DbConn, user_id: &str) -> Result<(), RefreshError> {
+    let now = now_iso();
+    db.query("UPDATE refresh_token SET revoked_at = $now WHERE user_id = $uid AND revoked_at IS NONE")
+        .bind(("now", now))
+        .bind(("uid", user_id.to_string()))
+        .await?
+        .check()?;
+    Ok(())
+}
+
 /// Revoke the family of a presented refresh token. Used by `/api/auth/logout`.
 /// Returns the `user_id` so the caller can audit under the right subject.
 pub async fn revoke_by_presented(
@@ -234,7 +249,11 @@ async fn handle_reuse(db: &DbConn, stolen: &DbRefreshToken) {
     }
 }
 
-async fn bump_token_version(db: &DbConn, user_id: &str) -> Result<(), RefreshError> {
+/// Atomically increment a user's `token_version` and stamp `updated_at`.
+/// Any in-flight access token minted against the previous version will be
+/// rejected by `AuthenticatedUser` on its next load. Callers that also
+/// need to kill refresh tokens should pair this with `revoke_all_for_user`.
+pub async fn bump_token_version(db: &DbConn, user_id: &str) -> Result<(), RefreshError> {
     db.query("UPDATE $id SET token_version = token_version + 1, updated_at = $now")
         .bind(("id", RecordId::new("user", user_id.to_string())))
         .bind(("now", now_iso()))

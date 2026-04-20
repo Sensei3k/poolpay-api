@@ -104,6 +104,14 @@ pub fn router_with_config(
         .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
         .route("/api/admin/whatsapp-links", post(create_whatsapp_link))
         .route("/api/admin/whatsapp-links/{id}", delete(delete_whatsapp_link))
+        // Bearer-authenticated auth endpoints. Change-password is gated by
+        // the `AuthenticatedUser` extractor — mounting it on the unrestricted
+        // router avoids double-charging tower-governor's per-IP bucket for
+        // callers who already hold a valid JWT.
+        .route(
+            "/api/auth/change-password",
+            post(auth_endpoints::change_password),
+        )
         // Auth endpoints (rate-limited; verify-credentials/ensure-user are
         // HMAC-gated, refresh/logout authenticate via the refresh token itself)
         // are merged below
@@ -120,7 +128,17 @@ pub fn router_with_config(
     // The verifier is injected as a request Extension so every handler
     // (including the auth extractors landing in BE-5) can reach it without
     // forcing a state-type migration on the existing DbConn-state router.
-    router.layer(cors).layer(Extension(verifier)).with_state(db)
+    //
+    // `RateLimitConfig` is also layered at the top level (without the
+    // tower-governor layer) so the `ClientIp` extractor used by bearer-gated
+    // handlers like `change_password` picks up the injected config instead of
+    // falling back to `RateLimitConfig::from_env` — otherwise tests and any
+    // non-env configuration would key IP resolution on the wrong flags.
+    router
+        .layer(cors)
+        .layer(Extension(verifier))
+        .layer(Extension(rate_cfg))
+        .with_state(db)
 }
 
 fn build_cors() -> CorsLayer {

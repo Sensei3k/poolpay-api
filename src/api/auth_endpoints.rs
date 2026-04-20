@@ -19,12 +19,14 @@ use crate::api::models::{
     AppError, AuthEventContent, DbAuthEvent, DbUser, DbUserIdentity, UserContent,
     UserIdentityContent, now_iso, record_id_to_string,
 };
+use crate::auth::extractors::AuthenticatedUser;
 use crate::auth::hmac::HmacVerifiedJson;
 use crate::auth::jwt::SharedVerifier;
 use crate::auth::password;
 use crate::auth::rate_limit::{ClientIp, CredentialFailureLimiter};
 use crate::auth::refresh::{self, RefreshError};
 use crate::db::DbConn;
+use surrealdb::types::RecordId;
 
 const CREDENTIALS_PROVIDER: &str = "credentials";
 
@@ -349,6 +351,211 @@ async fn create_social_user(
     let created: Option<DbUser> = db.create("user").content(content).await?;
     let created = created.ok_or_else(|| AppError::Internal("user insert returned none".into()))?;
     Ok((record_id_to_string(created.id), created.email, created.role))
+}
+
+// ── change-password ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangePasswordRequest {
+    #[serde(default)]
+    pub current_password: Option<String>,
+    pub new_password: String,
+}
+
+// Two bounded string fields (each capped at `MAX_PASSWORD_LEN` = 1 KiB) can
+// still exceed 4 KiB once encoded as JSON because `\` and `"` are escaped —
+// each of those characters doubles on the wire, so a fully-escaped password
+// roughly doubles its per-field length. Allow enough room for two fully
+// escaped passwords plus JSON object/key framing while still bounding the
+// buffer before deserialisation, so a bearer-authenticated caller cannot
+// force the server to buffer an arbitrarily large body.
+const MAX_CHANGE_PASSWORD_BODY_BYTES: usize = 5 * 1024;
+
+/// Bearer-authenticated password change. Two branches keyed on whether the
+/// user currently has a credentials hash:
+///
+/// * **Change** (hash present): requires `currentPassword`, verifies it,
+///   rotates the hash, bumps `token_version`, and revokes every live
+///   refresh token for the user so any sibling session dies — the classic
+///   re-auth trigger after a credential rotation.
+/// * **Set** (hash is `None`): a social-only user adding a password as a
+///   second sign-in method. Accepts without `currentPassword`, inserts a
+///   `credentials` identity row, bumps `token_version`. Does NOT revoke
+///   refresh tokens: this is additive, not a re-auth event.
+///
+/// Returns `204 No Content` on success. Mounted outside the HMAC
+/// sub-router so `AuthenticatedUser` is the sole gate — per-IP limiting
+/// is not doubled-charged against already-authenticated callers.
+pub async fn change_password(
+    user: AuthenticatedUser,
+    State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
+    http_req: Request,
+) -> Result<axum::http::StatusCode, AppError> {
+    // Cap the body before deserialising so a malicious authenticated caller
+    // cannot buffer a multi-MB payload behind the bearer gate.
+    let body = to_bytes(http_req.into_body(), MAX_CHANGE_PASSWORD_BODY_BYTES)
+        .await
+        .map_err(|_| AppError::BadRequest("request body too large".into()))?;
+    let req: ChangePasswordRequest =
+        serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid JSON body".into()))?;
+
+    if req.new_password.is_empty() {
+        return Err(AppError::BadRequest("newPassword required".into()));
+    }
+    if req.new_password.len() > MAX_PASSWORD_LEN {
+        return Err(AppError::BadRequest("newPassword too long".into()));
+    }
+
+    // `AuthenticatedUser` already proved the user exists when this request was
+    // extracted. If the row is missing here the session is effectively invalid
+    // (hard-deleted between extraction and handler), so fall back to 401
+    // rather than leaking a 500 for what is really an auth failure.
+    let db_user = find_user_by_id(&db, &user.user_id)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+
+    let ip = client_ip.to_string();
+    let now = now_iso();
+
+    match db_user.password_hash.as_deref() {
+        Some(existing_hash) => {
+            // Change path: verify current then rotate. Bad-current-password
+            // failures write an audit row before returning 401 so brute-force
+            // probes remain observable (shape-level 400s from missing fields
+            // or policy violations are intentionally not audited).
+            let Some(current) = req.current_password.as_deref() else {
+                return Err(AppError::BadRequest(
+                    "currentPassword required to change an existing password".into(),
+                ));
+            };
+            if !password::verify(current, existing_hash)? {
+                record_auth_event(
+                    &db,
+                    Some(user.user_id.clone()),
+                    "password_change_failure",
+                    false,
+                    Some("bad_current"),
+                    Some(&ip),
+                )
+                .await;
+                return Err(AppError::Unauthorized);
+            }
+
+            // Only hash the new password once the current one is verified —
+            // keeps Argon2 CPU off the failure path so bad-currentPassword
+            // probes cannot be used as a DoS amplifier.
+            let new_hash = password::hash(&req.new_password)?;
+
+            update_password_hash(&db, &user.user_id, Some(&new_hash), &now).await?;
+            refresh::bump_token_version(&db, &user.user_id)
+                .await
+                .map_err(|e| AppError::Internal(format!("token_version bump failed: {e}")))?;
+            refresh::revoke_all_for_user(&db, &user.user_id)
+                .await
+                .map_err(|e| AppError::Internal(format!("refresh revoke failed: {e}")))?;
+
+            record_auth_event(
+                &db,
+                Some(user.user_id),
+                "password_changed",
+                true,
+                None,
+                Some(&ip),
+            )
+            .await;
+        }
+        None => {
+            // Set path: social user adding a credentials identity. No
+            // currentPassword required by design (there is none to verify).
+            //
+            // Insert the identity row *before* touching `password_hash` so a
+            // transient DB failure on the identity write cannot leave the
+            // user with a hash but no credentials identity — which would make
+            // `/api/auth/verify-credentials` unable to locate them by email.
+            let identity = UserIdentityContent {
+                user_id: user.user_id.clone(),
+                provider: CREDENTIALS_PROVIDER.into(),
+                provider_subject: db_user.email_normalised.clone(),
+                email_at_link: db_user.email.clone(),
+                created_at: now.clone(),
+            };
+            match db
+                .create::<Option<DbUserIdentity>>("user_identity")
+                .content(identity)
+                .await
+            {
+                Ok(_) => {}
+                Err(err) if is_unique_constraint_error(&err.to_string()) => {
+                    // UNIQUE here is idempotent only if the existing
+                    // credentials identity already belongs to this user.
+                    // `user.email_normalised` is not unique across users, so
+                    // the conflicting row may belong to a different account
+                    // that already linked credentials for this email. In that
+                    // case, rotating the hash on this user would leave them
+                    // with a password hash but no credentials identity while
+                    // `/api/auth/verify-credentials` continues to resolve the
+                    // email to the other account — refuse instead.
+                    let existing =
+                        find_identity(&db, CREDENTIALS_PROVIDER, &db_user.email_normalised)
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::Internal(
+                                    "credentials identity insert reported a unique conflict, \
+                                     but no existing identity could be loaded"
+                                        .into(),
+                                )
+                            })?;
+                    if existing.user_id != user.user_id {
+                        return Err(AppError::Conflict(
+                            "email already has credentials on another account".into(),
+                        ));
+                    }
+                    // Same user — prior set attempt already inserted the
+                    // identity, so rotating the hash below is the correct
+                    // idempotent outcome.
+                }
+                Err(err) => return Err(err.into()),
+            }
+
+            let new_hash = password::hash(&req.new_password)?;
+            update_password_hash(&db, &user.user_id, Some(&new_hash), &now).await?;
+
+            refresh::bump_token_version(&db, &user.user_id)
+                .await
+                .map_err(|e| AppError::Internal(format!("token_version bump failed: {e}")))?;
+
+            record_auth_event(
+                &db,
+                Some(user.user_id),
+                "password_changed",
+                true,
+                Some("set"),
+                Some(&ip),
+            )
+            .await;
+        }
+    }
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+async fn update_password_hash(
+    db: &DbConn,
+    user_id: &str,
+    new_hash: Option<&str>,
+    now_rfc3339: &str,
+) -> Result<(), AppError> {
+    db.query(
+        "UPDATE $id SET password_hash = $h, must_reset_password = false, updated_at = $now",
+    )
+    .bind(("id", RecordId::new("user", user_id.to_string())))
+    .bind(("h", new_hash.map(str::to_string)))
+    .bind(("now", now_rfc3339.to_string()))
+    .await?
+    .check()?;
+    Ok(())
 }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
