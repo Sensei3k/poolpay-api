@@ -1903,7 +1903,10 @@ async fn update_admin_user_role_change_rejects_in_flight_access_token() {
 
     let (target_id, version) =
         seed_admin_user(&app, &super_token, "stale-token@example.com", "admin").await;
-    // Token minted against the target's current version (0).
+    // Token minted against the target's current token_version (0) — this is
+    // the JWT-invalidation cursor, distinct from `user.version` (optimistic
+    // concurrency). The role-change below bumps `token_version` so this
+    // access token stops verifying.
     let target_token = verifier.mint_access(&target_id, "admin", 0).expect("mint");
 
     // Promote target to super_admin — bumps token_version.
