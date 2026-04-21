@@ -22,7 +22,8 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    body::to_bytes,
+    extract::{Path, Request, State},
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,12 @@ use crate::db::DbConn;
 const CREDENTIALS_PROVIDER: &str = "credentials";
 const MAX_EMAIL_LEN: usize = 320;
 const MAX_PASSWORD_LEN: usize = 1024;
+// Hard ceiling on inbound JSON bodies for admin-user endpoints. Even though
+// these routes sit behind `SuperAdminUser`, a malicious or compromised caller
+// shouldn't be able to force multi-MB allocations into `serde_json` before
+// field-length checks run. 8 KiB comfortably fits email (320) + password
+// (1024) + role/status + JSON framing with room to spare.
+const MAX_ADMIN_USER_BODY_BYTES: usize = 8 * 1024;
 
 // ── Request / response DTOs ───────────────────────────────────────────────────
 
@@ -108,8 +115,17 @@ impl AdminUserResponse {
 pub async fn create_admin_user(
     SuperAdminUser(_): SuperAdminUser,
     State(db): State<DbConn>,
-    Json(req): Json<CreateAdminUserRequest>,
+    http_req: Request,
 ) -> Result<(StatusCode, Json<AdminUserResponse>), AppError> {
+    // Cap the body before deserialising so a super-admin caller (or a
+    // compromised token) cannot push a multi-MB payload through the `Json`
+    // extractor before per-field length guards run.
+    let body = to_bytes(http_req.into_body(), MAX_ADMIN_USER_BODY_BYTES)
+        .await
+        .map_err(|_| AppError::BadRequest("request body too large".into()))?;
+    let req: CreateAdminUserRequest = serde_json::from_slice(&body)
+        .map_err(|_| AppError::BadRequest("invalid JSON body".into()))?;
+
     let email = req.email.trim().to_string();
     if email.is_empty() {
         return Err(AppError::BadRequest("email required".into()));
@@ -223,8 +239,17 @@ pub async fn update_admin_user(
     SuperAdminUser(caller): SuperAdminUser,
     State(db): State<DbConn>,
     Path(id): Path<EntityId>,
-    Json(req): Json<UpdateAdminUserRequest>,
+    http_req: Request,
 ) -> Result<Json<AdminUserResponse>, AppError> {
+    // Same rationale as `create_admin_user`: bound the pre-parse body so
+    // a caller cannot force `serde_json` to buffer a large payload behind
+    // the super-admin gate.
+    let body = to_bytes(http_req.into_body(), MAX_ADMIN_USER_BODY_BYTES)
+        .await
+        .map_err(|_| AppError::BadRequest("request body too large".into()))?;
+    let req: UpdateAdminUserRequest = serde_json::from_slice(&body)
+        .map_err(|_| AppError::BadRequest("invalid JSON body".into()))?;
+
     if caller.user_id == id.as_str() {
         return Err(AppError::Forbidden(
             "super_admins cannot modify their own record".into(),
