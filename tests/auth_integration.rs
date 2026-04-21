@@ -1342,6 +1342,22 @@ async fn change_password_rejects_empty_new_password() {
 }
 
 #[tokio::test]
+async fn change_password_rejects_whitespace_only_new_password() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let access = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({
+        "currentPassword": BOOTSTRAP_PASSWORD,
+        "newPassword": "      ",
+    });
+    let resp = call(app, change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn change_password_rejects_oversized_new_password() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let admin_id = bootstrap_admin_id(&db).await;
@@ -1708,6 +1724,21 @@ async fn create_admin_user_rejects_empty_password() {
     let body = serde_json::json!({
         "email": "blank-pwd@example.com",
         "initialPassword": "",
+        "role": "admin",
+    });
+    let resp = call(app, admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_admin_user_rejects_whitespace_only_password() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "ws-pwd@example.com",
+        "initialPassword": "      ",
         "role": "admin",
     });
     let resp = call(app, admin_users_post_req(&super_token, &body)).await;

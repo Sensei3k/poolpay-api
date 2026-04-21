@@ -117,7 +117,7 @@ pub async fn create_admin_user(
     if email.len() > MAX_EMAIL_LEN {
         return Err(AppError::BadRequest("email too long".into()));
     }
-    if req.initial_password.is_empty() {
+    if req.initial_password.trim().is_empty() {
         return Err(AppError::BadRequest("initialPassword required".into()));
     }
     if req.initial_password.len() > MAX_PASSWORD_LEN {

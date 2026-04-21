@@ -403,7 +403,7 @@ pub async fn change_password(
     let req: ChangePasswordRequest =
         serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid JSON body".into()))?;
 
-    if req.new_password.is_empty() {
+    if req.new_password.trim().is_empty() {
         return Err(AppError::BadRequest("newPassword required".into()));
     }
     if req.new_password.len() > MAX_PASSWORD_LEN {
