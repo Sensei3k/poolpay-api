@@ -2829,3 +2829,47 @@ async fn seed_dummy_admins_restores_missing_admin1_grant_on_restart() {
     assert_eq!(grants, 1, "restart must restore admin1's fixture grant");
 }
 
+#[tokio::test]
+async fn seed_dummy_admins_skips_grant_when_fixture_user_is_disabled() {
+    // If the fixture admin1 was disabled via the admin UI (soft-deleted or
+    // status=disabled) after the first seed, a subsequent seed must NOT
+    // award a fresh `group_admin` grant to that disabled user — the fixture
+    // is no longer in a usable state, and silently granting would mask the
+    // fact that admin1 has been taken offline.
+    let (_app, db) = test_app().await;
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("first seed");
+
+    // Soft-delete admin1 and wipe the fixture grant to mirror a "disabled
+    // admin + stripped grant" state on the second boot.
+    db.query(
+        "UPDATE user \
+         SET status = 'disabled', deleted_at = '2026-04-22T00:00:00Z' \
+         WHERE email_normalised = 'admin1@poolpay.test'",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    db.query("DELETE group_admin WHERE group_id = '1'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("second seed tolerates disabled fixture admin");
+
+    let grants = count_rows(
+        &db,
+        "SELECT count() FROM group_admin WHERE group_id = '1' GROUP ALL",
+    )
+    .await;
+    assert_eq!(
+        grants, 0,
+        "disabled fixture admin must not receive a restored grant"
+    );
+}
+
