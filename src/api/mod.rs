@@ -116,6 +116,10 @@ pub fn router_with_config(
             "/api/admin/users/{id}/groups/{group_id}",
             post(admin_users::grant_group_admin),
         )
+        .route(
+            "/api/admin/users/{id}/groups/{group_id}",
+            delete(admin_users::revoke_group_admin),
+        )
         // Bearer-authenticated auth endpoints. Change-password is gated by
         // the `AuthenticatedUser` extractor — mounting it on the unrestricted
         // router avoids double-charging tower-governor's per-IP bucket for

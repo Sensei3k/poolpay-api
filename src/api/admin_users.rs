@@ -703,3 +703,81 @@ pub async fn grant_group_admin(
     ))
 }
 
+// ── DELETE /api/admin/users/:id/groups/:group_id (BE-8 PR 4) ──────────────────
+
+/// Super-admin revokes a group-admin grant previously issued on this
+/// target user. The mutation is two-part: remove the `group_admin`
+/// row, then bump the target's `token_version`.
+///
+/// The token-version bump is load-bearing. Scope shrank — any
+/// in-flight access token the target still holds would otherwise let
+/// them act on the newly-revoked group for up to one access-token
+/// TTL. Bumping forces re-verification against the fresh DB state
+/// on the next call. This endpoint does **not** revoke refresh
+/// tokens; the user still has a valid session, they just can't
+/// operate on this group anymore.
+///
+/// Returns 404 if no matching grant exists — the deletion is
+/// idempotent from the caller's perspective but the handler doesn't
+/// silently swallow unknown rows, because a missing row in the audit
+/// trail later would be the signature of an out-of-band manual
+/// revoke that ops should see, not something we paper over here.
+pub async fn revoke_group_admin(
+    SuperAdminUser(caller): SuperAdminUser,
+    State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
+    Path((user_id, group_id)): Path<(EntityId, EntityId)>,
+) -> Result<StatusCode, AppError> {
+    // Delete the join row via a guarded query so we can distinguish
+    // "row did not exist" (→ 404) from a permission/connectivity
+    // failure. `DELETE ... RETURN BEFORE` echoes the matched rows so
+    // `rows.is_empty()` is the unambiguous 404 signal.
+    let mut resp = db
+        .query(
+            "DELETE FROM group_admin \
+             WHERE user_id = $uid AND group_id = $gid \
+             RETURN BEFORE",
+        )
+        .bind(("uid", user_id.clone()))
+        .bind(("gid", group_id.clone()))
+        .await?
+        .check()?;
+    let deleted: Vec<DbGroupAdmin> = resp.take(0)?;
+    if deleted.is_empty() {
+        return Err(AppError::NotFound(format!(
+            "user {user_id} has no group-admin grant on group {group_id}"
+        )));
+    }
+
+    // Bump target's `token_version` so in-flight access tokens
+    // reject on the next verify cycle. The bump is relative to the
+    // current DB value (not a stale snapshot) so a concurrent
+    // refresh-reuse detection or PATCH role change cannot be
+    // clobbered into a lower counter.
+    let _ = db
+        .query(
+            "UPDATE $id SET \
+                 token_version = token_version + 1, \
+                 updated_at = $now \
+             WHERE deleted_at IS NONE",
+        )
+        .bind(("id", RecordId::new("user", user_id.clone())))
+        .bind(("now", now_iso()))
+        .await?
+        .check()?;
+
+    let ip = client_ip.to_string();
+    record_auth_event(
+        &db,
+        Some(user_id.clone()),
+        Some(caller.user_id.clone()),
+        "group_admin_revoked",
+        true,
+        Some(&format!("group:{group_id}")),
+        Some(&ip),
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
