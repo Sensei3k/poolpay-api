@@ -2694,3 +2694,182 @@ async fn revoke_group_admin_replay_after_success_returns_404() {
     assert_eq!(second.status(), StatusCode::NOT_FOUND);
 }
 
+// ── Dev-only dummy admin fixtures ─────────────────────────────────────────────
+//
+// Tests drive the seed path via the boolean-flag helper instead of toggling
+// `SEED_ON_EMPTY` at runtime. Flipping a process-wide env var inside a
+// parallel test binary races with any concurrent `std::env::var` read in
+// other tests or async tasks — `set_var`'s safety precondition only holds
+// when there are no concurrent readers, which we can't guarantee in an
+// async test harness. The flag-taking helper sidesteps the hazard entirely.
+
+async fn count_rows(db: &poolpay::db::DbConn, query: &str) -> i64 {
+    let mut resp = db.query(query).await.unwrap().check().unwrap();
+    let rows: Vec<i64> = resp.take("count").unwrap_or_default();
+    rows.first().copied().unwrap_or(0)
+}
+
+#[tokio::test]
+async fn seed_dummy_admins_creates_both_admins_and_grant_for_admin1() {
+    let (_app, db) = test_app().await;
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("seed_dummy_admins");
+
+    let admins = count_rows(
+        &db,
+        "SELECT count() FROM user \
+         WHERE email_normalised IN ['admin1@poolpay.test', 'admin2@poolpay.test'] \
+         AND role = 'admin' AND status = 'active' AND must_reset_password = false \
+         GROUP ALL",
+    )
+    .await;
+    assert_eq!(admins, 2, "both fixture admins must be created as active admin-role users");
+
+    let grants = count_rows(
+        &db,
+        "SELECT count() FROM group_admin \
+         WHERE group_id = '1' AND user_id IN (\
+             SELECT VALUE meta::id(id) FROM user WHERE email_normalised = 'admin1@poolpay.test'\
+         ) GROUP ALL",
+    )
+    .await;
+    assert_eq!(grants, 1, "admin1 must receive exactly one fixture grant on group 1");
+
+    let admin2_grants = count_rows(
+        &db,
+        "SELECT count() FROM group_admin \
+         WHERE user_id IN (\
+             SELECT VALUE meta::id(id) FROM user WHERE email_normalised = 'admin2@poolpay.test'\
+         ) GROUP ALL",
+    )
+    .await;
+    assert_eq!(admin2_grants, 0, "admin2 must not receive any fixture grants");
+}
+
+#[tokio::test]
+async fn seed_dummy_admins_is_idempotent_across_restarts() {
+    let (_app, db) = test_app().await;
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("first seed");
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("second seed (simulated restart)");
+
+    let admins = count_rows(
+        &db,
+        "SELECT count() FROM user \
+         WHERE email_normalised IN ['admin1@poolpay.test', 'admin2@poolpay.test'] \
+         GROUP ALL",
+    )
+    .await;
+    assert_eq!(admins, 2, "restart must not duplicate fixture admin rows");
+
+    let grants = count_rows(
+        &db,
+        "SELECT count() FROM group_admin WHERE group_id = '1' GROUP ALL",
+    )
+    .await;
+    assert_eq!(grants, 1, "restart must not duplicate fixture grants");
+}
+
+#[tokio::test]
+async fn seed_dummy_admins_is_noop_without_flag() {
+    let (_app, db) = test_app().await;
+    // Verify the guard short-circuits rather than relying on idempotency
+    // alone, so a production boot without the flag is provably silent.
+    bootstrap::seed_dummy_admins_with_flag(&db, false)
+        .await
+        .expect("seed_dummy_admins noop");
+
+    let admins = count_rows(
+        &db,
+        "SELECT count() FROM user \
+         WHERE email_normalised IN ['admin1@poolpay.test', 'admin2@poolpay.test'] \
+         GROUP ALL",
+    )
+    .await;
+    assert_eq!(admins, 0, "fixture admins must not be seeded without SEED_ON_EMPTY=true");
+}
+
+#[tokio::test]
+async fn seed_dummy_admins_restores_missing_admin1_grant_on_restart() {
+    // Idempotency contract: if admin1 already exists but the `group_admin`
+    // grant was manually deleted (partial cleanup, ops intervention), a
+    // subsequent seed must restore the grant rather than silently skip it.
+    let (_app, db) = test_app().await;
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("first seed");
+
+    // Wipe admin1's grant without touching the user row, simulating a manual
+    // cleanup that left the fixture admin intact but stripped the grant.
+    db.query("DELETE group_admin WHERE group_id = '1'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let grants_after_wipe = count_rows(
+        &db,
+        "SELECT count() FROM group_admin WHERE group_id = '1' GROUP ALL",
+    )
+    .await;
+    assert_eq!(grants_after_wipe, 0, "precondition: grant wiped");
+
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("second seed restores grant");
+
+    let grants = count_rows(
+        &db,
+        "SELECT count() FROM group_admin WHERE group_id = '1' GROUP ALL",
+    )
+    .await;
+    assert_eq!(grants, 1, "restart must restore admin1's fixture grant");
+}
+
+#[tokio::test]
+async fn seed_dummy_admins_skips_grant_when_fixture_user_is_disabled() {
+    // If the fixture admin1 was disabled via the admin UI (soft-deleted or
+    // status=disabled) after the first seed, a subsequent seed must NOT
+    // award a fresh `group_admin` grant to that disabled user — the fixture
+    // is no longer in a usable state, and silently granting would mask the
+    // fact that admin1 has been taken offline.
+    let (_app, db) = test_app().await;
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("first seed");
+
+    // Soft-delete admin1 and wipe the fixture grant to mirror a "disabled
+    // admin + stripped grant" state on the second boot.
+    db.query(
+        "UPDATE user \
+         SET status = 'disabled', deleted_at = '2026-04-22T00:00:00Z' \
+         WHERE email_normalised = 'admin1@poolpay.test'",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    db.query("DELETE group_admin WHERE group_id = '1'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("second seed tolerates disabled fixture admin");
+
+    let grants = count_rows(
+        &db,
+        "SELECT count() FROM group_admin WHERE group_id = '1' GROUP ALL",
+    )
+    .await;
+    assert_eq!(
+        grants, 0,
+        "disabled fixture admin must not receive a restored grant"
+    );
+}
+

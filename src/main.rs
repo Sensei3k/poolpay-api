@@ -100,6 +100,14 @@ async fn main() {
         error!(error = %e, "Bootstrap admin seeding failed");
     }
 
+    // Dev-only fixture admins (admin1/admin2). Only runs when
+    // SEED_ON_EMPTY=true and APP_ENV is development or test, so production
+    // boots never touch this path. Failures are logged but do not abort
+    // startup — the real super-admin is already in place.
+    if let Err(e) = auth::bootstrap::seed_dummy_admins(&surreal_db).await {
+        error!(error = %e, "Dummy admin seeding failed");
+    }
+
     // Spawn the Axum HTTP server.
     // Monitored below — if the server dies the process exits rather than
     // silently running without an API.
