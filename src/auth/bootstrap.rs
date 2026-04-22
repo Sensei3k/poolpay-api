@@ -159,6 +159,13 @@ pub async fn seed_dummy_admins(db: &DbConn) -> Result<(), surrealdb::Error> {
 /// `SEED_ON_EMPTY` + `APP_ENV` gates; tests call it directly so they never
 /// have to mutate env vars at runtime (which would race with concurrent
 /// `std::env::var` reads elsewhere in the suite).
+///
+/// Marked `#[doc(hidden)]` — `pub` is required because integration tests
+/// live in the external `tests/` crate, but it must not be treated as part
+/// of the public surface. Production code should call `seed_dummy_admins`
+/// so the env-based safety gates are always evaluated. Mirrors the pattern
+/// used by `auth::hmac::sign_for_testing`.
+#[doc(hidden)]
 pub async fn seed_dummy_admins_with_flag(
     db: &DbConn,
     enabled: bool,
@@ -240,11 +247,42 @@ async fn ensure_admin_fixture(
         .check()?;
     let existing: Vec<DbUserIdentity> = resp.take(0).unwrap_or_default();
     if let Some(identity) = existing.into_iter().next() {
-        info!(
-            email_redacted = redact(email),
-            "fixture admin already seeded — reusing user_id"
-        );
-        return Ok(Some(identity.user_id));
+        // Don't blindly trust the identity pointer — the underlying `user`
+        // row may have been soft-deleted or disabled via the admin UI since
+        // the fixture was first seeded. Reusing a stale pointer would let
+        // `ensure_group_admin_grant` award a grant to a non-admin, and
+        // silently mask a broken fixture. Verify the user is still an
+        // active admin before returning its id.
+        let linked: Option<DbUser> = db.select(("user", identity.user_id.as_str())).await?;
+        return match linked {
+            Some(u)
+                if u.deleted_at.is_none()
+                    && u.status == "active"
+                    && matches!(u.role.as_str(), "admin" | "super_admin") =>
+            {
+                info!(
+                    email_redacted = redact(email),
+                    "fixture admin already seeded — reusing user_id"
+                );
+                Ok(Some(identity.user_id))
+            }
+            Some(_) => {
+                warn!(
+                    email_redacted = redact(email),
+                    user_id = identity.user_id.as_str(),
+                    "fixture admin identity points at a disabled/non-admin user — skipping grant"
+                );
+                Ok(None)
+            }
+            None => {
+                warn!(
+                    email_redacted = redact(email),
+                    user_id = identity.user_id.as_str(),
+                    "fixture admin identity points at a missing user — skipping grant"
+                );
+                Ok(None)
+            }
+        };
     }
 
     let password_hash = match password::hash(password_plain) {
