@@ -138,10 +138,31 @@ fn redact(email: &str) -> String {
 ///
 /// Both use `must_reset_password: false` so login is one-shot, unlike the
 /// bootstrap super-admin. Idempotent on every email: a restart re-checks
-/// `user_identity` and skips anything already present. Gated on
-/// `SEED_ON_EMPTY=true` so production boots never execute this path.
+/// `user_identity`, skips already-present rows, and re-asserts admin1's
+/// fixture grant even when the user already existed (so a manual
+/// `group_admin` delete is restored by a restart). Gated on
+/// `SEED_ON_EMPTY=true` **and** `APP_ENV` ∈ {`development`, `test`} so any
+/// other deploy — including unset `APP_ENV` — fails closed. This mirrors
+/// the `/api/test/reset` gate in `src/api/mod.rs`.
 pub async fn seed_dummy_admins(db: &DbConn) -> Result<(), surrealdb::Error> {
-    if std::env::var("SEED_ON_EMPTY").as_deref() != Ok("true") {
+    let flag_enabled = std::env::var("SEED_ON_EMPTY").as_deref() == Ok("true");
+    let env_allows_fixtures = matches!(
+        std::env::var("APP_ENV").as_deref(),
+        Ok("development" | "test")
+    );
+    seed_dummy_admins_with_flag(db, flag_enabled && env_allows_fixtures).await
+}
+
+/// Internal entry point that takes an explicit boolean instead of reading
+/// process env. `seed_dummy_admins` calls this after evaluating the
+/// `SEED_ON_EMPTY` + `APP_ENV` gates; tests call it directly so they never
+/// have to mutate env vars at runtime (which would race with concurrent
+/// `std::env::var` reads elsewhere in the suite).
+pub async fn seed_dummy_admins_with_flag(
+    db: &DbConn,
+    enabled: bool,
+) -> Result<(), surrealdb::Error> {
+    if !enabled {
         return Ok(());
     }
 
@@ -158,12 +179,15 @@ pub async fn seed_dummy_admins(db: &DbConn) -> Result<(), surrealdb::Error> {
     };
 
     for (idx, email) in DUMMY_ADMIN_EMAILS.iter().enumerate() {
-        let created =
-            ensure_admin_fixture(db, email, DUMMY_ADMIN_PASSWORD, &super_admin_id).await?;
+        let user_id = ensure_admin_fixture(db, email, DUMMY_ADMIN_PASSWORD, &super_admin_id)
+            .await?;
         // Only admin1 (index 0) gets the group grant — admin2 stays
         // ungranted so the dashboard has a target for testing grant creation.
+        // Re-asserting the grant on every run (not just when the user was
+        // created this run) restores it after manual cleanup / partial prior
+        // runs; `ensure_group_admin_grant` is idempotent on unique conflict.
         if idx == 0 {
-            if let Some(user_id) = created {
+            if let Some(user_id) = user_id {
                 ensure_group_admin_grant(
                     db,
                     &user_id,
@@ -190,9 +214,12 @@ async fn find_super_admin_id(db: &DbConn) -> Result<Option<String>, surrealdb::E
     Ok(users.into_iter().next().map(|u| record_id_to_string(u.id)))
 }
 
-/// Returns the newly-created user id if the fixture row was inserted; `None`
-/// if the email already existed (so the caller can skip follow-up writes
-/// like group grants and know this run was a no-op for that email).
+/// Returns the fixture admin's user id whether the row was inserted this
+/// run or already existed. Callers use this id to re-assert follow-up
+/// writes (like admin1's `group_admin` grant) so idempotency holds even
+/// when the user row survived but a grant was manually deleted. `Ok(None)`
+/// is reserved for skip cases where we could not produce a usable id
+/// (e.g. password hash failed, `create` returned no record).
 async fn ensure_admin_fixture(
     db: &DbConn,
     email: &str,
@@ -211,12 +238,12 @@ async fn ensure_admin_fixture(
         .await?
         .check()?;
     let existing: Vec<DbUserIdentity> = resp.take(0).unwrap_or_default();
-    if !existing.is_empty() {
+    if let Some(identity) = existing.into_iter().next() {
         info!(
             email_redacted = redact(email),
-            "fixture admin already seeded — skipping"
+            "fixture admin already seeded — reusing user_id"
         );
-        return Ok(None);
+        return Ok(Some(identity.user_id));
     }
 
     let password_hash = match password::hash(password_plain) {
@@ -260,6 +287,10 @@ async fn ensure_admin_fixture(
         }
     };
 
+    // Mirror `admin_users::create_admin_user`: if the identity insert fails
+    // or returns no record, roll back the user row we just created so we
+    // don't leave an orphan that a subsequent run would skip past (or
+    // worse, duplicate via non-unique `email_normalised`).
     let identity = UserIdentityContent {
         user_id: user_id.clone(),
         provider: CREDENTIALS_PROVIDER.into(),
@@ -267,7 +298,30 @@ async fn ensure_admin_fixture(
         email_at_link: email.to_string(),
         created_at: now.clone(),
     };
-    let _: Option<DbUserIdentity> = db.create("user_identity").content(identity).await?;
+    let identity_result: Result<Option<DbUserIdentity>, _> =
+        db.create("user_identity").content(identity).await;
+    match identity_result {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            warn!(
+                email_redacted = redact(email),
+                user_id = user_id.as_str(),
+                "fixture admin identity create returned no record — rolling back user"
+            );
+            rollback_fixture_user(db, &user_id).await;
+            return Ok(None);
+        }
+        Err(e) => {
+            warn!(
+                email_redacted = redact(email),
+                user_id = user_id.as_str(),
+                error = %e,
+                "fixture admin identity create failed — rolling back user"
+            );
+            rollback_fixture_user(db, &user_id).await;
+            return Err(e);
+        }
+    }
 
     let event = AuthEventContent {
         user_id: Some(user_id.clone()),
@@ -286,6 +340,21 @@ async fn ensure_admin_fixture(
         "fixture admin created"
     );
     Ok(Some(user_id))
+}
+
+/// Best-effort cleanup for an orphan user row left behind when
+/// `user_identity` fails to insert. Mirrors `admin_users::rollback_user`:
+/// the caller has already decided to bail, so a secondary failure is
+/// logged but not surfaced.
+async fn rollback_fixture_user(db: &DbConn, user_id: &str) {
+    let cleanup: Result<Option<DbUser>, _> = db.delete(("user", user_id)).await;
+    if let Err(e) = cleanup {
+        warn!(
+            error = %e,
+            user_id,
+            "fixture admin rollback failed after identity error — orphan user row"
+        );
+    }
 }
 
 async fn ensure_group_admin_grant(
@@ -314,7 +383,7 @@ async fn ensure_group_admin_grant(
     };
     let insert: Result<Option<DbGroupAdmin>, _> = db.create("group_admin").content(content).await;
     match insert {
-        Ok(_) => {
+        Ok(Some(_)) => {
             let event = AuthEventContent {
                 user_id: Some(user_id.to_string()),
                 actor_id: Some(super_admin_id.to_string()),
@@ -327,6 +396,18 @@ async fn ensure_group_admin_grant(
             };
             let _: Option<DbAuthEvent> = db.create("auth_event").content(event).await?;
             info!(user_id, group_id, "fixture group_admin grant created");
+            Ok(())
+        }
+        // `create(...).content(...)` returning `Ok(None)` with no error is
+        // treated as an internal anomaly elsewhere in the codebase — log
+        // loudly so ops can spot it, but don't emit a `group_admin_granted`
+        // audit event or fail the boot; the fixture seed is best-effort.
+        Ok(None) => {
+            warn!(
+                user_id,
+                group_id,
+                "fixture group_admin grant returned no record — skipping audit event"
+            );
             Ok(())
         }
         Err(e) if is_unique_constraint_error(&e.to_string()) => {

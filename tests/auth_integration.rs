@@ -2695,21 +2695,13 @@ async fn revoke_group_admin_replay_after_success_returns_404() {
 }
 
 // ── Dev-only dummy admin fixtures ─────────────────────────────────────────────
-
-/// Toggle `SEED_ON_EMPTY` inside the shared env lock. Every dummy-admin test
-/// goes through this so we never race with `init_env`'s writer window or
-/// leave the flag set for the next test.
-fn set_seed_on_empty(enabled: bool) {
-    let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
-    // Safety: serialised by `env_lock` — matches the pattern in `init_env`.
-    unsafe {
-        if enabled {
-            std::env::set_var("SEED_ON_EMPTY", "true");
-        } else {
-            std::env::remove_var("SEED_ON_EMPTY");
-        }
-    }
-}
+//
+// Tests drive the seed path via the boolean-flag helper instead of toggling
+// `SEED_ON_EMPTY` at runtime. Flipping a process-wide env var inside a
+// parallel test binary races with any concurrent `std::env::var` read in
+// other tests or async tasks — `set_var`'s safety precondition only holds
+// when there are no concurrent readers, which we can't guarantee in an
+// async test harness. The flag-taking helper sidesteps the hazard entirely.
 
 async fn count_rows(db: &poolpay::db::DbConn, query: &str) -> i64 {
     let mut resp = db.query(query).await.unwrap().check().unwrap();
@@ -2720,11 +2712,9 @@ async fn count_rows(db: &poolpay::db::DbConn, query: &str) -> i64 {
 #[tokio::test]
 async fn seed_dummy_admins_creates_both_admins_and_grant_for_admin1() {
     let (_app, db) = test_app().await;
-    set_seed_on_empty(true);
-    bootstrap::seed_dummy_admins(&db)
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
         .await
         .expect("seed_dummy_admins");
-    set_seed_on_empty(false);
 
     let admins = count_rows(
         &db,
@@ -2760,14 +2750,12 @@ async fn seed_dummy_admins_creates_both_admins_and_grant_for_admin1() {
 #[tokio::test]
 async fn seed_dummy_admins_is_idempotent_across_restarts() {
     let (_app, db) = test_app().await;
-    set_seed_on_empty(true);
-    bootstrap::seed_dummy_admins(&db)
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
         .await
         .expect("first seed");
-    bootstrap::seed_dummy_admins(&db)
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
         .await
         .expect("second seed (simulated restart)");
-    set_seed_on_empty(false);
 
     let admins = count_rows(
         &db,
@@ -2789,11 +2777,9 @@ async fn seed_dummy_admins_is_idempotent_across_restarts() {
 #[tokio::test]
 async fn seed_dummy_admins_is_noop_without_flag() {
     let (_app, db) = test_app().await;
-    // `SEED_ON_EMPTY` is unset in the normal test env — verify the guard
-    // short-circuits rather than relying on idempotency alone, so a
-    // production boot without the flag is provably silent.
-    set_seed_on_empty(false);
-    bootstrap::seed_dummy_admins(&db)
+    // Verify the guard short-circuits rather than relying on idempotency
+    // alone, so a production boot without the flag is provably silent.
+    bootstrap::seed_dummy_admins_with_flag(&db, false)
         .await
         .expect("seed_dummy_admins noop");
 
@@ -2805,5 +2791,41 @@ async fn seed_dummy_admins_is_noop_without_flag() {
     )
     .await;
     assert_eq!(admins, 0, "fixture admins must not be seeded without SEED_ON_EMPTY=true");
+}
+
+#[tokio::test]
+async fn seed_dummy_admins_restores_missing_admin1_grant_on_restart() {
+    // Idempotency contract: if admin1 already exists but the `group_admin`
+    // grant was manually deleted (partial cleanup, ops intervention), a
+    // subsequent seed must restore the grant rather than silently skip it.
+    let (_app, db) = test_app().await;
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("first seed");
+
+    // Wipe admin1's grant without touching the user row, simulating a manual
+    // cleanup that left the fixture admin intact but stripped the grant.
+    db.query("DELETE group_admin WHERE group_id = '1'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let grants_after_wipe = count_rows(
+        &db,
+        "SELECT count() FROM group_admin WHERE group_id = '1' GROUP ALL",
+    )
+    .await;
+    assert_eq!(grants_after_wipe, 0, "precondition: grant wiped");
+
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("second seed restores grant");
+
+    let grants = count_rows(
+        &db,
+        "SELECT count() FROM group_admin WHERE group_id = '1' GROUP ALL",
+    )
+    .await;
+    assert_eq!(grants, 1, "restart must restore admin1's fixture grant");
 }
 
