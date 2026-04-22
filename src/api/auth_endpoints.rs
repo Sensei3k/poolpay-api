@@ -26,7 +26,7 @@ use crate::auth::jwt::SharedVerifier;
 use crate::auth::password;
 use crate::auth::rate_limit::{ClientIp, CredentialFailureLimiter};
 use crate::auth::refresh::{self, RefreshError};
-use crate::db::DbConn;
+use crate::db::{DbConn, is_unique_constraint_error};
 use surrealdb::types::RecordId;
 
 const CREDENTIALS_PROVIDER: &str = "credentials";
@@ -324,11 +324,6 @@ fn reject_if_not_active(user: &DbUser) -> Result<(), AppError> {
         return Err(AppError::Forbidden("user is not active".into()));
     }
     Ok(())
-}
-
-fn is_unique_constraint_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("already contains") || lower.contains("unique") || lower.contains("duplicate")
 }
 
 async fn create_social_user(

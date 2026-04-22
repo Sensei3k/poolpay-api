@@ -37,7 +37,7 @@ use crate::auth::audit::record_auth_event;
 use crate::auth::extractors::SuperAdminUser;
 use crate::auth::password;
 use crate::auth::refresh;
-use crate::db::DbConn;
+use crate::db::{DbConn, is_unique_constraint_error};
 
 const CREDENTIALS_PROVIDER: &str = "credentials";
 const MAX_EMAIL_LEN: usize = 320;
@@ -439,11 +439,6 @@ async fn find_credentials_identity(
         .check()?;
     let rows: Vec<DbUserIdentity> = resp.take(0)?;
     Ok(rows.into_iter().next())
-}
-
-fn is_unique_constraint_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("already contains") || lower.contains("unique") || lower.contains("duplicate")
 }
 
 /// Best-effort cleanup for a user row created immediately before an

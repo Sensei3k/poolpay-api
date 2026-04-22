@@ -223,6 +223,19 @@ where
     }
 }
 
+/// Substring-based detector for SurrealDB unique-constraint violations.
+///
+/// SurrealDB surfaces UNIQUE index collisions as opaque error strings — there
+/// is no structured error variant to match on. We sniff the lowercased message
+/// for the three phrases the engine is known to use ("already contains",
+/// "unique", "duplicate"). Keeping this centralised avoids the two insert
+/// paths (`auth_endpoints::ensure_user` and `admin_users::create_admin_user`)
+/// drifting apart if SurrealDB tweaks its wording in a future release.
+pub(crate) fn is_unique_constraint_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("already contains") || lower.contains("unique") || lower.contains("duplicate")
+}
+
 // ── Fixture data ──────────────────────────────────────────────────────────────
 
 /// The seeded group ID used across all fixtures.
