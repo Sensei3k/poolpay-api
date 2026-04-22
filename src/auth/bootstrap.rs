@@ -3,6 +3,7 @@
 //! Runs once at startup and on demand in tests. Idempotent: if any active
 //! admin user already exists, this is a no-op.
 
+use surrealdb::types::RecordId;
 use tracing::{info, warn};
 
 use crate::api::models::{
@@ -254,6 +255,15 @@ async fn ensure_admin_fixture(
     role: &str,
     super_admin_id: &str,
 ) -> Result<Option<String>, surrealdb::Error> {
+    // Defence-in-depth: `role` is only ever sourced from the in-module
+    // `DUMMY_ADMINS` `const`, but guard against a typo slipping in during
+    // future edits so a bogus role can't be silently written to `user.role`
+    // (where extractors + admin_users UPDATE queries compare against the
+    // exact strings `"admin"` / `"super_admin"`).
+    assert!(
+        matches!(role, "admin" | "super_admin"),
+        "fixture admin role must be 'admin' or 'super_admin', got {role:?}"
+    );
     let email_normalised = email.to_lowercase();
 
     let mut resp = db
@@ -280,10 +290,28 @@ async fn ensure_admin_fixture(
                     && u.status == "active"
                     && matches!(u.role.as_str(), "admin" | "super_admin") =>
             {
-                info!(
-                    email_redacted = redact(email),
-                    "fixture admin already seeded — reusing user_id"
-                );
+                // Reconcile drift: if the fixture spec now declares a role
+                // different from what's persisted (e.g. admin3 was demoted
+                // to `admin` via the UI since the last boot), restore the
+                // spec'd role so the declared fixture matrix is the source
+                // of truth. Mirrors `admin_users::update` — bump `version`
+                // for OCC and `token_version` to invalidate any live access
+                // tokens the reconciled user still holds.
+                if u.role.as_str() != role {
+                    reconcile_fixture_role(db, &identity.user_id, role).await?;
+                    info!(
+                        email_redacted = redact(email),
+                        user_id = identity.user_id.as_str(),
+                        from = u.role.as_str(),
+                        to = role,
+                        "fixture admin role drifted from spec — reconciled"
+                    );
+                } else {
+                    info!(
+                        email_redacted = redact(email),
+                        "fixture admin already seeded — reusing user_id"
+                    );
+                }
                 Ok(Some(identity.user_id))
             }
             Some(_) => {
@@ -427,6 +455,34 @@ async fn rollback_fixture_user(db: &DbConn, user_id: &str) {
             "fixture admin rollback failed after identity error — orphan user row"
         );
     }
+}
+
+/// Reconcile a persisted fixture admin's role to the spec. Used when
+/// `ensure_admin_fixture` detects that `user.role` has drifted from the
+/// `DUMMY_ADMINS` entry (typically because the UI was used to promote or
+/// demote the fixture between restarts). Bumps `version` (OCC) and
+/// `token_version` (invalidates cached access tokens) to match the
+/// semantics of the real `PATCH /api/admin/users/:id` role-change path.
+async fn reconcile_fixture_role(
+    db: &DbConn,
+    user_id: &str,
+    new_role: &str,
+) -> Result<(), surrealdb::Error> {
+    let now = now_iso();
+    db.query(
+        "UPDATE $id SET \
+             role = $role, \
+             updated_at = $now, \
+             version = version + 1, \
+             token_version = token_version + 1 \
+         WHERE deleted_at IS NONE",
+    )
+    .bind(("id", RecordId::new("user", user_id.to_string())))
+    .bind(("role", new_role.to_string()))
+    .bind(("now", now))
+    .await?
+    .check()?;
+    Ok(())
 }
 
 async fn ensure_group_admin_grant(

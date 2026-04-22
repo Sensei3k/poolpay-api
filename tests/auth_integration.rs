@@ -2946,3 +2946,72 @@ async fn seed_dummy_admins_skips_grant_when_fixture_user_is_disabled() {
     );
 }
 
+#[tokio::test]
+async fn seed_dummy_admins_reconciles_role_drift_on_restart() {
+    // If a fixture admin was re-roled via the admin UI after first seed
+    // (e.g. admin3 demoted from super_admin to admin), the next restart
+    // must restore the role declared in DUMMY_ADMINS so the fixture matrix
+    // stays the source of truth. Also bumps token_version so any cached
+    // access token the drifted user held is invalidated.
+    let (_app, db) = test_app().await;
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("first seed");
+
+    // Drift admin3 from super_admin -> admin, simulating a manual demotion
+    // via PATCH /api/admin/users/:id.
+    let admin3_tv_before: Vec<i64> = db
+        .query(
+            "SELECT VALUE token_version FROM user \
+             WHERE email_normalised = 'admin3@poolpay.test'",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap()
+        .take(0)
+        .unwrap();
+    let tv_before = *admin3_tv_before.first().expect("admin3 token_version");
+    db.query(
+        "UPDATE user SET role = 'admin' \
+         WHERE email_normalised = 'admin3@poolpay.test'",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("second seed reconciles role");
+
+    let super_admin_rows = count_rows(
+        &db,
+        "SELECT count() FROM user \
+         WHERE email_normalised = 'admin3@poolpay.test' \
+         AND role = 'super_admin' AND status = 'active' \
+         GROUP ALL",
+    )
+    .await;
+    assert_eq!(
+        super_admin_rows, 1,
+        "admin3 must be reconciled back to super_admin after drift"
+    );
+
+    let admin3_tv_after: Vec<i64> = db
+        .query(
+            "SELECT VALUE token_version FROM user \
+             WHERE email_normalised = 'admin3@poolpay.test'",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap()
+        .take(0)
+        .unwrap();
+    let tv_after = *admin3_tv_after.first().expect("admin3 token_version");
+    assert!(
+        tv_after > tv_before,
+        "role reconciliation must bump token_version (before={tv_before}, after={tv_after})"
+    );
+}
