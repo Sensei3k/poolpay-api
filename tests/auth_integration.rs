@@ -2546,6 +2546,58 @@ async fn revoke_group_admin_bumps_target_token_version() {
     );
 }
 
+/// The bump only matters if an in-flight token minted *before* the
+/// revoke actually gets rejected on the next verify. This is a
+/// regression test for the end-to-end guarantee, not just the DB
+/// counter delta: mint a target access token at `tokenVersion=0`,
+/// grant + revoke, then hit a bearer-gated route with the same
+/// stale token and expect 401 (not 403 — the whole session is
+/// invalidated, not just the group scope).
+#[tokio::test]
+async fn revoke_group_admin_invalidates_pre_revoke_access_token() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "kick-after-revoke@example.com", "admin").await;
+    seed_test_group(&db, "kick-group").await;
+    let grant = call(
+        app.clone(),
+        group_admin_post_req(&target_id, "kick-group", &super_token),
+    )
+    .await;
+    assert_eq!(grant.status(), StatusCode::CREATED);
+
+    // Mint the target's access token *before* revoke with the
+    // current DB token_version (0 — grant does not bump).
+    let target_token = verifier.mint_access(&target_id, "admin", 0).expect("mint");
+
+    // Sanity check: the fresh token passes for the granted group
+    // through the AuthenticatedUser + require_group_scope pipeline
+    // on a router that only mounts the extractor route.
+    let test_app = extractor_app(db.clone(), verifier);
+    let before = call(test_app.clone(), bearer_get("/scope/kick-group", &target_token)).await;
+    assert_eq!(before.status(), StatusCode::NO_CONTENT);
+
+    let revoke = call(
+        app,
+        group_admin_delete_req(&target_id, "kick-group", &super_token),
+    )
+    .await;
+    assert_eq!(revoke.status(), StatusCode::NO_CONTENT);
+
+    // The pre-revoke token must now 401 — `AuthenticatedUser`
+    // re-reads token_version from the DB on every call and
+    // rejects the mismatch before group-scope evaluation runs.
+    let after = call(test_app, bearer_get("/scope/kick-group", &target_token)).await;
+    assert_eq!(
+        after.status(),
+        StatusCode::UNAUTHORIZED,
+        "pre-revoke token must be rejected once token_version is bumped"
+    );
+}
+
 #[tokio::test]
 async fn revoke_group_admin_without_bearer_returns_401() {
     let (app, db, _verifier) = build_app_full(lax_rate_cfg()).await;

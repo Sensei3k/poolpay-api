@@ -631,18 +631,60 @@ pub async fn grant_group_admin(
     ClientIp(client_ip): ClientIp,
     Path((user_id, group_id)): Path<(EntityId, EntityId)>,
 ) -> Result<(StatusCode, Json<GroupAdminGrantResponse>), AppError> {
+    // `ip` is bound up-front so each failure branch can emit a
+    // `success: false` audit row — incident review should see
+    // rejected grant attempts with the same attribution fidelity
+    // as successful ones (mirrors the `create_admin_user` flow
+    // added in PR 3.5).
+    let ip = client_ip.to_string();
+
     let user: Option<DbUser> = db.select(("user", user_id.as_str())).await?;
-    let user = user
-        .filter(|u| u.deleted_at.is_none())
-        .ok_or_else(|| AppError::NotFound(format!("user {user_id} does not exist")))?;
+    let user = match user.filter(|u| u.deleted_at.is_none()) {
+        Some(u) => u,
+        None => {
+            record_auth_event(
+                &db,
+                Some(user_id.clone()),
+                Some(caller.user_id.clone()),
+                "group_admin_granted",
+                false,
+                Some("unknown_user"),
+                Some(&ip),
+            )
+            .await;
+            return Err(AppError::NotFound(format!(
+                "user {user_id} does not exist"
+            )));
+        }
+    };
 
     if user.status != "active" {
+        record_auth_event(
+            &db,
+            Some(user_id.clone()),
+            Some(caller.user_id.clone()),
+            "group_admin_granted",
+            false,
+            Some("target_not_active"),
+            Some(&ip),
+        )
+        .await;
         return Err(AppError::Conflict(format!(
             "user {user_id} is not active (status: {})",
             user.status
         )));
     }
     if user.role != "admin" {
+        record_auth_event(
+            &db,
+            Some(user_id.clone()),
+            Some(caller.user_id.clone()),
+            "group_admin_granted",
+            false,
+            Some("target_not_admin"),
+            Some(&ip),
+        )
+        .await;
         return Err(AppError::Conflict(format!(
             "group-admin grants only apply to admin-role users (target role: {})",
             user.role
@@ -650,9 +692,21 @@ pub async fn grant_group_admin(
     }
 
     let group: Option<DbGroup> = db.select(("group", group_id.as_str())).await?;
-    group
-        .filter(|g| g.deleted_at.is_none())
-        .ok_or_else(|| AppError::NotFound(format!("group {group_id} does not exist")))?;
+    if group.filter(|g| g.deleted_at.is_none()).is_none() {
+        record_auth_event(
+            &db,
+            Some(user_id.clone()),
+            Some(caller.user_id.clone()),
+            "group_admin_granted",
+            false,
+            Some("unknown_group"),
+            Some(&ip),
+        )
+        .await;
+        return Err(AppError::NotFound(format!(
+            "group {group_id} does not exist"
+        )));
+    }
 
     let now = now_iso();
     let content = GroupAdminContent {
@@ -666,21 +720,50 @@ pub async fn grant_group_admin(
     match insert {
         Ok(Some(_)) => {}
         Ok(None) => {
+            record_auth_event(
+                &db,
+                Some(user_id.clone()),
+                Some(caller.user_id.clone()),
+                "group_admin_granted",
+                false,
+                Some("insert_returned_none"),
+                Some(&ip),
+            )
+            .await;
             return Err(AppError::Internal(
                 "group_admin insert returned no row".into(),
             ));
         }
         Err(e) => {
             if is_unique_constraint_error(&e.to_string()) {
+                record_auth_event(
+                    &db,
+                    Some(user_id.clone()),
+                    Some(caller.user_id.clone()),
+                    "group_admin_granted",
+                    false,
+                    Some("duplicate_grant"),
+                    Some(&ip),
+                )
+                .await;
                 return Err(AppError::Conflict(format!(
                     "user {user_id} already has group-admin on group {group_id}"
                 )));
             }
+            record_auth_event(
+                &db,
+                Some(user_id.clone()),
+                Some(caller.user_id.clone()),
+                "group_admin_granted",
+                false,
+                Some("insert_failed"),
+                Some(&ip),
+            )
+            .await;
             return Err(e.into());
         }
     }
 
-    let ip = client_ip.to_string();
     record_auth_event(
         &db,
         Some(user_id.clone()),
@@ -728,6 +811,11 @@ pub async fn revoke_group_admin(
     ClientIp(client_ip): ClientIp,
     Path((user_id, group_id)): Path<(EntityId, EntityId)>,
 ) -> Result<StatusCode, AppError> {
+    // `ip` is bound up-front so the 404 branch can emit a
+    // `success: false` audit row — matches the symmetry PR 3.5
+    // established for admin-user mutations.
+    let ip = client_ip.to_string();
+
     // Delete the join row via a guarded query so we can distinguish
     // "row did not exist" (→ 404) from a permission/connectivity
     // failure. `DELETE ... RETURN BEFORE` echoes the matched rows so
@@ -744,29 +832,69 @@ pub async fn revoke_group_admin(
         .check()?;
     let deleted: Vec<DbGroupAdmin> = resp.take(0)?;
     if deleted.is_empty() {
+        record_auth_event(
+            &db,
+            Some(user_id.clone()),
+            Some(caller.user_id.clone()),
+            "group_admin_revoked",
+            false,
+            Some("unknown_grant"),
+            Some(&ip),
+        )
+        .await;
         return Err(AppError::NotFound(format!(
             "user {user_id} has no group-admin grant on group {group_id}"
         )));
     }
 
     // Bump target's `token_version` so in-flight access tokens
-    // reject on the next verify cycle. The bump is relative to the
-    // current DB value (not a stale snapshot) so a concurrent
-    // refresh-reuse detection or PATCH role change cannot be
-    // clobbered into a lower counter.
-    let _ = db
+    // reject on the next verify cycle. Relative to the current DB
+    // value (not a stale snapshot) so a concurrent refresh-reuse
+    // detection or PATCH role change cannot be clobbered into a
+    // lower counter.
+    //
+    // Revoke is a two-step mutation — the `group_admin` row is
+    // already gone when this runs. A bump failure here means scope
+    // was dropped but in-flight JWTs still hold it until the
+    // access-token TTL expires: audit the partial outcome and
+    // surface 500 so operators can retry, rather than hide the
+    // inconsistency behind a 204. Mirrors the partial-failure
+    // handling in `update_admin_user` / `delete_admin_user` when a
+    // refresh-revoke step fails after a status commit.
+    //
+    // The bump is unconditional — no `deleted_at IS NONE` guard.
+    // If the user row is soft-deleted, the DELETE path has already
+    // bumped `token_version`, so a further bump here is idempotent
+    // from a security standpoint. If the row was hard-deleted
+    // out-of-band, the UPDATE matches zero rows and the query
+    // still returns Ok — acceptable, since there is no live
+    // session to invalidate anyway.
+    let bump = db
         .query(
             "UPDATE $id SET \
                  token_version = token_version + 1, \
-                 updated_at = $now \
-             WHERE deleted_at IS NONE",
+                 updated_at = $now",
         )
         .bind(("id", RecordId::new("user", user_id.clone())))
         .bind(("now", now_iso()))
-        .await?
-        .check()?;
+        .await
+        .and_then(|r| r.check().map(|_| ()));
+    if let Err(e) = bump {
+        record_auth_event(
+            &db,
+            Some(user_id.clone()),
+            Some(caller.user_id.clone()),
+            "group_admin_revoked",
+            false,
+            Some("token_version_bump_failed"),
+            Some(&ip),
+        )
+        .await;
+        return Err(AppError::Internal(format!(
+            "token_version bump failed after group_admin revoke: {e}"
+        )));
+    }
 
-    let ip = client_ip.to_string();
     record_auth_event(
         &db,
         Some(user_id.clone()),
