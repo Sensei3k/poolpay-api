@@ -6,7 +6,8 @@
 /// Fixture counts (defined in db.rs):
 ///   - 1 group
 ///   - 6 members (all in group 1)
-///   - 9 cycles (all in group 1)
+///   - 12 cycles (all in group 1): cycles 1–8 closed, cycle 9 active,
+///     cycles 10–12 pending (upcoming Apr–Jun 2026)
 ///   - 49 payments
 use axum::{
     body::Body,
@@ -723,10 +724,10 @@ async fn get_cycles_returns_200() {
 }
 
 #[tokio::test]
-async fn get_cycles_returns_nine_cycles() {
+async fn get_cycles_returns_all_fixture_cycles() {
     let resp = call(test_app().await, get("/api/cycles")).await;
     let cycles: Vec<serde_json::Value> = json_body(resp).await;
-    assert_eq!(cycles.len(), 9);
+    assert_eq!(cycles.len(), 12);
 }
 
 #[tokio::test]
@@ -773,7 +774,7 @@ async fn get_cycles_status_values_are_valid() {
 async fn get_cycles_filter_by_group_id() {
     let resp = call(test_app().await, get("/api/cycles?groupId=1")).await;
     let cycles: Vec<serde_json::Value> = json_body(resp).await;
-    assert_eq!(cycles.len(), 9);
+    assert_eq!(cycles.len(), 12);
 }
 
 #[tokio::test]
@@ -1374,7 +1375,7 @@ async fn reset_restores_cycles() {
     call(app.clone(), post_empty("/api/test/reset")).await;
     let cycles: Vec<serde_json::Value> =
         json_body(call(app, get("/api/cycles")).await).await;
-    assert_eq!(cycles.len(), 9);
+    assert_eq!(cycles.len(), 12);
 }
 
 #[tokio::test]
