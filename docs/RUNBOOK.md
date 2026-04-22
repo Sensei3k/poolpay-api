@@ -241,6 +241,12 @@ The service uses SurrealDB with RocksDB storage, persisting to `./data.surreal/`
 **Initialization:**
 - On startup, creates namespace `circle` and database `main`
 - If `SEED_ON_EMPTY=true` and all tables are empty, seeds with fixture data (groups, members, cycles, payments)
+- If `SEED_ON_EMPTY=true`, also seeds two dev-only admin users after the bootstrap super-admin runs:
+  - `admin1@poolpay.test` — active admin, granted group-admin on fixture group `1`
+  - `admin2@poolpay.test` — active admin, no group grants (use this one to exercise grant creation from the dashboard)
+  - Both use password `PoolPayQA2026!` and `must_reset_password=false` so login is one-shot
+  - Idempotent across restarts; rows are skipped if `user_identity` already has them
+  - Guard is fail-closed: production boots with the flag unset execute zero writes on this path
 
 **Resetting the Database (Development Only):**
 
