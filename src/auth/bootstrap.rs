@@ -10,7 +10,7 @@ use crate::api::models::{
     GroupAdminContent, UserContent, UserIdentityContent, now_iso, record_id_to_string,
 };
 use crate::auth::password;
-use crate::db::{DbConn, is_unique_constraint_error};
+use crate::db::{DbConn, FIXTURE_GROUP_ID, is_unique_constraint_error};
 
 const BOOTSTRAP_EVENT_TYPE: &str = "bootstrap_admin_created";
 const CREDENTIALS_PROVIDER: &str = "credentials";
@@ -20,10 +20,6 @@ const CREDENTIALS_PROVIDER: &str = "credentials";
 /// production boots cannot accidentally plant it.
 const DUMMY_ADMIN_PASSWORD: &str = "PoolPayQA2026!";
 const DUMMY_ADMIN_EMAILS: [&str; 2] = ["admin1@poolpay.test", "admin2@poolpay.test"];
-/// Fixture group id mirrors `db::FIXTURE_GROUP_ID` — kept in sync manually
-/// because `FIXTURE_GROUP_ID` is a private constant in `db.rs`. If the
-/// business-fixture group id ever changes, update this too.
-const DUMMY_ADMIN_GROUP_GRANT_ID: &str = "1";
 
 /// Seed the initial admin account if none exists and the required env vars
 /// are set. Safe to call on every boot.
@@ -196,13 +192,7 @@ pub async fn seed_dummy_admins_with_flag(
         // runs; `ensure_group_admin_grant` is idempotent on unique conflict.
         if idx == 0 {
             if let Some(user_id) = user_id {
-                ensure_group_admin_grant(
-                    db,
-                    &user_id,
-                    DUMMY_ADMIN_GROUP_GRANT_ID,
-                    &super_admin_id,
-                )
-                .await?;
+                ensure_group_admin_grant(db, &user_id, FIXTURE_GROUP_ID, &super_admin_id).await?;
             }
         }
     }

@@ -239,8 +239,11 @@ pub(crate) fn is_unique_constraint_error(message: &str) -> bool {
 
 // ── Fixture data ──────────────────────────────────────────────────────────────
 
-/// The seeded group ID used across all fixtures.
-const FIXTURE_GROUP_ID: &str = "1";
+/// The seeded group ID used across all fixtures. Exposed `pub(crate)` so
+/// the dev-only `auth::bootstrap::seed_dummy_admins` path can target the
+/// same group without a duplicated string literal — keeps both seed paths
+/// compile-break together if the fixture group id ever changes.
+pub(crate) const FIXTURE_GROUP_ID: &str = "1";
 
 fn fixture_groups() -> Vec<(&'static str, GroupContent)> {
     vec![
