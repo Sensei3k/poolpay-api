@@ -18,6 +18,21 @@ struct ErrorBody {
     error: String,
 }
 
+/// Body shape for errors the FE needs to disambiguate from generic 400s —
+/// `{ "code": "<stable slug>", "message": "<human copy>" }`. Kept distinct
+/// from `ErrorBody` so existing callers that read `.error` are untouched.
+#[derive(Debug, Serialize)]
+struct CodedErrorBody {
+    code: &'static str,
+    message: &'static str,
+}
+
+/// Stable slug surfaced on `400 /api/auth/change-password` when the submitted
+/// `currentPassword` fails verification. Split out of the generic 401 so the
+/// FE stops having to infer the case from a post-refresh retry. See issue #39.
+const BAD_CURRENT_PASSWORD_CODE: &str = "bad_current";
+const BAD_CURRENT_PASSWORD_MESSAGE: &str = "Current password is incorrect.";
+
 /// Unified API error type — implements `IntoResponse` so handlers can use `?`
 /// directly and always return a JSON body with an `"error"` field.
 #[derive(Debug)]
@@ -25,6 +40,11 @@ pub enum AppError {
     NotFound(String),
     BadRequest(String),
     Unauthorized,
+    /// `400 Bad Request` with body `{ code: "bad_current", message: ... }` —
+    /// reserved for wrong-`currentPassword` on `/api/auth/change-password`.
+    /// Separating this from `Unauthorized` lets the FE skip its
+    /// post-refresh-401 inference; see issue #39.
+    BadCurrentPassword,
     Forbidden(String),
     Conflict(String),
     /// `retry_after_secs` populates the `Retry-After` header when present.
@@ -40,6 +60,14 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => simple(StatusCode::NOT_FOUND, msg),
             AppError::BadRequest(msg) => simple(StatusCode::BAD_REQUEST, msg),
             AppError::Unauthorized => simple(StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+            AppError::BadCurrentPassword => (
+                StatusCode::BAD_REQUEST,
+                Json(CodedErrorBody {
+                    code: BAD_CURRENT_PASSWORD_CODE,
+                    message: BAD_CURRENT_PASSWORD_MESSAGE,
+                }),
+            )
+                .into_response(),
             AppError::Forbidden(msg) => simple(StatusCode::FORBIDDEN, msg),
             AppError::Conflict(msg) => simple(StatusCode::CONFLICT, msg),
             AppError::TooManyRequests { retry_after_secs } => {

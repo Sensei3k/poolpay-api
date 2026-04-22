@@ -601,6 +601,37 @@ or signing failure, also with a `token_issue_failure` audit row
 (`reason` in `{db_error, mint_access_failed}`). `400` on empty or
 oversized `userId` (>128 chars).
 
+#### POST /api/auth/change-password
+
+Bearer-authenticated. Rotates the caller's password (change path) or attaches
+a credentials identity to a social-only account (set path). Bumps
+`token_version` so in-flight access tokens invalidate within one access-TTL;
+the change path additionally revokes every live refresh token for the user.
+
+**Request:**
+```json
+{ "currentPassword": "...", "newPassword": "..." }
+```
+
+`currentPassword` is required when the user already has a `password_hash`
+and is omitted on the social set-path. Body is capped at 5 KiB pre-parse.
+
+**Response:** `204 No Content` on success.
+
+| Status | Body | When |
+|---|---|---|
+| `204` | — | Success. |
+| `400` | `{ "code": "bad_current", "message": "Current password is incorrect." }` | `currentPassword` did not match the stored hash. Typed so the FE can tell a wrong-password failure from a dead session without inference (see [issue #39](https://github.com/Sensei3k/poolpay-api/issues/39)). Writes a `password_change_failure` audit row with `reason=bad_current`. |
+| `400` | `{ "error": "..." }` | Shape or policy violation — missing `newPassword`, whitespace-only, oversized (>1 KiB), or `currentPassword` omitted when a hash already exists. Not audited. |
+| `401` | `{ "error": "unauthorized" }` | Bearer missing, malformed, expired, or `token_version` stale (post-rotation replay, role change, etc.). **Does not include wrong-current-password.** |
+| `409` | `{ "error": "..." }` | Set path only: the `(provider='credentials', provider_subject=email_normalised)` identity is already owned by a different user. No hash is written. |
+| `500` | `{ "error": "an internal error occurred" }` | DB or Argon2 hashing failure. |
+
+On success the change path writes `password_changed` (no `reason`) and the
+set path writes `password_changed` with `reason=set`. The wrong-password
+branch writes `password_change_failure` with `reason=bad_current` before
+responding.
+
 ### Dev-Only Endpoint
 
 #### POST /api/test/reset

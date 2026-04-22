@@ -422,9 +422,11 @@ pub async fn change_password(
     match db_user.password_hash.as_deref() {
         Some(existing_hash) => {
             // Change path: verify current then rotate. Bad-current-password
-            // failures write an audit row before returning 401 so brute-force
-            // probes remain observable (shape-level 400s from missing fields
-            // or policy violations are intentionally not audited).
+            // failures write an audit row before returning 400 + a typed
+            // `bad_current` code so brute-force probes remain observable;
+            // shape-level 400s from missing fields or policy violations are
+            // intentionally not audited. 401 stays reserved for genuine
+            // token failures — see issue #39.
             let Some(current) = req.current_password.as_deref() else {
                 return Err(AppError::BadRequest(
                     "currentPassword required to change an existing password".into(),
@@ -441,7 +443,7 @@ pub async fn change_password(
                     Some(&ip),
                 )
                 .await;
-                return Err(AppError::Unauthorized);
+                return Err(AppError::BadCurrentPassword);
             }
 
             // Only hash the new password once the current one is verified —
