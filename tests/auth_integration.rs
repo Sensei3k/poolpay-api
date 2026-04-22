@@ -2751,23 +2751,45 @@ async fn count_rows(db: &poolpay::db::DbConn, query: &str) -> i64 {
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_creates_both_admins_and_grant_for_admin1() {
+async fn seed_dummy_admins_creates_all_fixtures_with_expected_roles_and_grants() {
     let (_app, db) = test_app().await;
     bootstrap::seed_dummy_admins_with_flag(&db, true)
         .await
         .expect("seed_dummy_admins");
 
-    let admins = count_rows(
+    // admin1, admin2, admin4 — regular `admin` role.
+    let admin_role_rows = count_rows(
         &db,
         "SELECT count() FROM user \
-         WHERE email_normalised IN ['admin1@poolpay.test', 'admin2@poolpay.test'] \
+         WHERE email_normalised IN [\
+             'admin1@poolpay.test', 'admin2@poolpay.test', 'admin4@poolpay.test'\
+         ] \
          AND role = 'admin' AND status = 'active' AND must_reset_password = false \
          GROUP ALL",
     )
     .await;
-    assert_eq!(admins, 2, "both fixture admins must be created as active admin-role users");
+    assert_eq!(
+        admin_role_rows, 3,
+        "admin1/admin2/admin4 must be created as active admin-role users"
+    );
 
-    let grants = count_rows(
+    // admin3 — super_admin role, to exercise super-admin-on-super-admin flows
+    // without touching the bootstrap account.
+    let super_admin_rows = count_rows(
+        &db,
+        "SELECT count() FROM user \
+         WHERE email_normalised = 'admin3@poolpay.test' \
+         AND role = 'super_admin' AND status = 'active' AND must_reset_password = false \
+         GROUP ALL",
+    )
+    .await;
+    assert_eq!(
+        super_admin_rows, 1,
+        "admin3 must be created as an active super_admin"
+    );
+
+    // Only admin1 receives a FIXTURE_GROUP_ID grant.
+    let admin1_grants = count_rows(
         &db,
         "SELECT count() FROM group_admin \
          WHERE group_id = '1' AND user_id IN (\
@@ -2775,17 +2797,21 @@ async fn seed_dummy_admins_creates_both_admins_and_grant_for_admin1() {
          ) GROUP ALL",
     )
     .await;
-    assert_eq!(grants, 1, "admin1 must receive exactly one fixture grant on group 1");
+    assert_eq!(admin1_grants, 1, "admin1 must receive exactly one fixture grant on group 1");
 
-    let admin2_grants = count_rows(
-        &db,
-        "SELECT count() FROM group_admin \
-         WHERE user_id IN (\
-             SELECT VALUE meta::id(id) FROM user WHERE email_normalised = 'admin2@poolpay.test'\
-         ) GROUP ALL",
-    )
-    .await;
-    assert_eq!(admin2_grants, 0, "admin2 must not receive any fixture grants");
+    for email in ["admin2@poolpay.test", "admin3@poolpay.test", "admin4@poolpay.test"] {
+        let grants = count_rows(
+            &db,
+            &format!(
+                "SELECT count() FROM group_admin \
+                 WHERE user_id IN (\
+                     SELECT VALUE meta::id(id) FROM user WHERE email_normalised = '{email}'\
+                 ) GROUP ALL"
+            ),
+        )
+        .await;
+        assert_eq!(grants, 0, "{email} must not receive any fixture grants");
+    }
 }
 
 #[tokio::test]
@@ -2801,11 +2827,14 @@ async fn seed_dummy_admins_is_idempotent_across_restarts() {
     let admins = count_rows(
         &db,
         "SELECT count() FROM user \
-         WHERE email_normalised IN ['admin1@poolpay.test', 'admin2@poolpay.test'] \
+         WHERE email_normalised IN [\
+             'admin1@poolpay.test', 'admin2@poolpay.test', \
+             'admin3@poolpay.test', 'admin4@poolpay.test'\
+         ] \
          GROUP ALL",
     )
     .await;
-    assert_eq!(admins, 2, "restart must not duplicate fixture admin rows");
+    assert_eq!(admins, 4, "restart must not duplicate fixture admin rows");
 
     let grants = count_rows(
         &db,
@@ -2827,7 +2856,10 @@ async fn seed_dummy_admins_is_noop_without_flag() {
     let admins = count_rows(
         &db,
         "SELECT count() FROM user \
-         WHERE email_normalised IN ['admin1@poolpay.test', 'admin2@poolpay.test'] \
+         WHERE email_normalised IN [\
+             'admin1@poolpay.test', 'admin2@poolpay.test', \
+             'admin3@poolpay.test', 'admin4@poolpay.test'\
+         ] \
          GROUP ALL",
     )
     .await;

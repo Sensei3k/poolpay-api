@@ -19,7 +19,32 @@ const CREDENTIALS_PROVIDER: &str = "credentials";
 /// `SEED_ON_EMPTY=true` **and** `APP_ENV` is `development` or `test`, so
 /// production boots cannot accidentally plant it.
 const DUMMY_ADMIN_PASSWORD: &str = "PoolPayQA2026!";
-const DUMMY_ADMIN_EMAILS: [&str; 2] = ["admin1@poolpay.test", "admin2@poolpay.test"];
+
+/// Declarative spec for the dev-only fixture admin accounts. Each row pairs
+/// an email with its role and whether to receive a `group_admin` grant on
+/// `FIXTURE_GROUP_ID` — lets us cover every role × grant combination the
+/// admin UI can render without branching inside the seed loop.
+///
+/// Current matrix:
+/// - admin1: `admin` + FIXTURE_GROUP_ID grant — typical group admin.
+/// - admin2: `admin`, no grant — target for manually testing grant creation.
+/// - admin3: `super_admin`, no grant — second super-admin so super-admin-on-
+///   super-admin flows (e.g. demotion) can be exercised without touching
+///   the bootstrap account.
+/// - admin4: `admin`, no grant — stable "orphan admin" baseline that stays
+///   ungranted even after admin2 gets manually granted during testing.
+struct DummyAdmin {
+    email: &'static str,
+    role: &'static str,
+    grant_fixture_group: bool,
+}
+
+const DUMMY_ADMINS: [DummyAdmin; 4] = [
+    DummyAdmin { email: "admin1@poolpay.test", role: "admin",       grant_fixture_group: true  },
+    DummyAdmin { email: "admin2@poolpay.test", role: "admin",       grant_fixture_group: false },
+    DummyAdmin { email: "admin3@poolpay.test", role: "super_admin", grant_fixture_group: false },
+    DummyAdmin { email: "admin4@poolpay.test", role: "admin",       grant_fixture_group: false },
+];
 
 /// Seed the initial admin account if none exists and the required env vars
 /// are set. Safe to call on every boot.
@@ -182,15 +207,19 @@ pub async fn seed_dummy_admins_with_flag(
         }
     };
 
-    for (idx, email) in DUMMY_ADMIN_EMAILS.iter().enumerate() {
-        let user_id = ensure_admin_fixture(db, email, DUMMY_ADMIN_PASSWORD, &super_admin_id)
-            .await?;
-        // Only admin1 (index 0) gets the group grant — admin2 stays
-        // ungranted so the dashboard has a target for testing grant creation.
+    for spec in DUMMY_ADMINS.iter() {
+        let user_id = ensure_admin_fixture(
+            db,
+            spec.email,
+            DUMMY_ADMIN_PASSWORD,
+            spec.role,
+            &super_admin_id,
+        )
+        .await?;
         // Re-asserting the grant on every run (not just when the user was
         // created this run) restores it after manual cleanup / partial prior
         // runs; `ensure_group_admin_grant` is idempotent on unique conflict.
-        if idx == 0 {
+        if spec.grant_fixture_group {
             if let Some(user_id) = user_id {
                 ensure_group_admin_grant(db, &user_id, FIXTURE_GROUP_ID, &super_admin_id).await?;
             }
@@ -222,6 +251,7 @@ async fn ensure_admin_fixture(
     db: &DbConn,
     email: &str,
     password_plain: &str,
+    role: &str,
     super_admin_id: &str,
 ) -> Result<Option<String>, surrealdb::Error> {
     let email_normalised = email.to_lowercase();
@@ -292,7 +322,7 @@ async fn ensure_admin_fixture(
         email: email.to_string(),
         email_normalised: email_normalised.clone(),
         password_hash: Some(password_hash),
-        role: "admin".into(),
+        role: role.into(),
         status: "active".into(),
         token_version: 0,
         // Dev fixtures skip the first-login rotation so the login flow is
