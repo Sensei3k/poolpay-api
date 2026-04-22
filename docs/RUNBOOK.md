@@ -464,6 +464,75 @@ Soft-delete all payments for a member in a cycle. Requires admin auth.
 
 Returns `204 No Content`.
 
+### Admin User Management
+
+All routes under `/api/admin/users` require `role: super_admin` on the caller's access token. Mutations that change role, status, or scope bump the target's `token_version`, which invalidates in-flight access tokens within one TTL.
+
+#### POST /api/admin/users
+
+Provision a new admin-tier user (role must be `admin` or `super_admin`). Member users are minted via the social/credentials sign-in path, not this surface. `mustResetPassword` is forced to `true` on the new row so the user is pushed onto the change-password flow on first login.
+
+**Request:**
+```json
+{
+  "email": "new-admin@example.com",
+  "initialPassword": "temporary-strong-passphrase",
+  "role": "admin"
+}
+```
+
+Returns `201 Created` with the user record. `409 Conflict` if the email is already in use (both the pre-check and the post-insert UNIQUE race paths collapse to 409).
+
+#### PATCH /api/admin/users/{id}
+
+Flip `role` and/or `status` on an existing user. Requires `version` for optimistic concurrency. Self-mutation is refused (`403`) — another super-admin must act.
+
+**Request:**
+```json
+{
+  "role": "super_admin",
+  "status": "active",
+  "version": 3
+}
+```
+
+Both `role` and `status` are optional; at least one field should change for the patch to be meaningful (a no-op still bumps `version` but not `token_version`). Status transitions `active ↔ disabled`; `disabled` revokes every live refresh token for the target and emits `user_disabled`. `active` (re-enable) emits `user_enabled`. Role changes emit `role_changed` with the `before -> after` transition as the reason.
+
+Returns `409 Conflict` on version mismatch or on a concurrent update between SELECT and guarded UPDATE.
+
+#### DELETE /api/admin/users/{id}
+
+Soft-delete (sets `deleted_at`, bumps `token_version`, revokes every refresh token). Self-delete is refused (`403`). The user row and all grants persist for audit. Replaying a delete on an already-deleted row returns `404`.
+
+Returns `204 No Content`.
+
+#### POST /api/admin/users/{id}/groups/{group_id}
+
+Grant `admin`-role user scope over one group. A row in `group_admin` is the RBAC primitive the group-scope extractor looks up — super-admins bypass the extractor, so granting on a super-admin returns `409`. Granting on a member also returns `409` (grants are admin-tier only). Target must be active.
+
+Path-only — no request body. Returns `201 Created`:
+
+```json
+{
+  "userId": "abc123",
+  "groupId": "xyz789",
+  "createdAt": "2026-04-22T01:45:00Z",
+  "createdBy": "super-admin-id"
+}
+```
+
+`404` if the target user or group does not exist (or is soft-deleted). `409` if the grant already exists (duplicate `(user_id, group_id)`), if the target is disabled, or if the target role is not `admin`.
+
+Audit: `group_admin_granted` row with `actor_id = caller`, `user_id = target`, `reason = "group:<group_id>"`.
+
+#### DELETE /api/admin/users/{id}/groups/{group_id}
+
+Revoke a previously-issued grant. Two-part mutation: drops the `group_admin` row and bumps the target's `token_version` so in-flight access tokens re-verify on the next call (scope shrank, so cached tokens would otherwise let the user act on the revoked group for up to one access-token TTL). Refresh tokens intentionally survive — the target still has a valid session, they just lost scope on this group.
+
+Returns `204 No Content`. `404` if no matching grant exists (including replay after a successful revoke) — the handler does not silently swallow missing rows because an out-of-band manual revoke is exactly the signal ops should see.
+
+Audit: `group_admin_revoked` row with `actor_id = caller`, `user_id = target`, `reason = "group:<group_id>"`.
+
 ### HMAC-Gated Auth Endpoints (NextAuth)
 
 All requests must carry `x-timestamp` (unix seconds, within ±60s) and
