@@ -24,9 +24,17 @@ use crate::db::DbConn;
 /// HTTP status): a login attempt that hit a bad password is
 /// `success: false` with `reason: Some("bad_password")`, even though
 /// the handler returns 401 (which collapses several failure modes).
+///
+/// `user_id` is the **subject** of the event (the row being acted upon).
+/// `actor_id` is the **operator** who performed the action. For
+/// self-actions (login, refresh, change-password, …) they are the same
+/// value. For admin actions (super-admin flipping another user's role)
+/// they differ — `actor_id` carries the caller's id so the trail is
+/// attributable to an operator during incident review.
 pub(crate) async fn record_auth_event(
     db: &DbConn,
     user_id: Option<String>,
+    actor_id: Option<String>,
     event_type: &str,
     success: bool,
     reason: Option<&str>,
@@ -34,6 +42,7 @@ pub(crate) async fn record_auth_event(
 ) {
     let content = AuthEventContent {
         user_id,
+        actor_id,
         event_type: event_type.into(),
         ip: ip.map(str::to_string),
         user_agent: None,

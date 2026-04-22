@@ -126,7 +126,7 @@ impl AdminUserResponse {
 /// must rotate the seeded `initialPassword` on first sign-in via
 /// `/api/auth/change-password` (BE-8 PR 2). `token_version` starts at 0.
 pub async fn create_admin_user(
-    SuperAdminUser(_): SuperAdminUser,
+    SuperAdminUser(caller): SuperAdminUser,
     State(db): State<DbConn>,
     ClientIp(client_ip): ClientIp,
     http_req: Request,
@@ -228,6 +228,7 @@ pub async fn create_admin_user(
     record_auth_event(
         &db,
         Some(user_id.clone()),
+        Some(caller.user_id.clone()),
         "user_created",
         true,
         Some(&req.role),
@@ -349,6 +350,7 @@ pub async fn update_admin_user(
         record_auth_event(
             &db,
             Some(id.as_str().to_string()),
+            Some(caller.user_id.clone()),
             "role_changed",
             true,
             Some(&format!("{} -> {}", existing.role, new_role)),
@@ -369,6 +371,7 @@ pub async fn update_admin_user(
             record_auth_event(
                 &db,
                 Some(id.as_str().to_string()),
+                Some(caller.user_id.clone()),
                 "user_disabled",
                 false,
                 Some("refresh_revocation_failed"),
@@ -380,6 +383,7 @@ pub async fn update_admin_user(
         record_auth_event(
             &db,
             Some(id.as_str().to_string()),
+            Some(caller.user_id.clone()),
             "user_disabled",
             true,
             None,
@@ -450,6 +454,7 @@ pub async fn delete_admin_user(
         record_auth_event(
             &db,
             Some(id.as_str().to_string()),
+            Some(caller.user_id.clone()),
             "user_disabled",
             false,
             Some("soft_deleted_token_revocation_failed"),
@@ -461,6 +466,7 @@ pub async fn delete_admin_user(
     record_auth_event(
         &db,
         Some(id.as_str().to_string()),
+        Some(caller.user_id.clone()),
         "user_disabled",
         true,
         Some("soft_deleted"),

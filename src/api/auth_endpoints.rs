@@ -83,6 +83,7 @@ pub async fn verify_credentials(
             record_auth_event(
                 &db,
                 Some(user_id.clone()),
+                Some(user_id.clone()),
                 "login_success",
                 true,
                 None,
@@ -106,6 +107,7 @@ pub async fn verify_credentials(
                 Ok(()) => {
                     record_auth_event(
                         &db,
+                        user_id.clone(),
                         user_id,
                         "login_failure",
                         false,
@@ -118,6 +120,7 @@ pub async fn verify_credentials(
                 Err(retry_after_secs) => {
                     record_auth_event(
                         &db,
+                        user_id.clone(),
                         user_id,
                         "login_failure",
                         false,
@@ -431,6 +434,7 @@ pub async fn change_password(
                 record_auth_event(
                     &db,
                     Some(user.user_id.clone()),
+                    Some(user.user_id.clone()),
                     "password_change_failure",
                     false,
                     Some("bad_current"),
@@ -455,6 +459,7 @@ pub async fn change_password(
 
             record_auth_event(
                 &db,
+                Some(user.user_id.clone()),
                 Some(user.user_id),
                 "password_changed",
                 true,
@@ -525,6 +530,7 @@ pub async fn change_password(
 
             record_auth_event(
                 &db,
+                Some(user.user_id.clone()),
                 Some(user.user_id),
                 "password_changed",
                 true,
@@ -631,6 +637,7 @@ pub(crate) async fn issue_token_endpoint(
             record_auth_event(
                 &db,
                 None,
+                None,
                 "token_issue_failure",
                 false,
                 Some("unknown_user"),
@@ -643,6 +650,7 @@ pub(crate) async fn issue_token_endpoint(
             tracing::error!(error = %e, "issue load_user failed");
             record_auth_event(
                 &db,
+                Some(user_id.clone()),
                 Some(user_id.clone()),
                 "token_issue_failure",
                 false,
@@ -658,6 +666,7 @@ pub(crate) async fn issue_token_endpoint(
         record_auth_event(
             &db,
             Some(user_id.clone()),
+            Some(user_id.clone()),
             "token_issue_failure",
             false,
             Some("soft_deleted"),
@@ -669,6 +678,7 @@ pub(crate) async fn issue_token_endpoint(
     if user.status != "active" {
         record_auth_event(
             &db,
+            Some(user_id.clone()),
             Some(user_id.clone()),
             "token_issue_failure",
             false,
@@ -689,6 +699,7 @@ pub(crate) async fn issue_token_endpoint(
             record_auth_event(
                 &db,
                 Some(user_id.clone()),
+                Some(user_id.clone()),
                 "token_issue_failure",
                 false,
                 Some("mint_access_failed"),
@@ -706,6 +717,7 @@ pub(crate) async fn issue_token_endpoint(
             record_auth_event(
                 &db,
                 Some(user_id.clone()),
+                Some(user_id.clone()),
                 "token_issue_failure",
                 false,
                 Some("db_error"),
@@ -716,7 +728,16 @@ pub(crate) async fn issue_token_endpoint(
         }
     };
 
-    record_auth_event(&db, Some(user_id), "token_issued", true, None, Some(&ip)).await;
+    record_auth_event(
+        &db,
+        Some(user_id.clone()),
+        Some(user_id),
+        "token_issued",
+        true,
+        None,
+        Some(&ip),
+    )
+    .await;
 
     Ok(Json(RefreshResponse {
         access_token: access,
@@ -784,8 +805,16 @@ pub async fn refresh_token_endpoint(
             return Err(AppError::Unauthorized);
         }
         Err(RefreshError::NotFound | RefreshError::Expired) => {
-            record_auth_event(&db, None, "refresh_failure", false, Some("invalid"), Some(&ip))
-                .await;
+            record_auth_event(
+                &db,
+                None,
+                None,
+                "refresh_failure",
+                false,
+                Some("invalid"),
+                Some(&ip),
+            )
+            .await;
             return Err(AppError::Unauthorized);
         }
         Err(e @ (RefreshError::Db(_) | RefreshError::Internal(_))) => {
@@ -819,7 +848,16 @@ pub async fn refresh_token_endpoint(
             AppError::Unauthorized
         })?;
 
-    record_auth_event(&db, Some(user_id), "refresh_success", true, None, Some(&ip)).await;
+    record_auth_event(
+        &db,
+        Some(user_id.clone()),
+        Some(user_id),
+        "refresh_success",
+        true,
+        None,
+        Some(&ip),
+    )
+    .await;
 
     Ok(Json(RefreshResponse {
         access_token: access,
@@ -860,7 +898,16 @@ pub async fn logout_endpoint(
     let ip = client_ip.to_string();
     match refresh::revoke_by_presented(&db, &req.refresh_token).await {
         Ok(user_id) => {
-            record_auth_event(&db, Some(user_id), "logout", true, None, Some(&ip)).await;
+            record_auth_event(
+                &db,
+                Some(user_id.clone()),
+                Some(user_id),
+                "logout",
+                true,
+                None,
+                Some(&ip),
+            )
+            .await;
         }
         Err(RefreshError::NotFound) => {
             // Unknown token — still return 204 to avoid leaking validity.

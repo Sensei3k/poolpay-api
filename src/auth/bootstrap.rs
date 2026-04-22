@@ -82,7 +82,8 @@ pub async fn ensure_admin_user(db: &DbConn) -> Result<(), surrealdb::Error> {
     let _: Option<DbUserIdentity> = db.create("user_identity").content(identity).await?;
 
     let event = AuthEventContent {
-        user_id: Some(user_id),
+        user_id: Some(user_id.clone()),
+        actor_id: Some(user_id),
         event_type: BOOTSTRAP_EVENT_TYPE.into(),
         ip: None,
         user_agent: None,
