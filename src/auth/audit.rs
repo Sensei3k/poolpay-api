@@ -10,6 +10,7 @@
 //! - `user_created` — admin created a new user (BE-8)
 //! - `role_changed` — super-admin flipped a user's role (BE-8)
 //! - `user_disabled` — super-admin disabled or soft-deleted a user (BE-8)
+//! - `user_enabled` — super-admin re-enabled a previously disabled user (BE-8)
 //! - `group_admin_granted` / `group_admin_revoked` — BE-8 PR 4
 //!
 //! The list is illustrative, not constraining — `event_type` is a free

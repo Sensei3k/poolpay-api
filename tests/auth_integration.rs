@@ -1987,6 +1987,34 @@ async fn update_admin_user_status_disable_revokes_refresh_tokens_and_audits() {
 }
 
 #[tokio::test]
+async fn update_admin_user_reenable_emits_user_enabled_audit_event() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, version) =
+        seed_admin_user(&app, &super_token, "reenable@example.com", "admin").await;
+
+    // Disable first — produces a user_disabled event and bumps version to version+1.
+    let disable = serde_json::json!({ "status": "disabled", "version": version });
+    let resp = call(app.clone(), admin_users_patch_req(&target_id, &super_token, &disable)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(user_status(&db, &target_id).await, "disabled");
+
+    // Re-enable with the bumped version.
+    let reenable = serde_json::json!({ "status": "active", "version": version + 1 });
+    let resp = call(app, admin_users_patch_req(&target_id, &super_token, &reenable)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(user_status(&db, &target_id).await, "active");
+
+    // Symmetric audit — one disable, one enable.
+    let disabled_events = count_auth_events(&db, &target_id, "user_disabled").await;
+    assert_eq!(disabled_events, 1);
+    let enabled_events = count_auth_events(&db, &target_id, "user_enabled").await;
+    assert_eq!(enabled_events, 1);
+}
+
+#[tokio::test]
 async fn update_admin_user_noop_patch_bumps_version_but_not_token_version() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;

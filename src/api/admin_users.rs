@@ -458,6 +458,21 @@ pub async fn update_admin_user(
             Some(&ip),
         )
         .await;
+    } else if status_changed && new_status == "active" {
+        // Re-enable is the privileged reversal of a prior disable. No
+        // refresh-token revoke needed (disable already dropped them and
+        // the user must re-authenticate), but the event is emitted so
+        // the audit trail shows symmetric disable/enable decisions.
+        record_auth_event(
+            &db,
+            Some(id.as_str().to_string()),
+            Some(caller.user_id.clone()),
+            "user_enabled",
+            true,
+            None,
+            Some(&ip),
+        )
+        .await;
     }
 
     Ok(Json(AdminUserResponse::from_db(&updated)))
