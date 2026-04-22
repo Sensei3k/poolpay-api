@@ -1656,7 +1656,10 @@ async fn create_admin_user_happy_path_returns_201_and_allows_signin() {
     assert_eq!(v["role"], "admin");
     assert_eq!(v["status"], "active");
     assert_eq!(v["mustResetPassword"], true);
-    assert_eq!(v["tokenVersion"], 0);
+    assert!(
+        v.get("tokenVersion").is_none(),
+        "token_version is a server-side invalidation counter and must not leak to clients"
+    );
     assert_eq!(v["version"], 1);
     let new_id = v["userId"].as_str().unwrap().to_string();
     assert!(!new_id.is_empty());
