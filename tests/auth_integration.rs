@@ -2228,3 +2228,417 @@ async fn delete_admin_user_rejects_non_super_admin_with_403() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+// ── Group-admin grants (Plan 3 / BE-8 PR 4) ──────────────────────────────────
+
+fn group_admin_post_req(user_id: &str, group_id: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/admin/users/{user_id}/groups/{group_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn seed_test_group(db: &poolpay::db::DbConn, id: &str) {
+    let now = poolpay::api::models::now_iso();
+    db.upsert::<Option<poolpay::api::models::DbGroup>>(("group", id.to_string()))
+        .content(poolpay::api::models::GroupContent {
+            name: format!("Test group {id}"),
+            status: "active".into(),
+            description: None,
+            created_at: now.clone(),
+            updated_at: now,
+            deleted_at: None,
+            version: 1,
+        })
+        .await
+        .expect("seed group")
+        .expect("group row returned");
+}
+
+async fn count_group_admin_rows(
+    db: &poolpay::db::DbConn,
+    user_id: &str,
+    group_id: &str,
+) -> i64 {
+    let mut resp = db
+        .query(
+            "SELECT count() FROM group_admin \
+             WHERE user_id = $uid AND group_id = $gid GROUP ALL",
+        )
+        .bind(("uid", user_id.to_string()))
+        .bind(("gid", group_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp.take("count").unwrap_or_default();
+    rows.first().copied().unwrap_or(0)
+}
+
+#[tokio::test]
+async fn grant_group_admin_happy_path_returns_201_and_inserts_row() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "grant-hp@example.com", "admin").await;
+    seed_test_group(&db, "grant-hp-group").await;
+
+    let resp = call(
+        app,
+        group_admin_post_req(&target_id, "grant-hp-group", &super_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let v: serde_json::Value = json_body(resp).await;
+    assert_eq!(v["userId"], target_id);
+    assert_eq!(v["groupId"], "grant-hp-group");
+    assert_eq!(v["createdBy"], super_id);
+    assert!(v["createdAt"].as_str().is_some());
+
+    assert_eq!(
+        count_group_admin_rows(&db, &target_id, "grant-hp-group").await,
+        1
+    );
+    assert_eq!(
+        count_auth_events(&db, &target_id, "group_admin_granted").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn grant_group_admin_without_bearer_returns_401() {
+    let (app, db, _verifier) = build_app_full(lax_rate_cfg()).await;
+    seed_test_group(&db, "grant-no-bearer").await;
+
+    let resp = call(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/users/any-user/groups/grant-no-bearer")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn grant_group_admin_rejects_non_super_admin_with_403() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "grant-forbid@example.com", "admin").await;
+    let admin_token = verifier.mint_access(&target_id, "admin", 0).expect("mint");
+    seed_test_group(&db, "grant-forbid-group").await;
+
+    let resp = call(
+        app,
+        group_admin_post_req(&target_id, "grant-forbid-group", &admin_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn grant_group_admin_on_unknown_user_returns_404() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    seed_test_group(&db, "grant-unknown-user-group").await;
+
+    let resp = call(
+        app,
+        group_admin_post_req("ghost-user", "grant-unknown-user-group", &super_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn grant_group_admin_on_disabled_user_returns_409() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "grant-disabled@example.com", "admin").await;
+    set_user_status(&db, &target_id, "disabled").await;
+    seed_test_group(&db, "grant-disabled-group").await;
+
+    let resp = call(
+        app,
+        group_admin_post_req(&target_id, "grant-disabled-group", &super_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        count_group_admin_rows(&db, &target_id, "grant-disabled-group").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn grant_group_admin_on_super_admin_target_returns_409() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) = seed_admin_user(
+        &app,
+        &super_token,
+        "grant-super@example.com",
+        "super_admin",
+    )
+    .await;
+    seed_test_group(&db, "grant-super-group").await;
+
+    let resp = call(
+        app,
+        group_admin_post_req(&target_id, "grant-super-group", &super_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn grant_group_admin_on_member_target_returns_409() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let member_id = seed_member(&app, "sub-grant-member", "grant-member@example.com").await;
+    seed_test_group(&db, "grant-member-group").await;
+
+    let resp = call(
+        app,
+        group_admin_post_req(&member_id, "grant-member-group", &super_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn grant_group_admin_on_unknown_group_returns_404() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "grant-ghost-group@example.com", "admin").await;
+
+    let resp = call(
+        app,
+        group_admin_post_req(&target_id, "ghost-group-id", &super_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn grant_group_admin_duplicate_returns_409() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "grant-dup@example.com", "admin").await;
+    seed_test_group(&db, "grant-dup-group").await;
+
+    let first = call(
+        app.clone(),
+        group_admin_post_req(&target_id, "grant-dup-group", &super_token),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::CREATED);
+
+    let second = call(
+        app,
+        group_admin_post_req(&target_id, "grant-dup-group", &super_token),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+
+    assert_eq!(
+        count_group_admin_rows(&db, &target_id, "grant-dup-group").await,
+        1
+    );
+}
+
+fn group_admin_delete_req(user_id: &str, group_id: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::DELETE)
+        .uri(format!("/api/admin/users/{user_id}/groups/{group_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn revoke_group_admin_happy_path_returns_204_and_removes_row() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "revoke-hp@example.com", "admin").await;
+    seed_test_group(&db, "revoke-hp-group").await;
+
+    let grant = call(
+        app.clone(),
+        group_admin_post_req(&target_id, "revoke-hp-group", &super_token),
+    )
+    .await;
+    assert_eq!(grant.status(), StatusCode::CREATED);
+
+    let resp = call(
+        app,
+        group_admin_delete_req(&target_id, "revoke-hp-group", &super_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    assert_eq!(
+        count_group_admin_rows(&db, &target_id, "revoke-hp-group").await,
+        0
+    );
+    assert_eq!(
+        count_auth_events(&db, &target_id, "group_admin_revoked").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn revoke_group_admin_bumps_target_token_version() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "revoke-tv@example.com", "admin").await;
+    seed_test_group(&db, "revoke-tv-group").await;
+
+    let grant = call(
+        app.clone(),
+        group_admin_post_req(&target_id, "revoke-tv-group", &super_token),
+    )
+    .await;
+    assert_eq!(grant.status(), StatusCode::CREATED);
+
+    let tv_before = user_token_version(&db, &target_id).await;
+
+    let resp = call(
+        app,
+        group_admin_delete_req(&target_id, "revoke-tv-group", &super_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let tv_after = user_token_version(&db, &target_id).await;
+    assert!(
+        tv_after > tv_before,
+        "revoke must bump target's token_version: before={tv_before} after={tv_after}"
+    );
+}
+
+#[tokio::test]
+async fn revoke_group_admin_without_bearer_returns_401() {
+    let (app, db, _verifier) = build_app_full(lax_rate_cfg()).await;
+    seed_test_group(&db, "revoke-no-bearer").await;
+
+    let resp = call(
+        app,
+        Request::builder()
+            .method(Method::DELETE)
+            .uri("/api/admin/users/any/groups/revoke-no-bearer")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn revoke_group_admin_rejects_non_super_admin_with_403() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "revoke-forbid@example.com", "admin").await;
+    let admin_token = verifier.mint_access(&target_id, "admin", 0).expect("mint");
+    seed_test_group(&db, "revoke-forbid-group").await;
+    let grant = call(
+        app.clone(),
+        group_admin_post_req(&target_id, "revoke-forbid-group", &super_token),
+    )
+    .await;
+    assert_eq!(grant.status(), StatusCode::CREATED);
+
+    let resp = call(
+        app,
+        group_admin_delete_req(&target_id, "revoke-forbid-group", &admin_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Grant must still exist — the 403 exited before the delete query.
+    assert_eq!(
+        count_group_admin_rows(&db, &target_id, "revoke-forbid-group").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn revoke_group_admin_unknown_grant_returns_404() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "revoke-unknown@example.com", "admin").await;
+
+    let resp = call(
+        app,
+        group_admin_delete_req(&target_id, "never-granted-group", &super_token),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn revoke_group_admin_replay_after_success_returns_404() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "revoke-replay@example.com", "admin").await;
+    seed_test_group(&db, "revoke-replay-group").await;
+    let grant = call(
+        app.clone(),
+        group_admin_post_req(&target_id, "revoke-replay-group", &super_token),
+    )
+    .await;
+    assert_eq!(grant.status(), StatusCode::CREATED);
+
+    let first = call(
+        app.clone(),
+        group_admin_delete_req(&target_id, "revoke-replay-group", &super_token),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::NO_CONTENT);
+
+    let second = call(
+        app,
+        group_admin_delete_req(&target_id, "revoke-replay-group", &super_token),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::NOT_FOUND);
+}
+

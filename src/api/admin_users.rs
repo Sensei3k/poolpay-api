@@ -30,8 +30,8 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId;
 
 use crate::api::models::{
-    AppError, DbUser, DbUserIdentity, EntityId, UserContent, UserIdentityContent, now_iso,
-    record_id_to_string,
+    AppError, DbGroup, DbGroupAdmin, DbUser, DbUserIdentity, EntityId, GroupAdminContent,
+    UserContent, UserIdentityContent, now_iso, record_id_to_string,
 };
 use crate::auth::audit::record_auth_event;
 use crate::auth::extractors::SuperAdminUser;
@@ -592,5 +592,192 @@ async fn rollback_user(db: &DbConn, user_id: &str) {
             "rollback_user failed after identity insert error — orphan user row"
         );
     }
+}
+
+// ── POST /api/admin/users/:id/groups/:group_id (BE-8 PR 4) ────────────────────
+
+/// Response echoed on successful grant. Small on purpose — the grant
+/// is fully identified by the path, and the audit row carries the
+/// canonical record. The response exists mainly so the client can
+/// confirm `createdBy` and `createdAt` without a follow-up read.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupAdminGrantResponse {
+    pub user_id: String,
+    pub group_id: String,
+    pub created_at: String,
+    pub created_by: String,
+}
+
+/// Super-admin grants one `admin`-role user access to one group.
+///
+/// Granting to a `super_admin` returns 409 — super-admins bypass the
+/// group-scope extractor entirely (see `src/auth/extractors.rs`), so
+/// the row would be dead weight. Granting to a `member` also returns
+/// 409: group-admin rows are the admin-tier scope primitive, not a
+/// membership indicator, and a member row here would silently widen
+/// RBAC if the user were later promoted. Granting on a disabled or
+/// soft-deleted user returns 409 / 404 for the same reason — the
+/// target must be a live admin to receive scope.
+///
+/// Duplicate grants collide on the `group_admin(user_id, group_id)`
+/// unique index and surface as 409 so a retry is safely idempotent.
+/// The `group_admin_granted` audit row records the caller as
+/// `actor_id` and the target as `user_id` so incident review can
+/// answer "who granted scope on this group to this admin?" later.
+pub async fn grant_group_admin(
+    SuperAdminUser(caller): SuperAdminUser,
+    State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
+    Path((user_id, group_id)): Path<(EntityId, EntityId)>,
+) -> Result<(StatusCode, Json<GroupAdminGrantResponse>), AppError> {
+    let user: Option<DbUser> = db.select(("user", user_id.as_str())).await?;
+    let user = user
+        .filter(|u| u.deleted_at.is_none())
+        .ok_or_else(|| AppError::NotFound(format!("user {user_id} does not exist")))?;
+
+    if user.status != "active" {
+        return Err(AppError::Conflict(format!(
+            "user {user_id} is not active (status: {})",
+            user.status
+        )));
+    }
+    if user.role != "admin" {
+        return Err(AppError::Conflict(format!(
+            "group-admin grants only apply to admin-role users (target role: {})",
+            user.role
+        )));
+    }
+
+    let group: Option<DbGroup> = db.select(("group", group_id.as_str())).await?;
+    group
+        .filter(|g| g.deleted_at.is_none())
+        .ok_or_else(|| AppError::NotFound(format!("group {group_id} does not exist")))?;
+
+    let now = now_iso();
+    let content = GroupAdminContent {
+        user_id: user_id.clone(),
+        group_id: group_id.clone(),
+        created_at: now.clone(),
+        created_by: caller.user_id.clone(),
+    };
+    let insert: Result<Option<DbGroupAdmin>, _> =
+        db.create("group_admin").content(content).await;
+    match insert {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Err(AppError::Internal(
+                "group_admin insert returned no row".into(),
+            ));
+        }
+        Err(e) => {
+            if is_unique_constraint_error(&e.to_string()) {
+                return Err(AppError::Conflict(format!(
+                    "user {user_id} already has group-admin on group {group_id}"
+                )));
+            }
+            return Err(e.into());
+        }
+    }
+
+    let ip = client_ip.to_string();
+    record_auth_event(
+        &db,
+        Some(user_id.clone()),
+        Some(caller.user_id.clone()),
+        "group_admin_granted",
+        true,
+        Some(&format!("group:{group_id}")),
+        Some(&ip),
+    )
+    .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(GroupAdminGrantResponse {
+            user_id,
+            group_id,
+            created_at: now,
+            created_by: caller.user_id,
+        }),
+    ))
+}
+
+// ── DELETE /api/admin/users/:id/groups/:group_id (BE-8 PR 4) ──────────────────
+
+/// Super-admin revokes a group-admin grant previously issued on this
+/// target user. The mutation is two-part: remove the `group_admin`
+/// row, then bump the target's `token_version`.
+///
+/// The token-version bump is load-bearing. Scope shrank — any
+/// in-flight access token the target still holds would otherwise let
+/// them act on the newly-revoked group for up to one access-token
+/// TTL. Bumping forces re-verification against the fresh DB state
+/// on the next call. This endpoint does **not** revoke refresh
+/// tokens; the user still has a valid session, they just can't
+/// operate on this group anymore.
+///
+/// Returns 404 if no matching grant exists — the deletion is
+/// idempotent from the caller's perspective but the handler doesn't
+/// silently swallow unknown rows, because a missing row in the audit
+/// trail later would be the signature of an out-of-band manual
+/// revoke that ops should see, not something we paper over here.
+pub async fn revoke_group_admin(
+    SuperAdminUser(caller): SuperAdminUser,
+    State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
+    Path((user_id, group_id)): Path<(EntityId, EntityId)>,
+) -> Result<StatusCode, AppError> {
+    // Delete the join row via a guarded query so we can distinguish
+    // "row did not exist" (→ 404) from a permission/connectivity
+    // failure. `DELETE ... RETURN BEFORE` echoes the matched rows so
+    // `rows.is_empty()` is the unambiguous 404 signal.
+    let mut resp = db
+        .query(
+            "DELETE FROM group_admin \
+             WHERE user_id = $uid AND group_id = $gid \
+             RETURN BEFORE",
+        )
+        .bind(("uid", user_id.clone()))
+        .bind(("gid", group_id.clone()))
+        .await?
+        .check()?;
+    let deleted: Vec<DbGroupAdmin> = resp.take(0)?;
+    if deleted.is_empty() {
+        return Err(AppError::NotFound(format!(
+            "user {user_id} has no group-admin grant on group {group_id}"
+        )));
+    }
+
+    // Bump target's `token_version` so in-flight access tokens
+    // reject on the next verify cycle. The bump is relative to the
+    // current DB value (not a stale snapshot) so a concurrent
+    // refresh-reuse detection or PATCH role change cannot be
+    // clobbered into a lower counter.
+    let _ = db
+        .query(
+            "UPDATE $id SET \
+                 token_version = token_version + 1, \
+                 updated_at = $now \
+             WHERE deleted_at IS NONE",
+        )
+        .bind(("id", RecordId::new("user", user_id.clone())))
+        .bind(("now", now_iso()))
+        .await?
+        .check()?;
+
+    let ip = client_ip.to_string();
+    record_auth_event(
+        &db,
+        Some(user_id.clone()),
+        Some(caller.user_id.clone()),
+        "group_admin_revoked",
+        true,
+        Some(&format!("group:{group_id}")),
+        Some(&ip),
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
