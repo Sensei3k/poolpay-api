@@ -36,6 +36,7 @@ use crate::api::models::{
 use crate::auth::audit::record_auth_event;
 use crate::auth::extractors::SuperAdminUser;
 use crate::auth::password;
+use crate::auth::rate_limit::ClientIp;
 use crate::auth::refresh;
 use crate::db::{DbConn, is_unique_constraint_error};
 
@@ -115,6 +116,7 @@ impl AdminUserResponse {
 pub async fn create_admin_user(
     SuperAdminUser(_): SuperAdminUser,
     State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
     http_req: Request,
 ) -> Result<(StatusCode, Json<AdminUserResponse>), AppError> {
     // Cap the body before deserialising so a super-admin caller (or a
@@ -210,13 +212,14 @@ pub async fn create_admin_user(
         }
     }
 
+    let ip = client_ip.to_string();
     record_auth_event(
         &db,
         Some(user_id.clone()),
         "user_created",
         true,
         Some(&req.role),
-        None,
+        Some(&ip),
     )
     .await;
 
@@ -238,6 +241,7 @@ pub async fn create_admin_user(
 pub async fn update_admin_user(
     SuperAdminUser(caller): SuperAdminUser,
     State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
     Path(id): Path<EntityId>,
     http_req: Request,
 ) -> Result<Json<AdminUserResponse>, AppError> {
@@ -328,6 +332,7 @@ pub async fn update_admin_user(
         )
     })?;
 
+    let ip = client_ip.to_string();
     if role_changed {
         record_auth_event(
             &db,
@@ -335,7 +340,7 @@ pub async fn update_admin_user(
             "role_changed",
             true,
             Some(&format!("{} -> {}", existing.role, new_role)),
-            None,
+            Some(&ip),
         )
         .await;
     }
@@ -352,7 +357,7 @@ pub async fn update_admin_user(
             "user_disabled",
             true,
             None,
-            None,
+            Some(&ip),
         )
         .await;
     }
@@ -370,6 +375,7 @@ pub async fn update_admin_user(
 pub async fn delete_admin_user(
     SuperAdminUser(caller): SuperAdminUser,
     State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
     Path(id): Path<EntityId>,
 ) -> Result<StatusCode, AppError> {
     if caller.user_id == id.as_str() {
@@ -409,13 +415,14 @@ pub async fn delete_admin_user(
     if let Err(e) = refresh::revoke_all_for_user(&db, id.as_str()).await {
         tracing::warn!(error = %e, user_id = %id.as_str(), "revoke_all_for_user on delete failed");
     }
+    let ip = client_ip.to_string();
     record_auth_event(
         &db,
         Some(id.as_str().to_string()),
         "user_disabled",
         true,
         Some("soft_deleted"),
-        None,
+        Some(&ip),
     )
     .await;
 
