@@ -34,7 +34,9 @@ const BAD_CURRENT_PASSWORD_CODE: &str = "bad_current";
 const BAD_CURRENT_PASSWORD_MESSAGE: &str = "Current password is incorrect.";
 
 /// Unified API error type — implements `IntoResponse` so handlers can use `?`
-/// directly and always return a JSON body with an `"error"` field.
+/// directly and return a JSON error body. Most variants use the legacy
+/// `{ "error": "..." }` shape, while `BadCurrentPassword` returns the coded
+/// `{ "code": "<stable slug>", "message": "<human copy>" }` shape.
 #[derive(Debug)]
 pub enum AppError {
     NotFound(String),
