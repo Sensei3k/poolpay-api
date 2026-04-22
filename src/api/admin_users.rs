@@ -750,23 +750,54 @@ pub async fn revoke_group_admin(
     }
 
     // Bump target's `token_version` so in-flight access tokens
-    // reject on the next verify cycle. The bump is relative to the
-    // current DB value (not a stale snapshot) so a concurrent
-    // refresh-reuse detection or PATCH role change cannot be
-    // clobbered into a lower counter.
-    let _ = db
+    // reject on the next verify cycle. Relative to the current DB
+    // value (not a stale snapshot) so a concurrent refresh-reuse
+    // detection or PATCH role change cannot be clobbered into a
+    // lower counter.
+    //
+    // Revoke is a two-step mutation — the `group_admin` row is
+    // already gone when this runs. A bump failure here means scope
+    // was dropped but in-flight JWTs still hold it until the
+    // access-token TTL expires: audit the partial outcome and
+    // surface 500 so operators can retry, rather than hide the
+    // inconsistency behind a 204. Mirrors the partial-failure
+    // handling in `update_admin_user` / `delete_admin_user` when a
+    // refresh-revoke step fails after a status commit.
+    //
+    // The bump is unconditional — no `deleted_at IS NONE` guard.
+    // If the user row is soft-deleted, the DELETE path has already
+    // bumped `token_version`, so a further bump here is idempotent
+    // from a security standpoint. If the row was hard-deleted
+    // out-of-band, the UPDATE matches zero rows and the query
+    // still returns Ok — acceptable, since there is no live
+    // session to invalidate anyway.
+    let ip = client_ip.to_string();
+    let bump = db
         .query(
             "UPDATE $id SET \
                  token_version = token_version + 1, \
-                 updated_at = $now \
-             WHERE deleted_at IS NONE",
+                 updated_at = $now",
         )
         .bind(("id", RecordId::new("user", user_id.clone())))
         .bind(("now", now_iso()))
-        .await?
-        .check()?;
+        .await
+        .and_then(|r| r.check().map(|_| ()));
+    if let Err(e) = bump {
+        record_auth_event(
+            &db,
+            Some(user_id.clone()),
+            Some(caller.user_id.clone()),
+            "group_admin_revoked",
+            false,
+            Some("token_version_bump_failed"),
+            Some(&ip),
+        )
+        .await;
+        return Err(AppError::Internal(format!(
+            "token_version bump failed after group_admin revoke: {e}"
+        )));
+    }
 
-    let ip = client_ip.to_string();
     record_auth_event(
         &db,
         Some(user_id.clone()),
