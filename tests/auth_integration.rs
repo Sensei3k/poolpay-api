@@ -1342,6 +1342,22 @@ async fn change_password_rejects_empty_new_password() {
 }
 
 #[tokio::test]
+async fn change_password_rejects_whitespace_only_new_password() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let admin_id = bootstrap_admin_id(&db).await;
+    let access = verifier
+        .mint_access(&admin_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({
+        "currentPassword": BOOTSTRAP_PASSWORD,
+        "newPassword": "      ",
+    });
+    let resp = call(app, change_password_req(&access, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn change_password_rejects_oversized_new_password() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let admin_id = bootstrap_admin_id(&db).await;
@@ -1510,3 +1526,643 @@ async fn change_password_set_path_refuses_when_another_user_owns_credentials_ide
     let verify_resp = call(app, hmac_request("/api/auth/verify-credentials", &verify_body)).await;
     assert_eq!(verify_resp.status(), StatusCode::OK);
 }
+
+// ── Admin user CRUD (Plan 3 / BE-8 PR 3) ─────────────────────────────────────
+
+fn admin_users_post_req(token: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/admin/users")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap()
+}
+
+fn admin_users_patch_req(id: &str, token: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::PATCH)
+        .uri(format!("/api/admin/users/{id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap()
+}
+
+fn admin_users_delete_req(id: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::DELETE)
+        .uri(format!("/api/admin/users/{id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn user_version(db: &poolpay::db::DbConn, user_id: &str) -> i64 {
+    use surrealdb::types::RecordId;
+    let mut resp = db
+        .query("SELECT version FROM $id")
+        .bind(("id", RecordId::new("user", user_id.to_string())))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp.take("version").unwrap_or_default();
+    rows.first().copied().unwrap_or(-1)
+}
+
+async fn user_role(db: &poolpay::db::DbConn, user_id: &str) -> String {
+    use surrealdb::types::RecordId;
+    let mut resp = db
+        .query("SELECT role FROM $id")
+        .bind(("id", RecordId::new("user", user_id.to_string())))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<String> = resp.take("role").unwrap_or_default();
+    rows.into_iter().next().unwrap_or_default()
+}
+
+async fn user_status(db: &poolpay::db::DbConn, user_id: &str) -> String {
+    use surrealdb::types::RecordId;
+    let mut resp = db
+        .query("SELECT status FROM $id")
+        .bind(("id", RecordId::new("user", user_id.to_string())))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<String> = resp.take("status").unwrap_or_default();
+    rows.into_iter().next().unwrap_or_default()
+}
+
+async fn user_deleted_at(db: &poolpay::db::DbConn, user_id: &str) -> Option<String> {
+    use surrealdb::types::RecordId;
+    let mut resp = db
+        .query("SELECT deleted_at FROM $id")
+        .bind(("id", RecordId::new("user", user_id.to_string())))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<Option<String>> = resp.take("deleted_at").unwrap_or_default();
+    rows.into_iter().next().flatten()
+}
+
+// --- POST /api/admin/users ---
+
+#[tokio::test]
+async fn create_admin_user_happy_path_returns_201_and_allows_signin() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "new-admin@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+    });
+    let resp = call(app.clone(), admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let v: serde_json::Value = json_body(resp).await;
+    assert_eq!(v["email"], "new-admin@example.com");
+    assert_eq!(v["role"], "admin");
+    assert_eq!(v["status"], "active");
+    assert_eq!(v["mustResetPassword"], true);
+    assert_eq!(v["tokenVersion"], 0);
+    assert_eq!(v["version"], 1);
+    let new_id = v["userId"].as_str().unwrap().to_string();
+    assert!(!new_id.is_empty());
+
+    // Audit row written.
+    let events = count_auth_events(&db, &new_id, "user_created").await;
+    assert_eq!(events, 1);
+
+    // Credentials identity was created — verify-credentials with the seed
+    // password now returns 200 and flags mustResetPassword.
+    let verify_body = serde_json::json!({
+        "email": "new-admin@example.com",
+        "password": "initial-secret-passphrase",
+    });
+    let verify_resp = call(app, hmac_request("/api/auth/verify-credentials", &verify_body)).await;
+    assert_eq!(verify_resp.status(), StatusCode::OK);
+    let vv: serde_json::Value = json_body(verify_resp).await;
+    assert_eq!(vv["mustResetPassword"], true);
+    assert_eq!(vv["role"], "admin");
+}
+
+#[tokio::test]
+async fn create_admin_user_allows_second_super_admin() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "second-super@example.com",
+        "initialPassword": "another-seed-password",
+        "role": "super_admin",
+    });
+    let resp = call(app, admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v: serde_json::Value = json_body(resp).await;
+    assert_eq!(v["role"], "super_admin");
+}
+
+#[tokio::test]
+async fn create_admin_user_rejects_member_role() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "not-an-admin@example.com",
+        "initialPassword": "seed-password",
+        "role": "member",
+    });
+    let resp = call(app, admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_admin_user_rejects_empty_email() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "   ",
+        "initialPassword": "seed-password",
+        "role": "admin",
+    });
+    let resp = call(app, admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_admin_user_rejects_oversized_email() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": format!("{}@example.com", "a".repeat(400)),
+        "initialPassword": "seed-password",
+        "role": "admin",
+    });
+    let resp = call(app, admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_admin_user_rejects_empty_password() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "blank-pwd@example.com",
+        "initialPassword": "",
+        "role": "admin",
+    });
+    let resp = call(app, admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_admin_user_rejects_whitespace_only_password() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "ws-pwd@example.com",
+        "initialPassword": "      ",
+        "role": "admin",
+    });
+    let resp = call(app, admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_admin_user_rejects_oversized_password() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "huge-pwd@example.com",
+        "initialPassword": "x".repeat(2000),
+        "role": "admin",
+    });
+    let resp = call(app, admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_admin_user_duplicate_email_returns_409() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "dupe@example.com",
+        "initialPassword": "seed-password",
+        "role": "admin",
+    });
+    let first = call(app.clone(), admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(first.status(), StatusCode::CREATED);
+
+    let second = call(app, admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn create_admin_user_collides_on_existing_bootstrap_email() {
+    // The bootstrap admin already owns a `credentials`/email_normalised
+    // identity row, so re-creating the same email must 409 even though the
+    // request is the operator's first CRUD call.
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": BOOTSTRAP_EMAIL,
+        "initialPassword": "seed-password",
+        "role": "admin",
+    });
+    let resp = call(app, admin_users_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn create_admin_user_rejects_non_super_admin_with_403() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let member_id = seed_member(&app, "sub-post-forbidden", "postforbid@example.com").await;
+    let member_token = verifier.mint_access(&member_id, "member", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "should-not-exist@example.com",
+        "initialPassword": "seed-password",
+        "role": "admin",
+    });
+
+    // Exercise the member path before the DB role is promoted — the extractor
+    // derives the role from the DB row, so flipping it first would turn this
+    // into a second admin-caller assertion.
+    let member_resp = call(app.clone(), admin_users_post_req(&member_token, &body)).await;
+    assert_eq!(member_resp.status(), StatusCode::FORBIDDEN);
+
+    set_user_role(&db, &member_id, "admin").await;
+    let admin_token = verifier.mint_access(&member_id, "admin", 0).expect("mint");
+
+    let admin_resp = call(app, admin_users_post_req(&admin_token, &body)).await;
+    assert_eq!(admin_resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_admin_user_without_bearer_returns_401() {
+    let (app, _db, _v) = build_app_full(lax_rate_cfg()).await;
+    let body = serde_json::json!({
+        "email": "nobody@example.com",
+        "initialPassword": "seed-password",
+        "role": "admin",
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/admin/users")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = call(app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// --- PATCH /api/admin/users/:id ---
+
+/// Provision an admin-tier user via the POST endpoint so the PATCH/DELETE
+/// tests exercise the real create path rather than a hand-crafted row.
+async fn seed_admin_user(
+    app: &Router,
+    super_token: &str,
+    email: &str,
+    role: &str,
+) -> (String, i64) {
+    let body = serde_json::json!({
+        "email": email,
+        "initialPassword": "initial-password",
+        "role": role,
+    });
+    let resp = call(app.clone(), admin_users_post_req(super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "seed_admin_user failed");
+    let v: serde_json::Value = json_body(resp).await;
+    (
+        v["userId"].as_str().unwrap().to_string(),
+        v["version"].as_i64().unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn update_admin_user_role_change_bumps_token_version_and_writes_audit() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, version) =
+        seed_admin_user(&app, &super_token, "patch-role@example.com", "admin").await;
+
+    let tv_before = user_token_version(&db, &target_id).await;
+
+    let body = serde_json::json!({ "role": "super_admin", "version": version });
+    let resp = call(app, admin_users_patch_req(&target_id, &super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    assert_eq!(v["role"], "super_admin");
+    assert_eq!(v["version"], version + 1);
+
+    let tv_after = user_token_version(&db, &target_id).await;
+    assert!(
+        tv_after > tv_before,
+        "role change must bump token_version: before={tv_before} after={tv_after}"
+    );
+
+    // Stored role reflects the patch.
+    assert_eq!(user_role(&db, &target_id).await, "super_admin");
+
+    // Audit row written.
+    let events = count_auth_events(&db, &target_id, "role_changed").await;
+    assert_eq!(events, 1);
+}
+
+#[tokio::test]
+async fn update_admin_user_role_change_rejects_in_flight_access_token() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, version) =
+        seed_admin_user(&app, &super_token, "stale-token@example.com", "admin").await;
+    // Token minted against the target's current token_version (0) — this is
+    // the JWT-invalidation cursor, distinct from `user.version` (optimistic
+    // concurrency). The role-change below bumps `token_version` so this
+    // access token stops verifying.
+    let target_token = verifier.mint_access(&target_id, "admin", 0).expect("mint");
+
+    // Promote target to super_admin — bumps token_version.
+    let body = serde_json::json!({ "role": "super_admin", "version": version });
+    let resp = call(app.clone(), admin_users_patch_req(&target_id, &super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The target's pre-promotion access token must now fail the version
+    // check on any authenticated endpoint — use change-password which is
+    // gated by AuthenticatedUser.
+    let cp = serde_json::json!({
+        "currentPassword": "initial-password",
+        "newPassword": "rotation-secret-passphrase",
+    });
+    let replay = call(app, change_password_req(&target_token, &cp)).await;
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn update_admin_user_status_disable_revokes_refresh_tokens_and_audits() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, version) =
+        seed_admin_user(&app, &super_token, "disable@example.com", "admin").await;
+
+    // Pre-issue a refresh token for the target.
+    let issued = refresh::issue(&db, &target_id).await.expect("issue");
+    let tv_before = user_token_version(&db, &target_id).await;
+
+    let body = serde_json::json!({ "status": "disabled", "version": version });
+    let resp = call(app.clone(), admin_users_patch_req(&target_id, &super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(user_status(&db, &target_id).await, "disabled");
+    let tv_after = user_token_version(&db, &target_id).await;
+    assert!(tv_after > tv_before, "disable must bump token_version");
+
+    // Refresh token is now dead.
+    let after = call(app, refresh_req(&issued.plaintext)).await;
+    assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+
+    // Audit row.
+    let events = count_auth_events(&db, &target_id, "user_disabled").await;
+    assert_eq!(events, 1);
+}
+
+#[tokio::test]
+async fn update_admin_user_noop_patch_bumps_version_but_not_token_version() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, version) =
+        seed_admin_user(&app, &super_token, "noop@example.com", "admin").await;
+    let tv_before = user_token_version(&db, &target_id).await;
+
+    // Send the same role + current version — nothing changes.
+    let body = serde_json::json!({ "role": "admin", "version": version });
+    let resp = call(app, admin_users_patch_req(&target_id, &super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(user_version(&db, &target_id).await, version + 1);
+    assert_eq!(
+        user_token_version(&db, &target_id).await,
+        tv_before,
+        "no-op patch must not bump token_version"
+    );
+    let events = count_auth_events(&db, &target_id, "role_changed").await;
+    assert_eq!(events, 0, "no role_changed event for a no-op role patch");
+}
+
+#[tokio::test]
+async fn update_admin_user_version_mismatch_returns_409() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, version) =
+        seed_admin_user(&app, &super_token, "stale-version@example.com", "admin").await;
+
+    let body = serde_json::json!({ "role": "super_admin", "version": version + 99 });
+    let resp = call(app, admin_users_patch_req(&target_id, &super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn update_admin_user_unknown_id_returns_404() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let body = serde_json::json!({ "role": "admin", "version": 1 });
+    let resp = call(app, admin_users_patch_req("nonexistent-id", &super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn update_admin_user_rejects_unsupported_role_and_status() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, version) =
+        seed_admin_user(&app, &super_token, "badvals@example.com", "admin").await;
+
+    let bad_role = serde_json::json!({ "role": "owner", "version": version });
+    let r1 = call(app.clone(), admin_users_patch_req(&target_id, &super_token, &bad_role)).await;
+    assert_eq!(r1.status(), StatusCode::BAD_REQUEST);
+
+    let bad_status = serde_json::json!({ "status": "pending", "version": version });
+    let r2 = call(app, admin_users_patch_req(&target_id, &super_token, &bad_status)).await;
+    assert_eq!(r2.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn update_admin_user_self_mutation_returns_403() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let version = user_version(&db, &super_id).await;
+    let body = serde_json::json!({ "role": "admin", "version": version });
+    let resp = call(app, admin_users_patch_req(&super_id, &super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn update_admin_user_rejects_non_super_admin_with_403() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, version) =
+        seed_admin_user(&app, &super_token, "patch-forbid@example.com", "admin").await;
+    let target_token = verifier.mint_access(&target_id, "admin", 0).expect("mint");
+
+    let body = serde_json::json!({ "role": "super_admin", "version": version });
+    let resp = call(app, admin_users_patch_req(&target_id, &target_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn update_admin_user_allows_demotion_to_member() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, version) =
+        seed_admin_user(&app, &super_token, "demote@example.com", "admin").await;
+
+    let body = serde_json::json!({ "role": "member", "version": version });
+    let resp = call(app, admin_users_patch_req(&target_id, &super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(user_role(&db, &target_id).await, "member");
+}
+
+// --- DELETE /api/admin/users/:id ---
+
+#[tokio::test]
+async fn delete_admin_user_soft_deletes_and_bumps_token_version() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "soft-del@example.com", "admin").await;
+
+    let issued = refresh::issue(&db, &target_id).await.expect("issue");
+    let tv_before = user_token_version(&db, &target_id).await;
+
+    let resp = call(app.clone(), admin_users_delete_req(&target_id, &super_token)).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    assert!(
+        user_deleted_at(&db, &target_id).await.is_some(),
+        "delete must stamp deleted_at"
+    );
+    let tv_after = user_token_version(&db, &target_id).await;
+    assert!(tv_after > tv_before, "delete must bump token_version");
+
+    // Refresh token is revoked.
+    let after = call(app, refresh_req(&issued.plaintext)).await;
+    assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+
+    // Audit row with `soft_deleted` reason.
+    let mut resp = db
+        .query(
+            "SELECT count() FROM auth_event \
+             WHERE user_id = $uid AND event_type = 'user_disabled' \
+               AND reason = 'soft_deleted' GROUP ALL",
+        )
+        .bind(("uid", target_id.clone()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp.take("count").unwrap_or_default();
+    assert_eq!(rows.first().copied().unwrap_or(0), 1);
+}
+
+#[tokio::test]
+async fn delete_admin_user_self_delete_returns_403() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let resp = call(app, admin_users_delete_req(&super_id, &super_token)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Still present, still active. `user_deleted_at` returning `None` alone
+    // cannot distinguish "deleted_at unset" from "row missing", so also
+    // assert the status column still resolves to `active` — that query
+    // would return empty (and `user_status` `""`) if the row were gone.
+    assert!(user_deleted_at(&db, &super_id).await.is_none());
+    assert_eq!(user_status(&db, &super_id).await, "active");
+}
+
+#[tokio::test]
+async fn delete_admin_user_unknown_id_returns_404() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let resp = call(app, admin_users_delete_req("nonexistent-id", &super_token)).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_admin_user_already_deleted_returns_404() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "double-del@example.com", "admin").await;
+
+    let first = call(app.clone(), admin_users_delete_req(&target_id, &super_token)).await;
+    assert_eq!(first.status(), StatusCode::NO_CONTENT);
+
+    let second = call(app, admin_users_delete_req(&target_id, &super_token)).await;
+    assert_eq!(second.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_admin_user_rejects_non_super_admin_with_403() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "del-forbid@example.com", "admin").await;
+    let target_token = verifier.mint_access(&target_id, "admin", 0).expect("mint");
+
+    let resp = call(app, admin_users_delete_req(&target_id, &target_token)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+

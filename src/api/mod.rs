@@ -1,3 +1,4 @@
+pub mod admin_users;
 pub mod auth_endpoints;
 pub mod handlers;
 pub mod models;
@@ -104,6 +105,13 @@ pub fn router_with_config(
         .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
         .route("/api/admin/whatsapp-links", post(create_whatsapp_link))
         .route("/api/admin/whatsapp-links/{id}", delete(delete_whatsapp_link))
+        // Admin user management (super_admin-only; gated by the
+        // `SuperAdminUser` extractor inside each handler rather than a
+        // router-level layer so we can keep the response-shape control
+        // local to the module).
+        .route("/api/admin/users", post(admin_users::create_admin_user))
+        .route("/api/admin/users/{id}", patch(admin_users::update_admin_user))
+        .route("/api/admin/users/{id}", delete(admin_users::delete_admin_user))
         // Bearer-authenticated auth endpoints. Change-password is gated by
         // the `AuthenticatedUser` extractor — mounting it on the unrestricted
         // router avoids double-charging tower-governor's per-IP bucket for

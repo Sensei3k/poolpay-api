@@ -53,6 +53,7 @@ pub async fn ensure_admin_user(db: &DbConn) -> Result<(), surrealdb::Error> {
         status: "active".into(),
         token_version: 0,
         must_reset_password: true,
+        version: 1,
         created_at: now.clone(),
         updated_at: now.clone(),
         deleted_at: None,

@@ -72,6 +72,8 @@ async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
          DEFINE FIELD IF NOT EXISTS status ON user TYPE string ASSERT $value IN ['active', 'disabled'];
          DEFINE FIELD IF NOT EXISTS token_version ON user TYPE int;
          DEFINE FIELD IF NOT EXISTS must_reset_password ON user TYPE bool;
+         DEFINE FIELD IF NOT EXISTS version ON user TYPE int;
+         UPDATE user SET version = 1 WHERE version IS NONE;
          DEFINE FIELD IF NOT EXISTS created_at ON user TYPE string;
          DEFINE FIELD IF NOT EXISTS updated_at ON user TYPE string;
          DEFINE FIELD IF NOT EXISTS deleted_at ON user TYPE option<string>;
@@ -219,6 +221,19 @@ where
         Err(e) if e.to_string().contains("does not exist") => Ok(vec![]),
         Err(e) => Err(e),
     }
+}
+
+/// Substring-based detector for SurrealDB unique-constraint violations.
+///
+/// SurrealDB surfaces UNIQUE index collisions as opaque error strings — there
+/// is no structured error variant to match on. We sniff the lowercased message
+/// for the three phrases the engine is known to use ("already contains",
+/// "unique", "duplicate"). Keeping this centralised avoids the two insert
+/// paths (`auth_endpoints::ensure_user` and `admin_users::create_admin_user`)
+/// drifting apart if SurrealDB tweaks its wording in a future release.
+pub(crate) fn is_unique_constraint_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("already contains") || lower.contains("unique") || lower.contains("duplicate")
 }
 
 // ── Fixture data ──────────────────────────────────────────────────────────────
