@@ -160,6 +160,7 @@ pub async fn create_admin_user(
         )));
     }
     let email_normalised = email.to_lowercase();
+    let ip = client_ip.to_string();
 
     // Pre-check duplicate against the credentials identity row. Catches
     // the common case cheaply; a concurrent insert is still handled by
@@ -168,13 +169,37 @@ pub async fn create_admin_user(
         .await?
         .is_some()
     {
+        record_auth_event(
+            &db,
+            None,
+            Some(caller.user_id.clone()),
+            "user_created",
+            false,
+            Some("duplicate_email"),
+            Some(&ip),
+        )
+        .await;
         return Err(AppError::Conflict(
             "email already registered".into(),
         ));
     }
 
-    let password_hash = password::hash(&req.initial_password)
-        .map_err(|_| AppError::Internal("password hashing failed".into()))?;
+    let password_hash = match password::hash(&req.initial_password) {
+        Ok(h) => h,
+        Err(_) => {
+            record_auth_event(
+                &db,
+                None,
+                Some(caller.user_id.clone()),
+                "user_created",
+                false,
+                Some("hash_failed"),
+                Some(&ip),
+            )
+            .await;
+            return Err(AppError::Internal("password hashing failed".into()));
+        }
+    };
 
     let now = now_iso();
     let user_content = UserContent {
@@ -191,8 +216,22 @@ pub async fn create_admin_user(
         deleted_at: None,
     };
     let created: Option<DbUser> = db.create("user").content(user_content).await?;
-    let created = created
-        .ok_or_else(|| AppError::Internal("user insert returned none".into()))?;
+    let created = match created {
+        Some(u) => u,
+        None => {
+            record_auth_event(
+                &db,
+                None,
+                Some(caller.user_id.clone()),
+                "user_created",
+                false,
+                Some("user_insert_returned_none"),
+                Some(&ip),
+            )
+            .await;
+            return Err(AppError::Internal("user insert returned none".into()));
+        }
+    };
     let user_id = record_id_to_string(created.id.clone());
 
     let identity = UserIdentityContent {
@@ -208,6 +247,16 @@ pub async fn create_admin_user(
         Ok(Some(_)) => {}
         Ok(None) => {
             rollback_user(&db, &user_id).await;
+            record_auth_event(
+                &db,
+                None,
+                Some(caller.user_id.clone()),
+                "user_created",
+                false,
+                Some("identity_insert_returned_none"),
+                Some(&ip),
+            )
+            .await;
             return Err(AppError::Internal(
                 "user_identity insert returned none".into(),
             ));
@@ -216,15 +265,34 @@ pub async fn create_admin_user(
             let msg = e.to_string();
             rollback_user(&db, &user_id).await;
             if is_unique_constraint_error(&msg) {
+                record_auth_event(
+                    &db,
+                    None,
+                    Some(caller.user_id.clone()),
+                    "user_created",
+                    false,
+                    Some("duplicate_email_race"),
+                    Some(&ip),
+                )
+                .await;
                 return Err(AppError::Conflict("email already registered".into()));
             }
+            record_auth_event(
+                &db,
+                None,
+                Some(caller.user_id.clone()),
+                "user_created",
+                false,
+                Some("identity_insert_failed"),
+                Some(&ip),
+            )
+            .await;
             return Err(AppError::Internal(format!(
                 "user_identity insert failed: {msg}"
             )));
         }
     }
 
-    let ip = client_ip.to_string();
     record_auth_event(
         &db,
         Some(user_id.clone()),

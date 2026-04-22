@@ -783,6 +783,31 @@ async fn count_auth_events(
     rows.first().copied().unwrap_or(0)
 }
 
+async fn count_failure_events_by_actor(
+    db: &poolpay::db::DbConn,
+    actor_id: &str,
+    event_type: &str,
+    reason: &str,
+) -> i64 {
+    let mut resp = db
+        .query(
+            "SELECT count() FROM auth_event \
+             WHERE actor_id = $aid AND event_type = $t \
+               AND success = false AND reason = $r GROUP ALL",
+        )
+        .bind(("aid", actor_id.to_string()))
+        .bind(("t", event_type.to_string()))
+        .bind(("r", reason.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp
+        .take("count")
+        .expect("auth_event count query returned unexpected shape");
+    rows.first().copied().unwrap_or(0)
+}
+
 #[tokio::test]
 async fn issue_returns_tokens_that_round_trip_through_refresh() {
     let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
@@ -1776,6 +1801,12 @@ async fn create_admin_user_duplicate_email_returns_409() {
 
     let second = call(app, admin_users_post_req(&super_token, &body)).await;
     assert_eq!(second.status(), StatusCode::CONFLICT);
+
+    // Failure is audited with actor_id = super_admin so ops can alert on
+    // probing patterns (many failed provisions from one operator).
+    let failures =
+        count_failure_events_by_actor(&db, &super_id, "user_created", "duplicate_email").await;
+    assert_eq!(failures, 1);
 }
 
 #[tokio::test]
