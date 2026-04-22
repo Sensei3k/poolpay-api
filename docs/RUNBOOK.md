@@ -466,7 +466,7 @@ Returns `204 No Content`.
 
 ### Admin User Management
 
-All routes under `/api/admin/users` require `role: super_admin` on the caller's access token. Mutations that change role, status, or scope bump the target's `token_version`, which invalidates in-flight access tokens within one TTL.
+All routes under `/api/admin/users` require the caller to be a `super_admin`, enforced from the caller's persisted DB role rather than the JWT `role` claim — the access token is only trusted for `sub` and `token_version`. Mutations only invalidate in-flight access tokens when they explicitly bump the target's `token_version`: `PATCH` bumps on role or status change, `DELETE` always bumps, `revoke` bumps (scope shrinks), and `grant` does not (scope grows, existing tokens already fail the group-scope check).
 
 #### POST /api/admin/users
 
