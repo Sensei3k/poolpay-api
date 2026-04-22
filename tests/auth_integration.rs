@@ -2118,8 +2118,12 @@ async fn delete_admin_user_self_delete_returns_403() {
     let resp = call(app, admin_users_delete_req(&super_id, &super_token)).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-    // Still present, still active.
+    // Still present, still active. `user_deleted_at` returning `None` alone
+    // cannot distinguish "deleted_at unset" from "row missing", so also
+    // assert the status column still resolves to `active` — that query
+    // would return empty (and `user_status` `""`) if the row were gone.
     assert!(user_deleted_at(&db, &super_id).await.is_none());
+    assert_eq!(user_status(&db, &super_id).await, "active");
 }
 
 #[tokio::test]
