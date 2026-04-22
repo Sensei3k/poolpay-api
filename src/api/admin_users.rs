@@ -30,8 +30,8 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId;
 
 use crate::api::models::{
-    AppError, DbUser, DbUserIdentity, EntityId, UserContent, UserIdentityContent, now_iso,
-    record_id_to_string,
+    AppError, DbGroup, DbGroupAdmin, DbUser, DbUserIdentity, EntityId, GroupAdminContent,
+    UserContent, UserIdentityContent, now_iso, record_id_to_string,
 };
 use crate::auth::audit::record_auth_event;
 use crate::auth::extractors::SuperAdminUser;
@@ -592,5 +592,114 @@ async fn rollback_user(db: &DbConn, user_id: &str) {
             "rollback_user failed after identity insert error — orphan user row"
         );
     }
+}
+
+// ── POST /api/admin/users/:id/groups/:group_id (BE-8 PR 4) ────────────────────
+
+/// Response echoed on successful grant. Small on purpose — the grant
+/// is fully identified by the path, and the audit row carries the
+/// canonical record. The response exists mainly so the client can
+/// confirm `createdBy` and `createdAt` without a follow-up read.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupAdminGrantResponse {
+    pub user_id: String,
+    pub group_id: String,
+    pub created_at: String,
+    pub created_by: String,
+}
+
+/// Super-admin grants one `admin`-role user access to one group.
+///
+/// Granting to a `super_admin` returns 409 — super-admins bypass the
+/// group-scope extractor entirely (see `src/auth/extractors.rs`), so
+/// the row would be dead weight. Granting to a `member` also returns
+/// 409: group-admin rows are the admin-tier scope primitive, not a
+/// membership indicator, and a member row here would silently widen
+/// RBAC if the user were later promoted. Granting on a disabled or
+/// soft-deleted user returns 409 / 404 for the same reason — the
+/// target must be a live admin to receive scope.
+///
+/// Duplicate grants collide on the `group_admin(user_id, group_id)`
+/// unique index and surface as 409 so a retry is safely idempotent.
+/// The `group_admin_granted` audit row records the caller as
+/// `actor_id` and the target as `user_id` so incident review can
+/// answer "who granted scope on this group to this admin?" later.
+pub async fn grant_group_admin(
+    SuperAdminUser(caller): SuperAdminUser,
+    State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
+    Path((user_id, group_id)): Path<(EntityId, EntityId)>,
+) -> Result<(StatusCode, Json<GroupAdminGrantResponse>), AppError> {
+    let user: Option<DbUser> = db.select(("user", user_id.as_str())).await?;
+    let user = user
+        .filter(|u| u.deleted_at.is_none())
+        .ok_or_else(|| AppError::NotFound(format!("user {user_id} does not exist")))?;
+
+    if user.status != "active" {
+        return Err(AppError::Conflict(format!(
+            "user {user_id} is not active (status: {})",
+            user.status
+        )));
+    }
+    if user.role != "admin" {
+        return Err(AppError::Conflict(format!(
+            "group-admin grants only apply to admin-role users (target role: {})",
+            user.role
+        )));
+    }
+
+    let group: Option<DbGroup> = db.select(("group", group_id.as_str())).await?;
+    group
+        .filter(|g| g.deleted_at.is_none())
+        .ok_or_else(|| AppError::NotFound(format!("group {group_id} does not exist")))?;
+
+    let now = now_iso();
+    let content = GroupAdminContent {
+        user_id: user_id.clone(),
+        group_id: group_id.clone(),
+        created_at: now.clone(),
+        created_by: caller.user_id.clone(),
+    };
+    let insert: Result<Option<DbGroupAdmin>, _> =
+        db.create("group_admin").content(content).await;
+    match insert {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Err(AppError::Internal(
+                "group_admin insert returned no row".into(),
+            ));
+        }
+        Err(e) => {
+            if is_unique_constraint_error(&e.to_string()) {
+                return Err(AppError::Conflict(format!(
+                    "user {user_id} already has group-admin on group {group_id}"
+                )));
+            }
+            return Err(e.into());
+        }
+    }
+
+    let ip = client_ip.to_string();
+    record_auth_event(
+        &db,
+        Some(user_id.clone()),
+        Some(caller.user_id.clone()),
+        "group_admin_granted",
+        true,
+        Some(&format!("group:{group_id}")),
+        Some(&ip),
+    )
+    .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(GroupAdminGrantResponse {
+            user_id,
+            group_id,
+            created_at: now,
+            created_by: caller.user_id,
+        }),
+    ))
 }
 
