@@ -362,7 +362,20 @@ async fn ensure_admin_fixture(
         reason: Some("fixture_seed".into()),
         created_at: now,
     };
-    let _: Option<DbAuthEvent> = db.create("auth_event").content(event).await?;
+    // Fixture seeding must not fail startup on a transient audit-write
+    // error. The user + identity rows are already persisted, so degrade to
+    // a warn-and-continue on audit issues — matches the best-effort
+    // contract documented on `seed_dummy_admins`.
+    let audit_result: Result<Option<DbAuthEvent>, _> =
+        db.create("auth_event").content(event).await;
+    if let Err(e) = audit_result {
+        warn!(
+            email_redacted = redact(email),
+            user_id = user_id.as_str(),
+            error = %e,
+            "fixture admin auth_event insert failed — continuing"
+        );
+    }
 
     info!(
         email_redacted = redact(email),
@@ -423,7 +436,20 @@ async fn ensure_group_admin_grant(
                 reason: Some("fixture_seed".into()),
                 created_at: now,
             };
-            let _: Option<DbAuthEvent> = db.create("auth_event").content(event).await?;
+            // Grant row is already persisted; treat the audit write as
+            // best-effort so a transient audit failure doesn't abort the
+            // dev-only seed path (which is already best-effort per the
+            // comment below on the `Ok(None)` arm).
+            let audit_result: Result<Option<DbAuthEvent>, _> =
+                db.create("auth_event").content(event).await;
+            if let Err(e) = audit_result {
+                warn!(
+                    user_id,
+                    group_id,
+                    error = %e,
+                    "fixture group_admin grant audit event insert failed — continuing"
+                );
+            }
             info!(user_id, group_id, "fixture group_admin grant created");
             Ok(())
         }
