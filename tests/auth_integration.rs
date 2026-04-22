@@ -1315,8 +1315,13 @@ async fn change_password_rotates_hash_bumps_token_version_and_clears_must_reset(
     assert_eq!(verify_resp.status(), StatusCode::OK);
 }
 
+/// Wrong `currentPassword` used to collapse onto `401`, which forced the FE
+/// to infer it from a post-refresh retry against a still-valid session.
+/// Since issue #39 it returns `400 + { code: "bad_current", message }` so the
+/// FE can read the failure mode directly; `401` stays reserved for genuine
+/// token failures. Audit + no-mutation invariants unchanged.
 #[tokio::test]
-async fn change_password_wrong_current_returns_401_and_does_not_mutate() {
+async fn change_password_wrong_current_returns_400_bad_current_and_does_not_mutate() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let admin_id = bootstrap_admin_id(&db).await;
     let access = verifier
@@ -1325,16 +1330,52 @@ async fn change_password_wrong_current_returns_401_and_does_not_mutate() {
 
     let hash_before = user_password_hash(&db, &admin_id).await;
     let version_before = user_token_version(&db, &admin_id).await;
+    let failures_before =
+        count_auth_events(&db, &admin_id, "password_change_failure").await;
 
     let body = serde_json::json!({
         "currentPassword": "this-is-not-the-real-password",
         "newPassword": "some-new-password",
     });
     let resp = call(app, change_password_req(&access, &body)).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let body: serde_json::Value = json_body(resp).await;
+    assert_eq!(body["code"], "bad_current");
+    assert_eq!(body["message"], "Current password is incorrect.");
+    assert!(
+        body.get("error").is_none(),
+        "coded errors must not also carry the legacy `error` field"
+    );
 
     assert_eq!(user_password_hash(&db, &admin_id).await, hash_before);
     assert_eq!(user_token_version(&db, &admin_id).await, version_before);
+    assert_eq!(
+        count_auth_events(&db, &admin_id, "password_change_failure").await,
+        failures_before + 1,
+        "bad-current-password must still write a `password_change_failure` audit row"
+    );
+}
+
+/// Genuine token failures (malformed bearer, bad signature) must still
+/// return `401` — the FE relies on this split post-#39 to tell a real auth
+/// failure from a wrong-password one.
+#[tokio::test]
+async fn change_password_with_malformed_bearer_returns_401() {
+    let (app, _db, _verifier) = build_app_full(lax_rate_cfg()).await;
+    let body = serde_json::json!({
+        "currentPassword": BOOTSTRAP_PASSWORD,
+        "newPassword": "some-new-password",
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/change-password")
+        .header("authorization", "Bearer not-a-real-jwt")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = call(app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
