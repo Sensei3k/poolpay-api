@@ -91,6 +91,7 @@ async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 
          DEFINE TABLE IF NOT EXISTS auth_event SCHEMAFULL;
          DEFINE FIELD IF NOT EXISTS user_id ON auth_event TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS actor_id ON auth_event TYPE option<string>;
          DEFINE FIELD IF NOT EXISTS event_type ON auth_event TYPE string;
          DEFINE FIELD IF NOT EXISTS ip ON auth_event TYPE option<string>;
          DEFINE FIELD IF NOT EXISTS user_agent ON auth_event TYPE option<string>;

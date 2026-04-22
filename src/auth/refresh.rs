@@ -237,6 +237,7 @@ async fn handle_reuse(db: &DbConn, stolen: &DbRefreshToken) {
     }
     let event = AuthEventContent {
         user_id: Some(stolen.user_id.clone()),
+        actor_id: Some(stolen.user_id.clone()),
         event_type: "refresh_reuse_detected".into(),
         ip: None,
         user_agent: None,

@@ -1034,6 +1034,7 @@ pub struct DbUserIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct AuthEventContent {
     pub user_id: Option<String>,
+    pub actor_id: Option<String>,
     pub event_type: String,
     pub ip: Option<String>,
     pub user_agent: Option<String>,
@@ -1046,6 +1047,7 @@ pub struct AuthEventContent {
 pub struct DbAuthEvent {
     pub id: RecordId,
     pub user_id: Option<String>,
+    pub actor_id: Option<String>,
     pub event_type: String,
     pub ip: Option<String>,
     pub user_agent: Option<String>,

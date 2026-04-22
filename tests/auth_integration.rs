@@ -783,6 +783,31 @@ async fn count_auth_events(
     rows.first().copied().unwrap_or(0)
 }
 
+async fn count_failure_events_by_actor(
+    db: &poolpay::db::DbConn,
+    actor_id: &str,
+    event_type: &str,
+    reason: &str,
+) -> i64 {
+    let mut resp = db
+        .query(
+            "SELECT count() FROM auth_event \
+             WHERE actor_id = $aid AND event_type = $t \
+               AND success = false AND reason = $r GROUP ALL",
+        )
+        .bind(("aid", actor_id.to_string()))
+        .bind(("t", event_type.to_string()))
+        .bind(("r", reason.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp
+        .take("count")
+        .expect("auth_event count query returned unexpected shape");
+    rows.first().copied().unwrap_or(0)
+}
+
 #[tokio::test]
 async fn issue_returns_tokens_that_round_trip_through_refresh() {
     let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
@@ -1631,7 +1656,10 @@ async fn create_admin_user_happy_path_returns_201_and_allows_signin() {
     assert_eq!(v["role"], "admin");
     assert_eq!(v["status"], "active");
     assert_eq!(v["mustResetPassword"], true);
-    assert_eq!(v["tokenVersion"], 0);
+    assert!(
+        v.get("tokenVersion").is_none(),
+        "token_version is a server-side invalidation counter and must not leak to clients"
+    );
     assert_eq!(v["version"], 1);
     let new_id = v["userId"].as_str().unwrap().to_string();
     assert!(!new_id.is_empty());
@@ -1776,6 +1804,12 @@ async fn create_admin_user_duplicate_email_returns_409() {
 
     let second = call(app, admin_users_post_req(&super_token, &body)).await;
     assert_eq!(second.status(), StatusCode::CONFLICT);
+
+    // Failure is audited with actor_id = super_admin so ops can alert on
+    // probing patterns (many failed provisions from one operator).
+    let failures =
+        count_failure_events_by_actor(&db, &super_id, "user_created", "duplicate_email").await;
+    assert_eq!(failures, 1);
 }
 
 #[tokio::test]
@@ -1953,6 +1987,34 @@ async fn update_admin_user_status_disable_revokes_refresh_tokens_and_audits() {
     // Audit row.
     let events = count_auth_events(&db, &target_id, "user_disabled").await;
     assert_eq!(events, 1);
+}
+
+#[tokio::test]
+async fn update_admin_user_reenable_emits_user_enabled_audit_event() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+
+    let (target_id, version) =
+        seed_admin_user(&app, &super_token, "reenable@example.com", "admin").await;
+
+    // Disable first — produces a user_disabled event and bumps version to version+1.
+    let disable = serde_json::json!({ "status": "disabled", "version": version });
+    let resp = call(app.clone(), admin_users_patch_req(&target_id, &super_token, &disable)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(user_status(&db, &target_id).await, "disabled");
+
+    // Re-enable with the bumped version.
+    let reenable = serde_json::json!({ "status": "active", "version": version + 1 });
+    let resp = call(app, admin_users_patch_req(&target_id, &super_token, &reenable)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(user_status(&db, &target_id).await, "active");
+
+    // Symmetric audit — one disable, one enable.
+    let disabled_events = count_auth_events(&db, &target_id, "user_disabled").await;
+    assert_eq!(disabled_events, 1);
+    let enabled_events = count_auth_events(&db, &target_id, "user_enabled").await;
+    assert_eq!(enabled_events, 1);
 }
 
 #[tokio::test]
