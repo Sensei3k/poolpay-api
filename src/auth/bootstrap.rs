@@ -3,6 +3,7 @@
 //! Runs once at startup and on demand in tests. Idempotent: if any active
 //! admin user already exists, this is a no-op.
 
+use surrealdb::types::RecordId;
 use tracing::{info, warn};
 
 use crate::api::models::{
@@ -19,7 +20,32 @@ const CREDENTIALS_PROVIDER: &str = "credentials";
 /// `SEED_ON_EMPTY=true` **and** `APP_ENV` is `development` or `test`, so
 /// production boots cannot accidentally plant it.
 const DUMMY_ADMIN_PASSWORD: &str = "PoolPayQA2026!";
-const DUMMY_ADMIN_EMAILS: [&str; 2] = ["admin1@poolpay.test", "admin2@poolpay.test"];
+
+/// Declarative spec for the dev-only fixture admin accounts. Each row pairs
+/// an email with its role and whether to receive a `group_admin` grant on
+/// `FIXTURE_GROUP_ID` — lets us cover every role × grant combination the
+/// admin UI can render without branching inside the seed loop.
+///
+/// Current matrix:
+/// - admin1: `admin` + FIXTURE_GROUP_ID grant — typical group admin.
+/// - admin2: `admin`, no grant — target for manually testing grant creation.
+/// - admin3: `super_admin`, no grant — second super-admin so super-admin-on-
+///   super-admin flows (e.g. demotion) can be exercised without touching
+///   the bootstrap account.
+/// - admin4: `admin`, no grant — stable "orphan admin" baseline that stays
+///   ungranted even after admin2 gets manually granted during testing.
+struct DummyAdmin {
+    email: &'static str,
+    role: &'static str,
+    grant_fixture_group: bool,
+}
+
+const DUMMY_ADMINS: [DummyAdmin; 4] = [
+    DummyAdmin { email: "admin1@poolpay.test", role: "admin",       grant_fixture_group: true  },
+    DummyAdmin { email: "admin2@poolpay.test", role: "admin",       grant_fixture_group: false },
+    DummyAdmin { email: "admin3@poolpay.test", role: "super_admin", grant_fixture_group: false },
+    DummyAdmin { email: "admin4@poolpay.test", role: "admin",       grant_fixture_group: false },
+];
 
 /// Seed the initial admin account if none exists and the required env vars
 /// are set. Safe to call on every boot.
@@ -182,15 +208,19 @@ pub async fn seed_dummy_admins_with_flag(
         }
     };
 
-    for (idx, email) in DUMMY_ADMIN_EMAILS.iter().enumerate() {
-        let user_id = ensure_admin_fixture(db, email, DUMMY_ADMIN_PASSWORD, &super_admin_id)
-            .await?;
-        // Only admin1 (index 0) gets the group grant — admin2 stays
-        // ungranted so the dashboard has a target for testing grant creation.
+    for spec in DUMMY_ADMINS.iter() {
+        let user_id = ensure_admin_fixture(
+            db,
+            spec.email,
+            DUMMY_ADMIN_PASSWORD,
+            spec.role,
+            &super_admin_id,
+        )
+        .await?;
         // Re-asserting the grant on every run (not just when the user was
         // created this run) restores it after manual cleanup / partial prior
         // runs; `ensure_group_admin_grant` is idempotent on unique conflict.
-        if idx == 0 {
+        if spec.grant_fixture_group {
             if let Some(user_id) = user_id {
                 ensure_group_admin_grant(db, &user_id, FIXTURE_GROUP_ID, &super_admin_id).await?;
             }
@@ -222,8 +252,18 @@ async fn ensure_admin_fixture(
     db: &DbConn,
     email: &str,
     password_plain: &str,
+    role: &str,
     super_admin_id: &str,
 ) -> Result<Option<String>, surrealdb::Error> {
+    // Defence-in-depth: `role` is only ever sourced from the in-module
+    // `DUMMY_ADMINS` `const`, but guard against a typo slipping in during
+    // future edits so a bogus role can't be silently written to `user.role`
+    // (where extractors + admin_users UPDATE queries compare against the
+    // exact strings `"admin"` / `"super_admin"`).
+    assert!(
+        matches!(role, "admin" | "super_admin"),
+        "fixture admin role must be 'admin' or 'super_admin', got {role:?}"
+    );
     let email_normalised = email.to_lowercase();
 
     let mut resp = db
@@ -250,10 +290,28 @@ async fn ensure_admin_fixture(
                     && u.status == "active"
                     && matches!(u.role.as_str(), "admin" | "super_admin") =>
             {
-                info!(
-                    email_redacted = redact(email),
-                    "fixture admin already seeded — reusing user_id"
-                );
+                // Reconcile drift: if the fixture spec now declares a role
+                // different from what's persisted (e.g. admin3 was demoted
+                // to `admin` via the UI since the last boot), restore the
+                // spec'd role so the declared fixture matrix is the source
+                // of truth. Mirrors `admin_users::update` — bump `version`
+                // for OCC and `token_version` to invalidate any live access
+                // tokens the reconciled user still holds.
+                if u.role.as_str() != role {
+                    reconcile_fixture_role(db, &identity.user_id, role).await?;
+                    info!(
+                        email_redacted = redact(email),
+                        user_id = identity.user_id.as_str(),
+                        from = u.role.as_str(),
+                        to = role,
+                        "fixture admin role drifted from spec — reconciled"
+                    );
+                } else {
+                    info!(
+                        email_redacted = redact(email),
+                        "fixture admin already seeded — reusing user_id"
+                    );
+                }
                 Ok(Some(identity.user_id))
             }
             Some(_) => {
@@ -292,7 +350,7 @@ async fn ensure_admin_fixture(
         email: email.to_string(),
         email_normalised: email_normalised.clone(),
         password_hash: Some(password_hash),
-        role: "admin".into(),
+        role: role.into(),
         status: "active".into(),
         token_version: 0,
         // Dev fixtures skip the first-login rotation so the login flow is
@@ -397,6 +455,34 @@ async fn rollback_fixture_user(db: &DbConn, user_id: &str) {
             "fixture admin rollback failed after identity error — orphan user row"
         );
     }
+}
+
+/// Reconcile a persisted fixture admin's role to the spec. Used when
+/// `ensure_admin_fixture` detects that `user.role` has drifted from the
+/// `DUMMY_ADMINS` entry (typically because the UI was used to promote or
+/// demote the fixture between restarts). Bumps `version` (OCC) and
+/// `token_version` (invalidates cached access tokens) to match the
+/// semantics of the real `PATCH /api/admin/users/:id` role-change path.
+async fn reconcile_fixture_role(
+    db: &DbConn,
+    user_id: &str,
+    new_role: &str,
+) -> Result<(), surrealdb::Error> {
+    let now = now_iso();
+    db.query(
+        "UPDATE $id SET \
+             role = $role, \
+             updated_at = $now, \
+             version = version + 1, \
+             token_version = token_version + 1 \
+         WHERE deleted_at IS NONE",
+    )
+    .bind(("id", RecordId::new("user", user_id.to_string())))
+    .bind(("role", new_role.to_string()))
+    .bind(("now", now))
+    .await?
+    .check()?;
+    Ok(())
 }
 
 async fn ensure_group_admin_grant(

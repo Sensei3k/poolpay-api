@@ -329,7 +329,29 @@ fn fixture_cycles() -> Vec<(&'static str, CycleContent)> {
         ("3", CycleContent {
             cycle_number: 9, start_date: "2026-03-01".into(), end_date: "2026-03-31".into(),
             contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "3".into(), status: "active".into(), group_id, notes: None,
+            recipient_member_id: "3".into(), status: "active".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
+        }),
+        // Round 2 upcoming: Apr–Jun 2026 (cycles 10–12, pending). Scheduled
+        // but not yet started — gives the dashboard a `pending` cycle state
+        // to render alongside closed/active, and extends the rotation preview
+        // through end-of-round without disturbing the active-cycle id (3).
+        ("10", CycleContent {
+            cycle_number: 10, start_date: "2026-04-01".into(), end_date: "2026-04-30".into(),
+            contribution_per_member: 1_000_000, total_amount: 6_000_000,
+            recipient_member_id: "4".into(), status: "pending".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
+        }),
+        ("11", CycleContent {
+            cycle_number: 11, start_date: "2026-05-01".into(), end_date: "2026-05-31".into(),
+            contribution_per_member: 1_000_000, total_amount: 6_000_000,
+            recipient_member_id: "5".into(), status: "pending".into(), group_id: group_id.clone(), notes: None,
+            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
+        }),
+        ("12", CycleContent {
+            cycle_number: 12, start_date: "2026-06-01".into(), end_date: "2026-06-30".into(),
+            contribution_per_member: 1_000_000, total_amount: 6_000_000,
+            recipient_member_id: "6".into(), status: "pending".into(), group_id, notes: None,
             created_at: created_at.into(), updated_at: created_at.into(), version: 1,
         }),
     ]
