@@ -359,9 +359,23 @@ pub async fn update_admin_user(
     if status_changed && new_status == "disabled" {
         // Disable invalidates in-flight sessions immediately — revoke
         // every live refresh token so the disabled user cannot mint
-        // fresh access tokens during the access-token TTL window.
+        // fresh access tokens during the access-token TTL window. A
+        // revoke failure is a genuine partial-failure: the status is
+        // already committed but live sessions survive, so emit a
+        // `success = false` audit event and surface 500 so operators
+        // can retry rather than leaving an inconsistent outcome
+        // hidden behind a 200.
         if let Err(e) = refresh::revoke_all_for_user(&db, id.as_str()).await {
-            tracing::warn!(error = %e, user_id = %id.as_str(), "revoke_all_for_user on disable failed");
+            record_auth_event(
+                &db,
+                Some(id.as_str().to_string()),
+                "user_disabled",
+                false,
+                Some("refresh_revocation_failed"),
+                Some(&ip),
+            )
+            .await;
+            return Err(AppError::Internal(format!("refresh revoke failed: {e}")));
         }
         record_auth_event(
             &db,
@@ -424,10 +438,26 @@ pub async fn delete_admin_user(
         return Err(AppError::NotFound(format!("user {id} does not exist")));
     }
 
-    if let Err(e) = refresh::revoke_all_for_user(&db, id.as_str()).await {
-        tracing::warn!(error = %e, user_id = %id.as_str(), "revoke_all_for_user on delete failed");
-    }
     let ip = client_ip.to_string();
+    // Soft-delete is already committed above. If the refresh-revoke step
+    // fails, live sessions for the deleted user survive until their
+    // access-token TTL expires — which contradicts the endpoint
+    // contract. Record a `success = false` audit event (tagged so ops
+    // can distinguish it from a normal delete) and surface 500 so the
+    // caller knows the revocation step did not complete, rather than
+    // returning 204 on a partial outcome.
+    if let Err(e) = refresh::revoke_all_for_user(&db, id.as_str()).await {
+        record_auth_event(
+            &db,
+            Some(id.as_str().to_string()),
+            "user_disabled",
+            false,
+            Some("soft_deleted_token_revocation_failed"),
+            Some(&ip),
+        )
+        .await;
+        return Err(AppError::Internal(format!("refresh revoke failed: {e}")));
+    }
     record_auth_event(
         &db,
         Some(id.as_str().to_string()),
