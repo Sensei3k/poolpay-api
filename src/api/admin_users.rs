@@ -50,6 +50,18 @@ const MAX_PASSWORD_LEN: usize = 1024;
 // (1024) + role/status + JSON framing with room to spare.
 const MAX_ADMIN_USER_BODY_BYTES: usize = 8 * 1024;
 
+/// Classify an `axum::body::to_bytes` failure into an `AppError`.
+///
+/// `to_bytes` collapses overflow and transport-level read failures into the
+/// same `axum::Error`, so we can't cheaply distinguish them without
+/// reaching for an extra dependency. A neutral "failed to read request
+/// body" message stays accurate in both cases — callers that blew past the
+/// cap still get a 400, and we stop mislabelling genuine read errors as
+/// size violations.
+fn map_body_read_error(_err: axum::Error) -> AppError {
+    AppError::BadRequest("failed to read request body".into())
+}
+
 // ── Request / response DTOs ───────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -124,7 +136,7 @@ pub async fn create_admin_user(
     // extractor before per-field length guards run.
     let body = to_bytes(http_req.into_body(), MAX_ADMIN_USER_BODY_BYTES)
         .await
-        .map_err(|_| AppError::BadRequest("request body too large".into()))?;
+        .map_err(map_body_read_error)?;
     let req: CreateAdminUserRequest = serde_json::from_slice(&body)
         .map_err(|_| AppError::BadRequest("invalid JSON body".into()))?;
 
@@ -250,7 +262,7 @@ pub async fn update_admin_user(
     // the super-admin gate.
     let body = to_bytes(http_req.into_body(), MAX_ADMIN_USER_BODY_BYTES)
         .await
-        .map_err(|_| AppError::BadRequest("request body too large".into()))?;
+        .map_err(map_body_read_error)?;
     let req: UpdateAdminUserRequest = serde_json::from_slice(&body)
         .map_err(|_| AppError::BadRequest("invalid JSON body".into()))?;
 
