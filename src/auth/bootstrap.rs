@@ -16,7 +16,8 @@ const BOOTSTRAP_EVENT_TYPE: &str = "bootstrap_admin_created";
 const CREDENTIALS_PROVIDER: &str = "credentials";
 
 /// Dev-only fixture password for `seed_dummy_admins`. Only applied when
-/// `SEED_ON_EMPTY=true`, so production boots cannot accidentally plant it.
+/// `SEED_ON_EMPTY=true` **and** `APP_ENV` is `development` or `test`, so
+/// production boots cannot accidentally plant it.
 const DUMMY_ADMIN_PASSWORD: &str = "PoolPayQA2026!";
 const DUMMY_ADMIN_EMAILS: [&str; 2] = ["admin1@poolpay.test", "admin2@poolpay.test"];
 /// Fixture group id mirrors `db::FIXTURE_GROUP_ID` — kept in sync manually
