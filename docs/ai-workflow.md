@@ -1,10 +1,10 @@
 # AI Workflow — poolpay-api
 
-This repo is built with AI-assisted development. Tooling is **optional** and **agent-agnostic** — you can contribute without it. If you want the AI to navigate the codebase efficiently (instead of grepping 40 files per question), follow this guide.
+Contributing to this repo does **not** require any AI tooling — a plain editor and the standard toolchain are enough. This guide is for contributors who *choose* to use an AI assistant and want it to navigate the codebase efficiently (instead of grepping 40 files per question).
 
 ## TL;DR
 
-> Prerequisite: `uv` (Astral's Python package manager). Install via `curl -LsSf https://astral.sh/uv/install.sh | sh` or see [the uv install guide](https://docs.astral.sh/uv/getting-started/installation/). If you'd rather not use `uv`, swap step 1 for `pipx install graphifyy` (or `pip install --user graphifyy`).
+> Prerequisite: `uv` (Astral's Python package manager). The simplest install is `curl -LsSf https://astral.sh/uv/install.sh | sh` — if you're cautious about piping a remote script straight into a shell (reasonable!), download it first (`curl -LsSf https://astral.sh/uv/install.sh -o uv-install.sh`), inspect it, then run `sh uv-install.sh`. The [uv install guide](https://docs.astral.sh/uv/getting-started/installation/) also lists Homebrew, winget, and standalone installer options. If you'd rather skip `uv` entirely, swap step 1 for `pipx install graphifyy` (or `pip install --user graphifyy`).
 
 ```bash
 uv tool install graphifyy        # one-time global install
@@ -13,7 +13,7 @@ cd /path/to/poolpay-api
 graphify update .                # builds graphify-out/ — your local code knowledge graph
 ```
 
-That's it. `graphify-out/` is a derived artefact and shouldn't be committed — add it to your global gitignore (`~/.gitignore_global`) or this clone's `.git/info/exclude` so it stays out of every commit.
+That's it. `graphify-out/` is a derived artefact and shouldn't be committed. The simplest fix is to add it to this clone's `.git/info/exclude` (works immediately, no Git config needed). Alternatively, if you have a global excludes file configured (`git config --global core.excludesfile` — usually `~/.config/git/ignore` or `~/.gitignore_global`), add it there so it's ignored across every repo.
 
 ## What is graphify?
 
