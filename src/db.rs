@@ -80,14 +80,24 @@ pub async fn init() -> Result<DbConn, InitError> {
 /// boxed error explaining which variable is missing. Centralised so the two
 /// callers (`SURREAL_USER`, `SURREAL_PASS`) report identically-shaped
 /// messages.
+///
+/// Treats an unset, empty, or whitespace-only value as missing — otherwise
+/// `SURREAL_USER=` would pass through to `signin` and surface as an opaque
+/// driver error rather than the "must be set" message operators expect.
 fn require_remote_credential(var: &str) -> Result<String, InitError> {
-    std::env::var(var).map_err(|_| -> InitError {
-        format!(
-            "{var} must be set when SURREAL_URL points at a remote server \
-             (ws/wss/http/https) — refusing to default to 'root'"
-        )
-        .into()
-    })
+    let raw = std::env::var(var).map_err(|_| missing_remote_credential_error(var))?;
+    if raw.trim().is_empty() {
+        return Err(missing_remote_credential_error(var));
+    }
+    Ok(raw)
+}
+
+fn missing_remote_credential_error(var: &str) -> InitError {
+    format!(
+        "{var} must be set when SURREAL_URL points at a remote server \
+         (ws/wss/http/https) — refusing to default to 'root'"
+    )
+    .into()
 }
 
 /// Initialise an in-memory SurrealDB instance — used in integration tests
@@ -598,5 +608,52 @@ mod tests {
             redact_url_userinfo("https://host/some@path"),
             "https://host/some@path"
         );
+    }
+
+    /// Use a unique env var name per case so tests don't race on a shared key
+    /// when run in parallel — `cargo test` defaults to multi-threaded execution
+    /// and `std::env::set_var` is process-global.
+    fn with_env_var<F: FnOnce(&str)>(name: &str, value: Option<&str>, f: F) {
+        // SAFETY: tests use distinct var names; no other test reads/writes them.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+        f(name);
+        unsafe { std::env::remove_var(name) };
+    }
+
+    #[test]
+    fn require_remote_credential_rejects_unset_value() {
+        with_env_var("POOLPAY_TEST_REQUIRE_UNSET", None, |name| {
+            let err = require_remote_credential(name).expect_err("unset must fail");
+            assert!(err.to_string().contains("must be set"));
+        });
+    }
+
+    #[test]
+    fn require_remote_credential_rejects_empty_value() {
+        with_env_var("POOLPAY_TEST_REQUIRE_EMPTY", Some(""), |name| {
+            let err = require_remote_credential(name).expect_err("empty must fail");
+            assert!(err.to_string().contains("must be set"));
+        });
+    }
+
+    #[test]
+    fn require_remote_credential_rejects_whitespace_value() {
+        with_env_var("POOLPAY_TEST_REQUIRE_WS", Some("   \t  "), |name| {
+            let err = require_remote_credential(name).expect_err("whitespace must fail");
+            assert!(err.to_string().contains("must be set"));
+        });
+    }
+
+    #[test]
+    fn require_remote_credential_accepts_non_empty_value() {
+        with_env_var("POOLPAY_TEST_REQUIRE_OK", Some("root"), |name| {
+            let value = require_remote_credential(name).expect("non-empty must succeed");
+            assert_eq!(value, "root");
+        });
     }
 }
