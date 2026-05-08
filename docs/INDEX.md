@@ -16,6 +16,16 @@ Start here if you're setting up the development environment or contributing code
   - Git workflow and commit conventions
   - Troubleshooting common build issues
 
+## For AI-Assisted Development
+
+Optional. Skip if you don't use AI agents.
+
+- **[ai-workflow.md](./ai-workflow.md)** — Setup for AI-assisted development
+  - Graphify (codebase knowledge graph) install + first run
+  - Supported agents (Claude Code, Cursor, Codex, Aider, etc.)
+  - Maintenance and useful slash commands
+  - Why graph artefacts are gitignored
+
 ## For Operations
 
 Start here if you're deploying, running, or troubleshooting the service in production.
