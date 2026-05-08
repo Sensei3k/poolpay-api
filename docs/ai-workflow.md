@@ -7,7 +7,7 @@ This repo is built with AI-assisted development. Tooling is **optional** and **a
 ```bash
 uv tool install graphifyy        # one-time global install
 graphify install --platform claude   # one-time Claude Code skill registration (or pick another agent)
-cd ~/projects/poolpay-api
+cd /path/to/poolpay-api
 graphify update .                # builds graphify-out/ — your local code knowledge graph
 ```
 
