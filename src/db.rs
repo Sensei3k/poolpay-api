@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use surrealdb::Surreal;
-use surrealdb::engine::local::{Db, RocksDb};
+use surrealdb::engine::any::{Any, connect};
+use surrealdb::opt::auth::Root;
 use tracing::info;
 
 use crate::api::models::{
@@ -10,12 +11,71 @@ use crate::api::models::{
 };
 
 /// The shared SurrealDB connection type — passed as Axum state.
-pub type DbConn = Arc<Surreal<Db>>;
+///
+/// Uses the `any` engine so the same handle can back either an embedded
+/// RocksDB file or a remote SurrealDB server reached over WebSocket
+/// (`ws://`, `wss://`) or HTTP (`http://`, `https://`). The scheme of
+/// `SURREAL_URL` picks the backend at runtime.
+pub type DbConn = Arc<Surreal<Any>>;
 
-/// Initialise the embedded SurrealDB instance backed by RocksDB, apply
-/// namespace/database, and seed fixture data only when `SEED_ON_EMPTY=true`.
-pub async fn init() -> Result<DbConn, surrealdb::Error> {
-    let db = Surreal::new::<RocksDb>("./data.surreal").await?;
+/// Default connection string. Matches the legacy embedded-RocksDB path so
+/// existing dev workflows keep working unless the operator opts into a
+/// standalone server by setting `SURREAL_URL`.
+const DEFAULT_SURREAL_URL: &str = "rocksdb://./data.surreal";
+
+/// Boxed error returned by [`init`] so the function can surface both
+/// `surrealdb::Error` from the driver and our own boot-time validation
+/// failures (e.g. missing credentials for a remote URL) through the same
+/// fallible `Result` instead of panicking. `Send + Sync` so callers can
+/// propagate the error across `await` points and threads.
+pub type InitError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Initialise SurrealDB using `SURREAL_URL` (default: embedded RocksDB at
+/// `./data.surreal`), apply namespace/database, and seed fixture data only
+/// when `SEED_ON_EMPTY=true`.
+///
+/// Set `SURREAL_URL=ws://127.0.0.1:8000` to connect to a standalone server
+/// — required if a GUI (e.g. Surrealist) needs to attach to the same DB,
+/// since embedded RocksDB takes an exclusive file lock.
+///
+/// Returns [`InitError`] (rather than panicking) when `SURREAL_URL` points
+/// at a remote scheme but `SURREAL_USER` / `SURREAL_PASS` are unset — that
+/// keeps fallibility visible to callers and lets `main.rs` surface the
+/// underlying message via its `.expect(...)` rather than a generic abort.
+pub async fn init() -> Result<DbConn, InitError> {
+    let url = std::env::var("SURREAL_URL").unwrap_or_else(|_| DEFAULT_SURREAL_URL.to_string());
+
+    // Validate remote credentials *before* opening the connection so a
+    // misconfigured deployment fails fast with a clear "must be set" error
+    // instead of performing an outbound handshake first and then surfacing the
+    // credential check after the fact. Embedded schemes (e.g. `rocksdb://`,
+    // `mem://`) skip this and connect straight through.
+    //
+    // Fail closed when `SURREAL_URL` points at a remote server but credentials
+    // are not explicitly provided — defaulting to `root`/`root` against a
+    // non-local server is a footgun, especially in production. Operators must
+    // set `SURREAL_USER` and `SURREAL_PASS` themselves.
+    let remote_credentials = if is_remote_scheme(&url) {
+        let user = require_remote_credential("SURREAL_USER")?;
+        let pass = require_remote_credential("SURREAL_PASS")?;
+        Some((user, pass))
+    } else {
+        None
+    };
+
+    let db = connect(&url).await?;
+
+    // Remote endpoints require signin before `use_ns/use_db`; embedded engines
+    // don't. Keep the branch narrow so we don't mint root creds against local
+    // RocksDB for no reason.
+    if let Some((user, pass)) = remote_credentials {
+        db.signin(Root {
+            username: user,
+            password: pass,
+        })
+        .await?;
+    }
+
     db.use_ns("circle").use_db("main").await?;
 
     define_tables(&db).await?;
@@ -24,18 +84,79 @@ pub async fn init() -> Result<DbConn, surrealdb::Error> {
         seed(&db).await?;
     }
 
+    info!(url = %redact_url_userinfo(&url), "SurrealDB connected");
     Ok(Arc::new(db))
+}
+
+/// Fetch a required env var for remote SurrealDB signin, or return a clear
+/// boxed error explaining which variable is missing. Centralised so the two
+/// callers (`SURREAL_USER`, `SURREAL_PASS`) report identically-shaped
+/// messages.
+///
+/// Treats an unset, empty, or whitespace-only value as missing — otherwise
+/// `SURREAL_USER=` would pass through to `signin` and surface as an opaque
+/// driver error rather than the "must be set" message operators expect.
+fn require_remote_credential(var: &str) -> Result<String, InitError> {
+    let raw = std::env::var(var).map_err(|_| missing_remote_credential_error(var))?;
+    if raw.trim().is_empty() {
+        return Err(missing_remote_credential_error(var));
+    }
+    Ok(raw)
+}
+
+fn missing_remote_credential_error(var: &str) -> InitError {
+    format!(
+        "{var} must be set when SURREAL_URL points at a remote server \
+         (ws/wss/http/https) — refusing to default to root/root"
+    )
+    .into()
 }
 
 /// Initialise an in-memory SurrealDB instance — used in integration tests
 /// to avoid touching the filesystem and to keep each test isolated.
 pub async fn init_memory() -> Result<DbConn, surrealdb::Error> {
-    use surrealdb::engine::local::Mem;
-    let db = Surreal::new::<Mem>(()).await?;
+    let db = connect("mem://").await?;
     db.use_ns("circle").use_db("main").await?;
     define_tables(&db).await?;
     seed(&db).await?;
     Ok(Arc::new(db))
+}
+
+/// URL schemes are case-insensitive (RFC 3986 §3.1), so we lowercase the
+/// scheme prefix before matching. Otherwise `WS://...` / `Wss://...` would
+/// slip past this gate, skip credential validation, *and* skip `signin`,
+/// silently undermining the fail-closed remote-mode contract.
+fn is_remote_scheme(url: &str) -> bool {
+    let Some(scheme_end) = url.find("://") else {
+        return false;
+    };
+    let scheme = url[..scheme_end].to_ascii_lowercase();
+    matches!(scheme.as_str(), "ws" | "wss" | "http" | "https")
+}
+
+/// Strip `user:pass@` from a connection URL before logging.
+///
+/// SurrealDB URLs typically pull credentials from `SURREAL_USER` /
+/// `SURREAL_PASS`, but operators sometimes embed them inline (e.g.
+/// `wss://user:pass@host:8000`). Logging the raw string would leak those
+/// credentials to whatever log sink is attached, so we drop the userinfo
+/// segment and replace it with `***@` to keep the rest of the URL useful
+/// for debugging.
+fn redact_url_userinfo(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let after_scheme = &url[scheme_end + 3..];
+    // `@` only carries userinfo when it appears before the first `/` (path)
+    // or `?` (query); otherwise it's a literal in the path/query.
+    let host_end = after_scheme.find(['/', '?']).unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..host_end];
+    let Some(at_idx) = authority.find('@') else {
+        return url.to_string();
+    };
+    let host = &authority[at_idx + 1..];
+    let rest = &after_scheme[host_end..];
+    format!("{}://***@{host}{rest}", &url[..scheme_end])
 }
 
 /// Idempotently define every table the application reads from.
@@ -44,7 +165,7 @@ pub async fn init_memory() -> Result<DbConn, surrealdb::Error> {
 /// than an empty result. Tables seeded via `upsert` in `insert_fixtures` are
 /// defined implicitly, but tables that start empty (e.g. `group_link`) must be
 /// declared here so handlers can query them without special-casing.
-async fn define_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     db.query(
         "DEFINE TABLE IF NOT EXISTS group SCHEMALESS;
          DEFINE TABLE IF NOT EXISTS member SCHEMALESS;
@@ -61,7 +182,7 @@ async fn define_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 
 /// Auth-specific tables are SCHEMAFULL so the security-critical shape is
 /// enforced at the DB layer rather than relying on application checks alone.
-async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+async fn define_auth_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     db.query(
         "DEFINE TABLE IF NOT EXISTS user SCHEMAFULL;
          DEFINE FIELD IF NOT EXISTS email ON user TYPE string;
@@ -130,7 +251,7 @@ async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 ///
 /// Only runs if all tables are empty — skips if any table already has
 /// records to avoid duplicating data on restart.
-async fn seed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+async fn seed(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     let groups: Vec<DbGroup> = select_or_empty(db, "group").await?;
     let members: Vec<DbMember> = select_or_empty(db, "member").await?;
     let cycles: Vec<DbCycle> = select_or_empty(db, "cycle").await?;
@@ -166,7 +287,7 @@ async fn seed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 ///
 /// Clears all tables, then re-inserts the full fixture set.
 /// Used by the dev-only /api/test/reset endpoint so E2E tests get a clean slate.
-pub async fn reseed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+pub async fn reseed(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     let _: Vec<DbGroup> = db.delete("group").await?;
     let _: Vec<DbMember> = db.delete("member").await?;
     let _: Vec<DbCycle> = db.delete("cycle").await?;
@@ -190,7 +311,7 @@ pub async fn reseed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 }
 
 /// Insert all fixture data into the database using upsert (idempotent).
-async fn insert_fixtures(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+async fn insert_fixtures(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     for (id, content) in fixture_groups() {
         let _: Option<DbGroup> = db.upsert(("group", id)).content(content).await?;
     }
@@ -211,7 +332,7 @@ async fn insert_fixtures(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 
 /// SELECT a table and return an empty vec if the table does not yet exist.
 pub(crate) async fn select_or_empty<T>(
-    db: &Surreal<Db>,
+    db: &Surreal<Any>,
     table: &str,
 ) -> Result<Vec<T>, surrealdb::Error>
 where
@@ -488,4 +609,144 @@ fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
             },
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_url_userinfo_strips_inline_credentials() {
+        assert_eq!(
+            redact_url_userinfo("wss://user:secret@host:8000"),
+            "wss://***@host:8000"
+        );
+        assert_eq!(
+            redact_url_userinfo("https://root:hunter2@db.example.com/path?q=1"),
+            "https://***@db.example.com/path?q=1"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_passes_through_when_no_userinfo() {
+        assert_eq!(
+            redact_url_userinfo("ws://127.0.0.1:8000"),
+            "ws://127.0.0.1:8000"
+        );
+        assert_eq!(
+            redact_url_userinfo("rocksdb://./data.surreal"),
+            "rocksdb://./data.surreal"
+        );
+        assert_eq!(redact_url_userinfo("mem://"), "mem://");
+    }
+
+    #[test]
+    fn redact_url_userinfo_does_not_treat_at_in_path_as_userinfo() {
+        // `@` after the path delimiter is not userinfo and must be preserved.
+        assert_eq!(
+            redact_url_userinfo("https://host/some@path"),
+            "https://host/some@path"
+        );
+    }
+
+    /// Single global lock serializing every `set_var`/`remove_var` call in this
+    /// test module. Unique per-test var names alone don't satisfy the safety
+    /// precondition for `set_var`/`remove_var`: those require *no other thread*
+    /// to be reading or writing *any* env var concurrently. Holding this mutex
+    /// for the full mutate → run → cleanup window makes that precondition hold
+    /// across parallel tests in this binary.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+            std::sync::OnceLock::new();
+        ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Use a unique env var name per case so tests don't race on a shared key,
+    /// and serialize all env mutations on `env_lock()` so concurrent
+    /// `set_var`/`remove_var` calls (process-global) don't violate their
+    /// safety precondition under multi-threaded `cargo test`.
+    fn with_env_var<F: FnOnce(&str)>(name: &str, value: Option<&str>, f: F) {
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: serialized by `env_lock()` above; var names are unique per
+        // case so no other test reads/writes them while we hold the guard.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+        f(name);
+        // SAFETY: same guard still held; cleanup mirrors the mutation above.
+        unsafe { std::env::remove_var(name) };
+    }
+
+    #[test]
+    fn require_remote_credential_rejects_unset_value() {
+        with_env_var("POOLPAY_TEST_REQUIRE_UNSET", None, |name| {
+            let err = require_remote_credential(name).expect_err("unset must fail");
+            assert!(err.to_string().contains("must be set"));
+        });
+    }
+
+    #[test]
+    fn require_remote_credential_rejects_empty_value() {
+        with_env_var("POOLPAY_TEST_REQUIRE_EMPTY", Some(""), |name| {
+            let err = require_remote_credential(name).expect_err("empty must fail");
+            assert!(err.to_string().contains("must be set"));
+        });
+    }
+
+    #[test]
+    fn require_remote_credential_rejects_whitespace_value() {
+        with_env_var("POOLPAY_TEST_REQUIRE_WS", Some("   \t  "), |name| {
+            let err = require_remote_credential(name).expect_err("whitespace must fail");
+            assert!(err.to_string().contains("must be set"));
+        });
+    }
+
+    #[test]
+    fn require_remote_credential_accepts_non_empty_value() {
+        with_env_var("POOLPAY_TEST_REQUIRE_OK", Some("root"), |name| {
+            let value = require_remote_credential(name).expect("non-empty must succeed");
+            assert_eq!(value, "root");
+        });
+    }
+
+    #[test]
+    fn is_remote_scheme_recognises_supported_remote_schemes() {
+        for url in [
+            "ws://127.0.0.1:8000",
+            "wss://db.example.com",
+            "http://127.0.0.1:8000",
+            "https://db.example.com",
+        ] {
+            assert!(is_remote_scheme(url), "expected remote: {url}");
+        }
+    }
+
+    #[test]
+    fn is_remote_scheme_is_case_insensitive() {
+        // RFC 3986 §3.1: scheme matching is case-insensitive. Mixed-case must
+        // not bypass the credential gate.
+        for url in [
+            "WS://127.0.0.1:8000",
+            "Wss://db.example.com",
+            "HTTP://127.0.0.1:8000",
+            "HttpS://db.example.com",
+        ] {
+            assert!(is_remote_scheme(url), "expected remote: {url}");
+        }
+    }
+
+    #[test]
+    fn is_remote_scheme_rejects_embedded_and_malformed_urls() {
+        for url in [
+            "rocksdb://./data.surreal",
+            "mem://",
+            "file:///tmp/db",
+            "not-a-url",
+        ] {
+            assert!(!is_remote_scheme(url), "expected non-remote: {url}");
+        }
+    }
 }
