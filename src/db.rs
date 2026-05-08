@@ -13,8 +13,9 @@ use crate::api::models::{
 /// The shared SurrealDB connection type — passed as Axum state.
 ///
 /// Uses the `any` engine so the same handle can back either an embedded
-/// RocksDB file or a remote WebSocket connection. The scheme of `SURREAL_URL`
-/// picks the backend at runtime.
+/// RocksDB file or a remote SurrealDB server reached over WebSocket
+/// (`ws://`, `wss://`) or HTTP (`http://`, `https://`). The scheme of
+/// `SURREAL_URL` picks the backend at runtime.
 pub type DbConn = Arc<Surreal<Any>>;
 
 /// Default connection string. Matches the legacy embedded-RocksDB path so
@@ -36,9 +37,24 @@ pub async fn init() -> Result<DbConn, surrealdb::Error> {
     // Remote endpoints require signin before `use_ns/use_db`; embedded engines
     // don't. Keep the branch narrow so we don't mint root creds against local
     // RocksDB for no reason.
+    //
+    // Fail closed when `SURREAL_URL` points at a remote server but credentials
+    // are not explicitly provided — defaulting to `root`/`root` against a
+    // non-local server is a footgun, especially in production. Operators must
+    // set `SURREAL_USER` and `SURREAL_PASS` themselves.
     if is_remote_scheme(&url) {
-        let user = std::env::var("SURREAL_USER").unwrap_or_else(|_| "root".to_string());
-        let pass = std::env::var("SURREAL_PASS").unwrap_or_else(|_| "root".to_string());
+        let user = std::env::var("SURREAL_USER").unwrap_or_else(|_| {
+            panic!(
+                "SURREAL_USER must be set when SURREAL_URL points at a remote server \
+                 (ws/wss/http/https) — refusing to default to 'root'"
+            )
+        });
+        let pass = std::env::var("SURREAL_PASS").unwrap_or_else(|_| {
+            panic!(
+                "SURREAL_PASS must be set when SURREAL_URL points at a remote server \
+                 (ws/wss/http/https) — refusing to default to 'root'"
+            )
+        });
         db.signin(Root {
             username: user,
             password: pass,
@@ -54,7 +70,7 @@ pub async fn init() -> Result<DbConn, surrealdb::Error> {
         seed(&db).await?;
     }
 
-    info!(url = %url, "SurrealDB connected");
+    info!(url = %redact_url_userinfo(&url), "SurrealDB connected");
     Ok(Arc::new(db))
 }
 
@@ -73,6 +89,31 @@ fn is_remote_scheme(url: &str) -> bool {
         || url.starts_with("wss://")
         || url.starts_with("http://")
         || url.starts_with("https://")
+}
+
+/// Strip `user:pass@` from a connection URL before logging.
+///
+/// SurrealDB URLs typically pull credentials from `SURREAL_USER` /
+/// `SURREAL_PASS`, but operators sometimes embed them inline (e.g.
+/// `wss://user:pass@host:8000`). Logging the raw string would leak those
+/// credentials to whatever log sink is attached, so we drop the userinfo
+/// segment and replace it with `***@` to keep the rest of the URL useful
+/// for debugging.
+fn redact_url_userinfo(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let after_scheme = &url[scheme_end + 3..];
+    // `@` only carries userinfo when it appears before the first `/` (path)
+    // or `?` (query); otherwise it's a literal in the path/query.
+    let host_end = after_scheme.find(['/', '?']).unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..host_end];
+    let Some(at_idx) = authority.find('@') else {
+        return url.to_string();
+    };
+    let host = &authority[at_idx + 1..];
+    let rest = &after_scheme[host_end..];
+    format!("{}://***@{host}{rest}", &url[..scheme_end])
 }
 
 /// Idempotently define every table the application reads from.
@@ -503,4 +544,43 @@ fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
             },
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_url_userinfo_strips_inline_credentials() {
+        assert_eq!(
+            redact_url_userinfo("wss://user:secret@host:8000"),
+            "wss://***@host:8000"
+        );
+        assert_eq!(
+            redact_url_userinfo("https://root:hunter2@db.example.com/path?q=1"),
+            "https://***@db.example.com/path?q=1"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_passes_through_when_no_userinfo() {
+        assert_eq!(
+            redact_url_userinfo("ws://127.0.0.1:8000"),
+            "ws://127.0.0.1:8000"
+        );
+        assert_eq!(
+            redact_url_userinfo("rocksdb://./data.surreal"),
+            "rocksdb://./data.surreal"
+        );
+        assert_eq!(redact_url_userinfo("mem://"), "mem://");
+    }
+
+    #[test]
+    fn redact_url_userinfo_does_not_treat_at_in_path_as_userinfo() {
+        // `@` after the path delimiter is not userinfo and must be preserved.
+        assert_eq!(
+            redact_url_userinfo("https://host/some@path"),
+            "https://host/some@path"
+        );
+    }
 }
