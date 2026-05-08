@@ -4,6 +4,8 @@ This repo is built with AI-assisted development. Tooling is **optional** and **a
 
 ## TL;DR
 
+> Prerequisite: `uv` (Astral's Python package manager). Install via `curl -LsSf https://astral.sh/uv/install.sh | sh` or see [the uv install guide](https://docs.astral.sh/uv/getting-started/installation/). If you'd rather not use `uv`, swap step 1 for `pipx install graphifyy` (or `pip install --user graphifyy`).
+
 ```bash
 uv tool install graphifyy        # one-time global install
 graphify install --platform claude   # one-time Claude Code skill registration (or pick another agent)
