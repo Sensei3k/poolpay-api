@@ -627,11 +627,26 @@ mod tests {
         );
     }
 
-    /// Use a unique env var name per case so tests don't race on a shared key
-    /// when run in parallel — `cargo test` defaults to multi-threaded execution
-    /// and `std::env::set_var` is process-global.
+    /// Single global lock serializing every `set_var`/`remove_var` call in this
+    /// test module. Unique per-test var names alone don't satisfy the safety
+    /// precondition for `set_var`/`remove_var`: those require *no other thread*
+    /// to be reading or writing *any* env var concurrently. Holding this mutex
+    /// for the full mutate → run → cleanup window makes that precondition hold
+    /// across parallel tests in this binary.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+            std::sync::OnceLock::new();
+        ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Use a unique env var name per case so tests don't race on a shared key,
+    /// and serialize all env mutations on `env_lock()` so concurrent
+    /// `set_var`/`remove_var` calls (process-global) don't violate their
+    /// safety precondition under multi-threaded `cargo test`.
     fn with_env_var<F: FnOnce(&str)>(name: &str, value: Option<&str>, f: F) {
-        // SAFETY: tests use distinct var names; no other test reads/writes them.
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: serialized by `env_lock()` above; var names are unique per
+        // case so no other test reads/writes them while we hold the guard.
         unsafe {
             match value {
                 Some(v) => std::env::set_var(name, v),
@@ -639,6 +654,7 @@ mod tests {
             }
         }
         f(name);
+        // SAFETY: same guard still held; cleanup mirrors the mutation above.
         unsafe { std::env::remove_var(name) };
     }
 
