@@ -34,9 +34,11 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 
 # SurrealDB — default is embedded RocksDB at ./data.surreal, but setting
-# SURREAL_URL=ws://host:port switches to a standalone server (so Surrealist
-# and the API can share the same DB). `protocol-ws` brings in the WS client.
-surrealdb = { version = "3", features = ["kv-rocksdb", "kv-mem", "protocol-ws"] }
+# SURREAL_URL=ws://host:port (or http://host:port) switches to a standalone
+# server (so Surrealist and the API can share the same DB). `protocol-ws`
+# brings in the WS client; `protocol-http` brings in the HTTP client so every
+# scheme accepted by `is_remote_scheme` actually has a transport compiled in.
+surrealdb = { version = "3", features = ["kv-rocksdb", "kv-mem", "protocol-ws", "protocol-http"] }
 # Direct dep so the SurrealValue derive macro resolves surrealdb_types:: paths correctly
 surrealdb-types = "3"
 
