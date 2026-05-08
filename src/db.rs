@@ -23,6 +23,13 @@ pub type DbConn = Arc<Surreal<Any>>;
 /// standalone server by setting `SURREAL_URL`.
 const DEFAULT_SURREAL_URL: &str = "rocksdb://./data.surreal";
 
+/// Boxed error returned by [`init`] so the function can surface both
+/// `surrealdb::Error` from the driver and our own boot-time validation
+/// failures (e.g. missing credentials for a remote URL) through the same
+/// fallible `Result` instead of panicking. `Send + Sync` so callers can
+/// propagate the error across `await` points and threads.
+pub type InitError = Box<dyn std::error::Error + Send + Sync>;
+
 /// Initialise SurrealDB using `SURREAL_URL` (default: embedded RocksDB at
 /// `./data.surreal`), apply namespace/database, and seed fixture data only
 /// when `SEED_ON_EMPTY=true`.
@@ -30,7 +37,12 @@ const DEFAULT_SURREAL_URL: &str = "rocksdb://./data.surreal";
 /// Set `SURREAL_URL=ws://127.0.0.1:8000` to connect to a standalone server
 /// — required if a GUI (e.g. Surrealist) needs to attach to the same DB,
 /// since embedded RocksDB takes an exclusive file lock.
-pub async fn init() -> Result<DbConn, surrealdb::Error> {
+///
+/// Returns [`InitError`] (rather than panicking) when `SURREAL_URL` points
+/// at a remote scheme but `SURREAL_USER` / `SURREAL_PASS` are unset — that
+/// keeps fallibility visible to callers and lets `main.rs` surface the
+/// underlying message via its `.expect(...)` rather than a generic abort.
+pub async fn init() -> Result<DbConn, InitError> {
     let url = std::env::var("SURREAL_URL").unwrap_or_else(|_| DEFAULT_SURREAL_URL.to_string());
     let db = connect(&url).await?;
 
@@ -43,18 +55,8 @@ pub async fn init() -> Result<DbConn, surrealdb::Error> {
     // non-local server is a footgun, especially in production. Operators must
     // set `SURREAL_USER` and `SURREAL_PASS` themselves.
     if is_remote_scheme(&url) {
-        let user = std::env::var("SURREAL_USER").unwrap_or_else(|_| {
-            panic!(
-                "SURREAL_USER must be set when SURREAL_URL points at a remote server \
-                 (ws/wss/http/https) — refusing to default to 'root'"
-            )
-        });
-        let pass = std::env::var("SURREAL_PASS").unwrap_or_else(|_| {
-            panic!(
-                "SURREAL_PASS must be set when SURREAL_URL points at a remote server \
-                 (ws/wss/http/https) — refusing to default to 'root'"
-            )
-        });
+        let user = require_remote_credential("SURREAL_USER")?;
+        let pass = require_remote_credential("SURREAL_PASS")?;
         db.signin(Root {
             username: user,
             password: pass,
@@ -72,6 +74,20 @@ pub async fn init() -> Result<DbConn, surrealdb::Error> {
 
     info!(url = %redact_url_userinfo(&url), "SurrealDB connected");
     Ok(Arc::new(db))
+}
+
+/// Fetch a required env var for remote SurrealDB signin, or return a clear
+/// boxed error explaining which variable is missing. Centralised so the two
+/// callers (`SURREAL_USER`, `SURREAL_PASS`) report identically-shaped
+/// messages.
+fn require_remote_credential(var: &str) -> Result<String, InitError> {
+    std::env::var(var).map_err(|_| -> InitError {
+        format!(
+            "{var} must be set when SURREAL_URL points at a remote server \
+             (ws/wss/http/https) — refusing to default to 'root'"
+        )
+        .into()
+    })
 }
 
 /// Initialise an in-memory SurrealDB instance — used in integration tests
