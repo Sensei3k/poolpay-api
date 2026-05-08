@@ -38,3 +38,6 @@ lcov.info
 
 # Personal brain-sync state (not for sharing)
 .brain-sync
+
+# Personal Claude Code state — settings, scheduled-task lockfiles, worktrees
+.claude/
