@@ -44,19 +44,31 @@ pub type InitError = Box<dyn std::error::Error + Send + Sync>;
 /// underlying message via its `.expect(...)` rather than a generic abort.
 pub async fn init() -> Result<DbConn, InitError> {
     let url = std::env::var("SURREAL_URL").unwrap_or_else(|_| DEFAULT_SURREAL_URL.to_string());
-    let db = connect(&url).await?;
 
-    // Remote endpoints require signin before `use_ns/use_db`; embedded engines
-    // don't. Keep the branch narrow so we don't mint root creds against local
-    // RocksDB for no reason.
+    // Validate remote credentials *before* opening the connection so a
+    // misconfigured deployment fails fast with a clear "must be set" error
+    // instead of performing an outbound handshake first and then surfacing the
+    // credential check after the fact. Embedded schemes (e.g. `rocksdb://`,
+    // `mem://`) skip this and connect straight through.
     //
     // Fail closed when `SURREAL_URL` points at a remote server but credentials
     // are not explicitly provided — defaulting to `root`/`root` against a
     // non-local server is a footgun, especially in production. Operators must
     // set `SURREAL_USER` and `SURREAL_PASS` themselves.
-    if is_remote_scheme(&url) {
+    let remote_credentials = if is_remote_scheme(&url) {
         let user = require_remote_credential("SURREAL_USER")?;
         let pass = require_remote_credential("SURREAL_PASS")?;
+        Some((user, pass))
+    } else {
+        None
+    };
+
+    let db = connect(&url).await?;
+
+    // Remote endpoints require signin before `use_ns/use_db`; embedded engines
+    // don't. Keep the branch narrow so we don't mint root creds against local
+    // RocksDB for no reason.
+    if let Some((user, pass)) = remote_credentials {
         db.signin(Root {
             username: user,
             password: pass,
