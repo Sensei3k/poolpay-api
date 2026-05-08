@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use surrealdb::Surreal;
-use surrealdb::engine::local::{Db, RocksDb};
+use surrealdb::engine::any::{Any, connect};
+use surrealdb::opt::auth::Root;
 use tracing::info;
 
 use crate::api::models::{
@@ -10,12 +11,41 @@ use crate::api::models::{
 };
 
 /// The shared SurrealDB connection type — passed as Axum state.
-pub type DbConn = Arc<Surreal<Db>>;
+///
+/// Uses the `any` engine so the same handle can back either an embedded
+/// RocksDB file or a remote WebSocket connection. The scheme of `SURREAL_URL`
+/// picks the backend at runtime.
+pub type DbConn = Arc<Surreal<Any>>;
 
-/// Initialise the embedded SurrealDB instance backed by RocksDB, apply
-/// namespace/database, and seed fixture data only when `SEED_ON_EMPTY=true`.
+/// Default connection string. Matches the legacy embedded-RocksDB path so
+/// existing dev workflows keep working unless the operator opts into a
+/// standalone server by setting `SURREAL_URL`.
+const DEFAULT_SURREAL_URL: &str = "rocksdb://./data.surreal";
+
+/// Initialise SurrealDB using `SURREAL_URL` (default: embedded RocksDB at
+/// `./data.surreal`), apply namespace/database, and seed fixture data only
+/// when `SEED_ON_EMPTY=true`.
+///
+/// Set `SURREAL_URL=ws://127.0.0.1:8000` to connect to a standalone server
+/// — required if a GUI (e.g. Surrealist) needs to attach to the same DB,
+/// since embedded RocksDB takes an exclusive file lock.
 pub async fn init() -> Result<DbConn, surrealdb::Error> {
-    let db = Surreal::new::<RocksDb>("./data.surreal").await?;
+    let url = std::env::var("SURREAL_URL").unwrap_or_else(|_| DEFAULT_SURREAL_URL.to_string());
+    let db = connect(&url).await?;
+
+    // Remote endpoints require signin before `use_ns/use_db`; embedded engines
+    // don't. Keep the branch narrow so we don't mint root creds against local
+    // RocksDB for no reason.
+    if is_remote_scheme(&url) {
+        let user = std::env::var("SURREAL_USER").unwrap_or_else(|_| "root".to_string());
+        let pass = std::env::var("SURREAL_PASS").unwrap_or_else(|_| "root".to_string());
+        db.signin(Root {
+            username: user,
+            password: pass,
+        })
+        .await?;
+    }
+
     db.use_ns("circle").use_db("main").await?;
 
     define_tables(&db).await?;
@@ -24,18 +54,25 @@ pub async fn init() -> Result<DbConn, surrealdb::Error> {
         seed(&db).await?;
     }
 
+    info!(url = %url, "SurrealDB connected");
     Ok(Arc::new(db))
 }
 
 /// Initialise an in-memory SurrealDB instance — used in integration tests
 /// to avoid touching the filesystem and to keep each test isolated.
 pub async fn init_memory() -> Result<DbConn, surrealdb::Error> {
-    use surrealdb::engine::local::Mem;
-    let db = Surreal::new::<Mem>(()).await?;
+    let db = connect("mem://").await?;
     db.use_ns("circle").use_db("main").await?;
     define_tables(&db).await?;
     seed(&db).await?;
     Ok(Arc::new(db))
+}
+
+fn is_remote_scheme(url: &str) -> bool {
+    url.starts_with("ws://")
+        || url.starts_with("wss://")
+        || url.starts_with("http://")
+        || url.starts_with("https://")
 }
 
 /// Idempotently define every table the application reads from.
@@ -44,7 +81,7 @@ pub async fn init_memory() -> Result<DbConn, surrealdb::Error> {
 /// than an empty result. Tables seeded via `upsert` in `insert_fixtures` are
 /// defined implicitly, but tables that start empty (e.g. `group_link`) must be
 /// declared here so handlers can query them without special-casing.
-async fn define_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     db.query(
         "DEFINE TABLE IF NOT EXISTS group SCHEMALESS;
          DEFINE TABLE IF NOT EXISTS member SCHEMALESS;
@@ -61,7 +98,7 @@ async fn define_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 
 /// Auth-specific tables are SCHEMAFULL so the security-critical shape is
 /// enforced at the DB layer rather than relying on application checks alone.
-async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+async fn define_auth_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     db.query(
         "DEFINE TABLE IF NOT EXISTS user SCHEMAFULL;
          DEFINE FIELD IF NOT EXISTS email ON user TYPE string;
@@ -130,7 +167,7 @@ async fn define_auth_tables(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 ///
 /// Only runs if all tables are empty — skips if any table already has
 /// records to avoid duplicating data on restart.
-async fn seed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+async fn seed(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     let groups: Vec<DbGroup> = select_or_empty(db, "group").await?;
     let members: Vec<DbMember> = select_or_empty(db, "member").await?;
     let cycles: Vec<DbCycle> = select_or_empty(db, "cycle").await?;
@@ -166,7 +203,7 @@ async fn seed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 ///
 /// Clears all tables, then re-inserts the full fixture set.
 /// Used by the dev-only /api/test/reset endpoint so E2E tests get a clean slate.
-pub async fn reseed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+pub async fn reseed(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     let _: Vec<DbGroup> = db.delete("group").await?;
     let _: Vec<DbMember> = db.delete("member").await?;
     let _: Vec<DbCycle> = db.delete("cycle").await?;
@@ -190,7 +227,7 @@ pub async fn reseed(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 }
 
 /// Insert all fixture data into the database using upsert (idempotent).
-async fn insert_fixtures(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
+async fn insert_fixtures(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     for (id, content) in fixture_groups() {
         let _: Option<DbGroup> = db.upsert(("group", id)).content(content).await?;
     }
@@ -211,7 +248,7 @@ async fn insert_fixtures(db: &Surreal<Db>) -> Result<(), surrealdb::Error> {
 
 /// SELECT a table and return an empty vec if the table does not yet exist.
 pub(crate) async fn select_or_empty<T>(
-    db: &Surreal<Db>,
+    db: &Surreal<Any>,
     table: &str,
 ) -> Result<Vec<T>, surrealdb::Error>
 where
