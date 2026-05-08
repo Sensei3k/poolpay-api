@@ -11,7 +11,7 @@ cd ~/projects/poolpay-api
 graphify update .                # builds graphify-out/ — your local code knowledge graph
 ```
 
-That's it. `graphify-out/` is already gitignored globally.
+That's it. `graphify-out/` is a derived artefact and shouldn't be committed — add it to your global gitignore (`~/.gitignore_global`) or this clone's `.git/info/exclude` so it stays out of every commit.
 
 ## What is graphify?
 
@@ -57,7 +57,7 @@ Once the agent has the graph loaded, prefer these over grep:
 
 ## What's NOT in this repo
 
-- The graph artefacts (`graphify-out/`) — gitignored globally; each dev builds their own
+- The graph artefacts (`graphify-out/`) — each dev builds their own; keep it out of commits via your global gitignore or `.git/info/exclude`
 - Claude Code per-repo settings — graphify integrates via a **global skill** in your `~/.claude/`, not via repo hooks. Nothing to commit, nothing future devs inherit by accident.
 - Project context / decisions / roadmap — those live in the team's knowledge wiki (currently in the maintainer's Obsidian vault; public mirror TBD)
 
@@ -75,4 +75,4 @@ Once the agent has the graph loaded, prefer these over grep:
 
 ## Why this is opt-in
 
-The graph is a **derived artefact**, not source. Each dev's local copy reflects their local code state. Committing it would create constant noise (regenerated on every code change), so we keep it local-only via the global gitignore.
+The graph is a **derived artefact**, not source. Each dev's local copy reflects their local code state. Committing it would create constant noise (regenerated on every code change), so we keep it local-only via each contributor's global gitignore (or `.git/info/exclude`).
