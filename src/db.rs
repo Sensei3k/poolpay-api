@@ -107,7 +107,7 @@ fn require_remote_credential(var: &str) -> Result<String, InitError> {
 fn missing_remote_credential_error(var: &str) -> InitError {
     format!(
         "{var} must be set when SURREAL_URL points at a remote server \
-         (ws/wss/http/https) — refusing to default to 'root'"
+         (ws/wss/http/https) — refusing to default to root/root"
     )
     .into()
 }
@@ -122,11 +122,16 @@ pub async fn init_memory() -> Result<DbConn, surrealdb::Error> {
     Ok(Arc::new(db))
 }
 
+/// URL schemes are case-insensitive (RFC 3986 §3.1), so we lowercase the
+/// scheme prefix before matching. Otherwise `WS://...` / `Wss://...` would
+/// slip past this gate, skip credential validation, *and* skip `signin`,
+/// silently undermining the fail-closed remote-mode contract.
 fn is_remote_scheme(url: &str) -> bool {
-    url.starts_with("ws://")
-        || url.starts_with("wss://")
-        || url.starts_with("http://")
-        || url.starts_with("https://")
+    let Some(scheme_end) = url.find("://") else {
+        return false;
+    };
+    let scheme = url[..scheme_end].to_ascii_lowercase();
+    matches!(scheme.as_str(), "ws" | "wss" | "http" | "https")
 }
 
 /// Strip `user:pass@` from a connection URL before logging.
@@ -667,5 +672,43 @@ mod tests {
             let value = require_remote_credential(name).expect("non-empty must succeed");
             assert_eq!(value, "root");
         });
+    }
+
+    #[test]
+    fn is_remote_scheme_recognises_supported_remote_schemes() {
+        for url in [
+            "ws://127.0.0.1:8000",
+            "wss://db.example.com",
+            "http://127.0.0.1:8000",
+            "https://db.example.com",
+        ] {
+            assert!(is_remote_scheme(url), "expected remote: {url}");
+        }
+    }
+
+    #[test]
+    fn is_remote_scheme_is_case_insensitive() {
+        // RFC 3986 §3.1: scheme matching is case-insensitive. Mixed-case must
+        // not bypass the credential gate.
+        for url in [
+            "WS://127.0.0.1:8000",
+            "Wss://db.example.com",
+            "HTTP://127.0.0.1:8000",
+            "HttpS://db.example.com",
+        ] {
+            assert!(is_remote_scheme(url), "expected remote: {url}");
+        }
+    }
+
+    #[test]
+    fn is_remote_scheme_rejects_embedded_and_malformed_urls() {
+        for url in [
+            "rocksdb://./data.surreal",
+            "mem://",
+            "file:///tmp/db",
+            "not-a-url",
+        ] {
+            assert!(!is_remote_scheme(url), "expected non-remote: {url}");
+        }
     }
 }
