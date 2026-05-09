@@ -5,7 +5,7 @@ pub mod models;
 pub mod pagination;
 
 use axum::{
-    http::{header, Method},
+    http::{header, HeaderName, Method},
     routing::{delete, get, patch, post},
     Extension, Router,
 };
@@ -167,10 +167,18 @@ fn build_cors() -> CorsLayer {
             .parse()
             .expect("DASHBOARD_ORIGIN is not a valid header value");
 
+        // Pagination headers must be in `expose_headers` or browsers
+        // will block `fetch()` from reading `X-Total-Count` / `X-Limit`
+        // / `X-Offset` even though the server sets them.
         CorsLayer::new()
             .allow_origin(parsed)
             .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+            .expose_headers([
+                HeaderName::from_static("x-total-count"),
+                HeaderName::from_static("x-limit"),
+                HeaderName::from_static("x-offset"),
+            ])
     } else {
         CorsLayer::permissive()
     }
