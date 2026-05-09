@@ -92,10 +92,14 @@ pub async fn get_groups(
     let page = Pagination::from_params(&params.pagination)?;
 
     // One round-trip: count() + page query, indexed in declaration order.
+    // The page query uses an explicit ORDER BY so offset pagination is
+    // stable — without it the DB is free to reorder rows between calls,
+    // which would make `?offset=` produce duplicate/missing items.
     let mut resp = db
         .query(
             "SELECT count() FROM group WHERE deleted_at IS NONE GROUP ALL; \
-             SELECT * FROM group WHERE deleted_at IS NONE LIMIT $limit START $offset",
+             SELECT * FROM group WHERE deleted_at IS NONE \
+             ORDER BY created_at ASC, id ASC LIMIT $limit START $offset",
         )
         .bind(("limit", page.limit as i64))
         .bind(("offset", page.offset as i64))
@@ -121,7 +125,8 @@ pub async fn get_members(
     };
     let sql = format!(
         "SELECT count() FROM member WHERE {where_clause} GROUP ALL; \
-         SELECT * FROM member WHERE {where_clause} LIMIT $limit START $offset"
+         SELECT * FROM member WHERE {where_clause} \
+         ORDER BY created_at ASC, id ASC LIMIT $limit START $offset"
     );
 
     let mut q = db
@@ -150,11 +155,14 @@ pub async fn get_cycles(
     let (count_sql, page_sql) = match params.group_id.as_ref() {
         Some(_) => (
             "SELECT count() FROM cycle WHERE group_id = $gid GROUP ALL".to_string(),
-            "SELECT * FROM cycle WHERE group_id = $gid LIMIT $limit START $offset".to_string(),
+            "SELECT * FROM cycle WHERE group_id = $gid \
+             ORDER BY created_at ASC, id ASC LIMIT $limit START $offset"
+                .to_string(),
         ),
         None => (
             "SELECT count() FROM cycle GROUP ALL".to_string(),
-            "SELECT * FROM cycle LIMIT $limit START $offset".to_string(),
+            "SELECT * FROM cycle ORDER BY created_at ASC, id ASC LIMIT $limit START $offset"
+                .to_string(),
         ),
     };
     let sql = format!("{count_sql}; {page_sql}");
@@ -185,7 +193,8 @@ pub async fn get_payments(
     };
     let sql = format!(
         "SELECT count() FROM payment WHERE {where_clause} GROUP ALL; \
-         SELECT * FROM payment WHERE {where_clause} LIMIT $limit START $offset"
+         SELECT * FROM payment WHERE {where_clause} \
+         ORDER BY created_at ASC, id ASC LIMIT $limit START $offset"
     );
 
     let mut q = db
@@ -230,7 +239,8 @@ pub async fn get_receipts(
     }
     let sql = format!(
         "SELECT count() FROM receipt WHERE {where_clause} GROUP ALL; \
-         SELECT * FROM receipt WHERE {where_clause} LIMIT $limit START $offset"
+         SELECT * FROM receipt WHERE {where_clause} \
+         ORDER BY received_at ASC, id ASC LIMIT $limit START $offset"
     );
 
     let mut q = db
