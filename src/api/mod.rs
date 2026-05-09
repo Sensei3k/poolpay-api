@@ -2,6 +2,7 @@ pub mod admin_users;
 pub mod auth_endpoints;
 pub mod handlers;
 pub mod models;
+pub mod pagination;
 
 use axum::{
     http::{header, Method},
