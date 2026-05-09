@@ -22,6 +22,14 @@ pub const DEFAULT_LIMIT: u32 = 50;
 /// 200) and make API contract debugging painful.
 pub const MAX_LIMIT: u32 = 200;
 
+/// Hard cap on `?offset`. Offset pagination scans+discards every row up
+/// to `offset`, so an unbounded `u32` lets callers request scans of
+/// billions of rows on these public GET endpoints — an easy DoS vector.
+/// 100k is well past any plausible UI deep-paging need; clients hitting
+/// this should switch to a filter (`group_id`, `cycle_id`, …) or a
+/// future cursor-based endpoint.
+pub const MAX_OFFSET: u32 = 100_000;
+
 /// Header names exposed alongside paginated list responses. Constants so
 /// every handler emits the exact same casing and tests can match by name.
 pub const HEADER_TOTAL_COUNT: HeaderName = HeaderName::from_static("x-total-count");
@@ -70,6 +78,11 @@ impl Pagination {
             None => 0,
             Some(raw) => parse_u32(raw, "offset")?,
         };
+        if offset > MAX_OFFSET {
+            return Err(AppError::BadRequest(format!(
+                "offset must be <= {MAX_OFFSET}"
+            )));
+        }
 
         Ok(Self { limit, offset })
     }
@@ -141,5 +154,19 @@ mod tests {
         let p = Pagination::from_params(&params(Some("10"), Some("20"))).unwrap();
         assert_eq!(p.limit, 10);
         assert_eq!(p.offset, 20);
+    }
+
+    #[test]
+    fn rejects_over_max_offset() {
+        let raw = (MAX_OFFSET + 1).to_string();
+        let err = Pagination::from_params(&params(None, Some(&raw))).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn accepts_max_offset() {
+        let raw = MAX_OFFSET.to_string();
+        let p = Pagination::from_params(&params(None, Some(&raw))).unwrap();
+        assert_eq!(p.offset, MAX_OFFSET);
     }
 }
