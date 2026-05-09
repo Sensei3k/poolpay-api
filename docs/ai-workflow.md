@@ -45,7 +45,7 @@ After meaningful structural changes (new modules, big renames, removed files), r
 graphify update .
 ```
 
-AST-only mode is local + free (no API cost). For semantic enrichment with an LLM, set `GEMINI_API_KEY` and run `graphify extract .` — optional.
+AST-only mode is local + free (no API cost). For semantic enrichment with an LLM, set `GEMINI_API_KEY` and run `graphify extract .` — optional. Treat `GEMINI_API_KEY` as a secret: keep it in your shell profile or a secret manager, and never paste it into tracked files (`.env` files, scripts, docs, commit messages).
 
 ## Useful commands inside the agent
 
