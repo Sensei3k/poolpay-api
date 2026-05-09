@@ -278,7 +278,7 @@ If you've installed `just` (see [Optional: `just` task runner](#optional-just-ta
 | `SURREAL_URL` | No | embedded RocksDB at `./data.surreal` | Embedded (`rocksdb://` / `mem://` / `surrealkv://`) or remote (`ws://` / `wss://` / `http://` / `https://`, case-insensitive) — see [RUNBOOK § Environment Configuration](./RUNBOOK.md#environment-configuration) |
 | `SURREAL_USER` / `SURREAL_PASS` | Conditional | — | Required only when `SURREAL_URL` is a network scheme. Boot fails with a typed error if missing, empty, or whitespace-only |
 
-For auth rate-limiting, JWT key material, and proxy-header trust (`AUTH_*`, `JWT_*`, `TRUST_PROXY_HEADERS`), see [RUNBOOK § Auth Rate Limiting](./RUNBOOK.md#auth-rate-limiting) and [RUNBOOK § JWT Verification + Refresh Rotation](./RUNBOOK.md#jwt-verification--refresh-rotation). Production sets these; local development falls back to safe defaults.
+For auth rate-limiting, JWT key material, and proxy-header trust (`AUTH_*`, `JWT_*`, `TRUST_PROXY_HEADERS`), see [RUNBOOK § Auth Rate Limiting](./RUNBOOK.md#auth-rate-limiting) and [RUNBOOK § JWT Verification + Refresh Rotation](./RUNBOOK.md#jwt-verification--refresh-rotation). Production must set `JWT_KEYS`. Local development only falls back to an ephemeral keypair when `APP_ENV` is explicitly `development` or `test` — leaving `APP_ENV` unset (or any other value) fails closed and the service will not boot without `JWT_KEYS`.
 
 ## Git Workflow
 

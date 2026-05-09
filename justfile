@@ -29,8 +29,9 @@ dev-embedded:
 
 # Wipe the local DB. Next `just dev` / `just dev-embedded` reseeds fixtures
 # (requires SEED_ON_EMPTY=true in .env; the dev-only dummy admin fixtures
-# additionally require APP_ENV=development or APP_ENV=test). Stop any
-# running API or `just surreal` first — both hold the directory open.
+# additionally require APP_ENV=development or APP_ENV=test). Stop whichever
+# process currently holds the RocksDB lock first: `just surreal` (in remote
+# mode) or `just dev-embedded` / embedded `cargo run` (in embedded mode).
 reset-db:
     rm -rf ./data.surreal
     @echo "data.surreal removed. Restart the API with SEED_ON_EMPTY=true to reseed."
