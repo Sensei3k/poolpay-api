@@ -5,12 +5,13 @@ pub mod models;
 pub mod pagination;
 
 use axum::{
-    http::{header, HeaderName, Method},
+    http::{header, Method},
     routing::{delete, get, patch, post},
     Extension, Router,
 };
 use tower_http::cors::CorsLayer;
 
+use crate::api::pagination::{HEADER_LIMIT, HEADER_OFFSET, HEADER_TOTAL_COUNT};
 use crate::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use crate::auth::rate_limit::{self, CredentialFailureLimiter, RateLimitConfig};
 use crate::db::DbConn;
@@ -175,9 +176,9 @@ fn build_cors() -> CorsLayer {
             .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
             .expose_headers([
-                HeaderName::from_static("x-total-count"),
-                HeaderName::from_static("x-limit"),
-                HeaderName::from_static("x-offset"),
+                HEADER_TOTAL_COUNT,
+                HEADER_LIMIT,
+                HEADER_OFFSET,
             ])
     } else {
         CorsLayer::permissive()

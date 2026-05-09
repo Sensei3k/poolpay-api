@@ -2280,7 +2280,8 @@ async fn pagination_default_limit_returns_all_payments_with_total_header() {
 #[tokio::test]
 async fn pagination_explicit_limit_truncates_body_but_not_total_count() {
     // ?limit=10 returns 10 rows in the body; the header still reports
-    // the table-wide total so the FE can render "showing 10 of 49".
+    // the total matching the endpoint's filters (for payments, the
+    // active/undeleted total) so the FE can render "showing 10 of 49".
     let resp = call(test_app().await, get("/api/payments?limit=10")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(total_count_header(&resp), 49);
@@ -2369,7 +2370,7 @@ async fn pagination_filter_and_limit_combine_correctly_for_payments_by_cycle() {
 }
 
 #[tokio::test]
-async fn pagination_excludes_soft_deleted_payments_from_total_count() {
+async fn pagination_excludes_soft_deleted_receipts_from_total_count() {
     // The receipts fixture seeds two rows — one active, one
     // soft-deleted. After filtering, the count + body should both
     // surface only the active row.
