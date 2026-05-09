@@ -1,6 +1,6 @@
 # Contributing to PoolPay
 
-Last Updated: 2026-04-14
+Last Updated: 2026-05-09
 
 ## Prerequisites
 
@@ -122,12 +122,13 @@ Supported log levels: `debug`, `info`, `warn`, `error`.
 cargo test
 ```
 
-Runs 193 tests across unit + integration suites:
-- **Unit tests** — models, parser, password hashing, HMAC primitives
-- **Parser integration** — amount extraction, sender detection, bank matching
-- **API integration** — admin CRUD, auth, validation, soft delete, version conflicts, route handlers
-- **Auth integration** — HMAC-gated `verify-credentials` / `ensure-user`, bootstrap idempotency, field-length caps
-- **Routing / ingestion integration** — chat→group resolution, receipt ingestion pipeline
+Runs 328 tests across 6 binaries:
+- **Unit tests** (`src/lib.rs`, 36) — models, password hashing, HMAC primitives, SurrealDB scheme detection (`is_remote_scheme`), URL userinfo redaction, env-credential gates
+- **API integration** (132) — admin CRUD (groups / members / cycles / payments), JWT verification + bearer auth, validation, soft-delete guards, optimistic concurrency, admin-user CRUD, group-admin grants + revokes
+- **Auth integration** (105) — HMAC `verify-credentials` / `ensure-user` / `issue`, bootstrap idempotency, change-password (wrong-current 400 + `token_version` invalidation), refresh rotation + reuse detection, dev-fixture seeder gates
+- **Parser integration** (35) — amount, sender, bank extraction; combined receipts
+- **Routing integration** (12) — chat→group / phone→member resolution; soft-delete handling
+- **Ingestion integration** (8) — end-to-end receipt pipeline (webhook → OCR → parse → persist → reply)
 
 Tests use an in-memory SurrealDB instance and do not touch the filesystem or call external APIs.
 
@@ -250,6 +251,11 @@ tests/
 | `SEED_ON_EMPTY` | No | `false` | Set to `true` to seed fixture data when all database tables are empty |
 | `RECEIPT_DOWNLOAD_DIR` | No | OS temp dir | Directory for temporary receipt files during OCR |
 | `RUST_LOG` | No | `info` | Log level filter: `debug`, `info`, `warn`, `error` |
+| `SURREAL_URL` | No | embedded RocksDB at `./data.surreal` | Embedded (`rocksdb://` / `mem://` / `surrealkv://`) or remote (`ws://` / `wss://` / `http://` / `https://`, case-insensitive) — see [RUNBOOK § Environment Configuration](./RUNBOOK.md#environment-configuration) |
+| `SURREAL_USER` / `SURREAL_PASS` | Conditional | — | Required only when `SURREAL_URL` is a network scheme. Boot fails with a typed error if missing, empty, or whitespace-only |
+| `DUMMY_ADMIN_PASSWORD` | Conditional | — | Required when `APP_ENV=development` + `SEED_ON_EMPTY=true`; shared password for the four `admin{1..4}@poolpay.test` dev fixtures |
+
+For auth rate-limiting, JWT key material, and proxy-header trust (`AUTH_*`, `JWT_*`, `TRUST_PROXY_HEADERS`), see [RUNBOOK § Auth Rate Limiting](./RUNBOOK.md#auth-rate-limiting) and [RUNBOOK § JWT Verification + Refresh Rotation](./RUNBOOK.md#jwt-verification--refresh-rotation). Production sets these; local development falls back to safe defaults.
 
 ## Git Workflow
 
