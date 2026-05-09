@@ -41,7 +41,7 @@ src/
 │   ├── handlers.rs — HTTP handlers (GET/POST/PATCH/DELETE)
 │   └── models.rs  — API request/response types, EntityId alias, DB/API structs
 tests/
-├── api_integration.rs       — API route, auth, CRUD, OCC integration tests
+├── api_integration.rs       — API route, auth, CRUD, optimistic concurrency control (OCC) integration tests
 ├── auth_integration.rs      — HMAC + bootstrap + password + JWT integration tests
 ├── ingestion_integration.rs — receipt ingestion pipeline tests
 ├── parser_tests.rs          — receipt parser (sender / bank / amount) tests
@@ -99,7 +99,7 @@ The full list — including auth rate-limiting, JWT keys, and SurrealDB connecti
 | `GREEN_API_INSTANCE_ID` | Yes | — | Instance ID from the Green API dashboard |
 | `GREEN_API_TOKEN` | Yes | — | API token shown next to your instance |
 | `NEXTAUTH_BACKEND_SECRET` | Yes | — | Shared HMAC secret for NextAuth → backend signing (≥ 32 bytes; generate with `openssl rand -hex 32`) |
-| `APP_ENV` | No | unset | Set to `production` to enable strict CORS and disable `/api/test/reset`; `development` / `test` mounts the reset endpoint and unlocks dev-only fixture seeders |
+| `APP_ENV` | No | unset | Set to `production` to enable strict CORS and disable `/api/test/reset`; `development` / `test` mounts the reset endpoint and unlocks dev-only fixture seeders. For local dev set `APP_ENV=development` (or provide `JWT_KEYS`) — JWT verifier init fails closed otherwise and the service won't boot |
 | `DASHBOARD_ORIGIN` | No (required if `APP_ENV=production`) | — | CORS origin for the dashboard (e.g., `https://dashboard.example.com`) |
 | `API_BIND_ADDR` | No | `0.0.0.0:8080` | Socket address for the HTTP server |
 | `SURREAL_URL` | No | embedded RocksDB at `./data.surreal` | Embedded (`rocksdb://` / `mem://` / `surrealkv://`) or remote (`ws` / `wss` / `http` / `https`, case-insensitive). Remote schemes require `SURREAL_USER` + `SURREAL_PASS` |
