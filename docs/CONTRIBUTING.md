@@ -277,7 +277,6 @@ If you've installed `just` (see [Optional: `just` task runner](#optional-just-ta
 | `RUST_LOG` | No | `info` | Log level filter: `debug`, `info`, `warn`, `error` |
 | `SURREAL_URL` | No | embedded RocksDB at `./data.surreal` | Embedded (`rocksdb://` / `mem://` / `surrealkv://`) or remote (`ws://` / `wss://` / `http://` / `https://`, case-insensitive) — see [RUNBOOK § Environment Configuration](./RUNBOOK.md#environment-configuration) |
 | `SURREAL_USER` / `SURREAL_PASS` | Conditional | — | Required only when `SURREAL_URL` is a network scheme. Boot fails with a typed error if missing, empty, or whitespace-only |
-| `DUMMY_ADMIN_PASSWORD` | Conditional | — | Required when `APP_ENV=development` + `SEED_ON_EMPTY=true`; shared password for the four `admin{1..4}@poolpay.test` dev fixtures |
 
 For auth rate-limiting, JWT key material, and proxy-header trust (`AUTH_*`, `JWT_*`, `TRUST_PROXY_HEADERS`), see [RUNBOOK § Auth Rate Limiting](./RUNBOOK.md#auth-rate-limiting) and [RUNBOOK § JWT Verification + Refresh Rotation](./RUNBOOK.md#jwt-verification--refresh-rotation). Production sets these; local development falls back to safe defaults.
 

@@ -102,7 +102,7 @@ The full list — including auth rate-limiting, JWT keys, and SurrealDB connecti
 | `APP_ENV` | No | unset | Set to `production` to enable strict CORS and disable `/api/test/reset`; `development` / `test` mounts the reset endpoint and unlocks dev-only fixture seeders. For local dev set `APP_ENV=development` (or provide `JWT_KEYS`) — JWT verifier init fails closed otherwise and the service won't boot |
 | `DASHBOARD_ORIGIN` | No (required if `APP_ENV=production`) | — | CORS origin for the dashboard (e.g., `https://dashboard.example.com`) |
 | `API_BIND_ADDR` | No | `0.0.0.0:8080` | Socket address for the HTTP server |
-| `SURREAL_URL` | No | embedded RocksDB at `./data.surreal` | Embedded (`rocksdb://` / `mem://` / `surrealkv://`) or remote (`ws` / `wss` / `http` / `https`, case-insensitive). Remote schemes require `SURREAL_USER` + `SURREAL_PASS` |
+| `SURREAL_URL` | No | embedded RocksDB at `./data.surreal` | Embedded (`rocksdb://` / `mem://` / `surrealkv://`) or remote (`ws://` / `wss://` / `http://` / `https://`, case-insensitive). Remote schemes require `SURREAL_USER` + `SURREAL_PASS` |
 | `SURREAL_USER` / `SURREAL_PASS` | Conditional | — | Required when `SURREAL_URL` is a network scheme. No defaults — boot fails with a typed error if missing, empty, or whitespace-only |
 | `SEED_ON_EMPTY` | No | `false` | Seed fixture data when all database tables are empty |
 | `RECEIPT_DOWNLOAD_DIR` | No | OS temp dir | Directory where receipt files are saved during OCR |

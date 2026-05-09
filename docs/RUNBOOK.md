@@ -140,11 +140,13 @@ JWT_REFRESH_TTL_SECS=1209600
 # SURREAL_PASS=root
 
 # --- Dev fixture seeding (development only) ---
-# Required when APP_ENV=development AND SEED_ON_EMPTY=true. Shared password
-# for the four `admin{1..4}@poolpay.test` fixtures (admin1 = group-admin
-# on fixture group 1; admin2 = orphan admin; admin3 = super_admin; admin4 =
-# orphan admin baseline). Asserted ≥ 12 chars at boot.
-# DUMMY_ADMIN_PASSWORD=PoolPayQA2026!
+# The four `admin{1..4}@poolpay.test` fixtures (admin1 = group-admin on
+# fixture group 1; admin2 = orphan admin; admin3 = super_admin; admin4 =
+# orphan admin baseline) all share a hardcoded password defined in
+# `src/auth/bootstrap.rs` as `DUMMY_ADMIN_PASSWORD = "PoolPayQA2026!"`. There
+# is no env var override — the constant is the source of truth, and the
+# seed path only runs when SEED_ON_EMPTY=true AND APP_ENV ∈ {development,
+# test}, so it cannot leak into a production deploy.
 ```
 
 ### Auth Rate Limiting

@@ -28,7 +28,8 @@ dev-embedded:
     cargo run
 
 # Wipe the local DB. Next `just dev` / `just dev-embedded` reseeds fixtures
-# (requires APP_ENV=development + SEED_ON_EMPTY=true in .env). Stop any
+# (requires SEED_ON_EMPTY=true in .env; the dev-only dummy admin fixtures
+# additionally require APP_ENV=development or APP_ENV=test). Stop any
 # running API or `just surreal` first — both hold the directory open.
 reset-db:
     rm -rf ./data.surreal
