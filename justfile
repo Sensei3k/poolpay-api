@@ -44,7 +44,7 @@ test:
 check:
     cargo check
 
-# Format + lint, gating on warnings (matches pre-commit).
+# Format + lint, gating on warnings. Run before pushing.
 lint:
     cargo fmt --check
     cargo clippy --all-targets -- -D warnings

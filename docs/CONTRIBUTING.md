@@ -257,7 +257,7 @@ If you've installed `just` (see [Optional: `just` task runner](#optional-just-ta
 | `just reset-db` | `rm -rf ./data.surreal` — wipe local DB so next boot reseeds fixtures |
 | `just test` | `cargo test` |
 | `just check` | `cargo check` |
-| `just lint` | `cargo fmt --check && cargo clippy --all-targets -- -D warnings` (matches pre-commit gate) |
+| `just lint` | `cargo fmt --check && cargo clippy --all-targets -- -D warnings` (run before pushing) |
 | `just fmt` | `cargo fmt` |
 
 ## Environment Variables
