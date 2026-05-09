@@ -262,7 +262,7 @@ Both tasks are monitored — if either fails, the process exits rather than sile
 
 ### SurrealDB Connection (`SURREAL_URL`)
 
-By default the service uses SurrealDB with RocksDB storage, persisting to `./data.surreal/`. Setting `SURREAL_URL` overrides the connection target without code changes — the API can run against an embedded RocksDB / SurrealKV / in-memory engine, or against a standalone SurrealDB instance over the network. See PR #43 for the full mechanism.
+By default the service uses SurrealDB with RocksDB storage, persisting to `./data.surreal/`. Setting `SURREAL_URL` overrides the connection target without code changes — the API can run against an embedded RocksDB or in-memory engine, or against a standalone SurrealDB instance over the network. See PR #43 for the full mechanism.
 
 | `SURREAL_URL` value | Mode | Engine | Creds required |
 |---------------------|------|--------|----------------|
