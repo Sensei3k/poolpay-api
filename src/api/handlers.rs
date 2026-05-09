@@ -41,65 +41,69 @@ pub struct ReceiptsQuery {
 // ── Public GET handlers ──────────────────────────────────────────────────────
 
 pub async fn get_groups(State(db): State<DbConn>) -> Result<Json<Vec<Group>>, AppError> {
-    let rows: Vec<DbGroup> = db.select("group").await?;
-    let groups: Result<Vec<Group>, AppError> = rows
-        .into_iter()
-        .map(Group::try_from)
-        .collect();
-    let groups = groups?;
-    let filtered: Vec<Group> = groups.into_iter().filter(|g| g.deleted_at.is_none()).collect();
-    Ok(Json(filtered))
+    let rows: Vec<DbGroup> = db
+        .query("SELECT * FROM group WHERE deleted_at IS NONE")
+        .await?
+        .take(0)?;
+    let groups: Result<Vec<Group>, AppError> = rows.into_iter().map(Group::try_from).collect();
+    Ok(Json(groups?))
 }
 
 pub async fn get_members(
     State(db): State<DbConn>,
     Query(params): Query<GroupIdQuery>,
 ) -> Result<Json<Vec<Member>>, AppError> {
-    let rows: Vec<DbMember> = db.select("member").await?;
+    let rows: Vec<DbMember> = match params.group_id {
+        Some(gid) => db
+            .query("SELECT * FROM member WHERE deleted_at IS NONE AND group_id = $gid")
+            .bind(("gid", gid))
+            .await?
+            .take(0)?,
+        None => db
+            .query("SELECT * FROM member WHERE deleted_at IS NONE")
+            .await?
+            .take(0)?,
+    };
     let members: Result<Vec<Member>, AppError> = rows.into_iter().map(Member::try_from).collect();
-    let members = members?;
-
-    let filtered: Vec<Member> = members
-        .into_iter()
-        .filter(|m| m.deleted_at.is_none())
-        .filter(|m| params.group_id.as_ref().is_none_or(|gid| m.group_id == *gid))
-        .collect();
-
-    Ok(Json(filtered))
+    Ok(Json(members?))
 }
 
 pub async fn get_cycles(
     State(db): State<DbConn>,
     Query(params): Query<GroupIdQuery>,
 ) -> Result<Json<Vec<Cycle>>, AppError> {
-    let rows: Vec<DbCycle> = db.select("cycle").await?;
+    // Cycles are hard-deleted (no `deleted_at`), so the only optional
+    // predicate is `group_id`.
+    let rows: Vec<DbCycle> = match params.group_id {
+        Some(gid) => db
+            .query("SELECT * FROM cycle WHERE group_id = $gid")
+            .bind(("gid", gid))
+            .await?
+            .take(0)?,
+        None => db.query("SELECT * FROM cycle").await?.take(0)?,
+    };
     let cycles: Result<Vec<Cycle>, AppError> = rows.into_iter().map(Cycle::try_from).collect();
-    let cycles = cycles?;
-
-    let filtered: Vec<Cycle> = cycles
-        .into_iter()
-        .filter(|c| params.group_id.as_ref().is_none_or(|gid| c.group_id == *gid))
-        .collect();
-
-    Ok(Json(filtered))
+    Ok(Json(cycles?))
 }
 
 pub async fn get_payments(
     State(db): State<DbConn>,
     Query(params): Query<PaymentsQuery>,
 ) -> Result<Json<Vec<Payment>>, AppError> {
-    let rows: Vec<DbPayment> = db.select("payment").await?;
+    let rows: Vec<DbPayment> = match params.cycle_id {
+        Some(cid) => db
+            .query("SELECT * FROM payment WHERE deleted_at IS NONE AND cycle_id = $cid")
+            .bind(("cid", cid))
+            .await?
+            .take(0)?,
+        None => db
+            .query("SELECT * FROM payment WHERE deleted_at IS NONE")
+            .await?
+            .take(0)?,
+    };
     let payments: Result<Vec<Payment>, AppError> =
         rows.into_iter().map(Payment::try_from).collect();
-    let payments = payments?;
-
-    let filtered: Vec<Payment> = payments
-        .into_iter()
-        .filter(|p| p.deleted_at.is_none())
-        .filter(|p| params.cycle_id.as_ref().is_none_or(|cid| p.cycle_id == *cid))
-        .collect();
-
-    Ok(Json(filtered))
+    Ok(Json(payments?))
 }
 
 pub async fn get_receipts(
@@ -113,19 +117,35 @@ pub async fn get_receipts(
         Some(s) => Some(s.parse::<ReceiptStatus>().map_err(AppError::BadRequest)?),
     };
 
-    let rows: Vec<DbReceipt> = db.select("receipt").await?;
+    // Build the WHERE clause dynamically based on which optional filters
+    // are present. The base predicate (`deleted_at IS NONE`) is always
+    // applied; `group_id` and `status` join with AND when supplied.
+    let mut sql = String::from("SELECT * FROM receipt WHERE deleted_at IS NONE");
+    if params.group_id.is_some() {
+        sql.push_str(" AND group_id = $gid");
+    }
+    if status_filter.is_some() {
+        sql.push_str(" AND status = $status");
+    }
+
+    let mut q = db.query(sql);
+    if let Some(gid) = params.group_id {
+        q = q.bind(("gid", gid));
+    }
+    if let Some(s) = status_filter {
+        // Persist the canonical lowercase form so the WHERE matches the
+        // stored value (`status: "pending" | "confirmed" | "rejected"`).
+        let stored = match s {
+            ReceiptStatus::Pending => "pending",
+            ReceiptStatus::Confirmed => "confirmed",
+            ReceiptStatus::Rejected => "rejected",
+        };
+        q = q.bind(("status", stored.to_string()));
+    }
+    let rows: Vec<DbReceipt> = q.await?.take(0)?;
     let receipts: Result<Vec<Receipt>, AppError> =
         rows.into_iter().map(Receipt::try_from).collect();
-    let receipts = receipts?;
-
-    let filtered: Vec<Receipt> = receipts
-        .into_iter()
-        .filter(|r| r.deleted_at.is_none())
-        .filter(|r| params.group_id.as_ref().is_none_or(|gid| r.group_id == *gid))
-        .filter(|r| status_filter.as_ref().is_none_or(|s| r.status == *s))
-        .collect();
-
-    Ok(Json(filtered))
+    Ok(Json(receipts?))
 }
 
 // ── Admin Group handlers ─────────────────────────────────────────────────────
