@@ -88,6 +88,8 @@ brew install tesseract poppler pkgconf
 | `cargo check` | Fast type-check without producing a binary |
 | `RUST_LOG=debug cargo run` | Run with verbose debug logging |
 
+The repo also ships a [`justfile`](./justfile) with convenience recipes (`just dev`, `just surreal`, `just reset-db`, `just test`, …). Optional: `brew install just`, then `just --list`. See [docs/CONTRIBUTING.md § just Recipes](./docs/CONTRIBUTING.md#just-recipes-optional).
+
 ## Environment variables
 
 The full list — including auth rate-limiting, JWT keys, and SurrealDB connection options — lives in [`.env.example`](./.env.example) and [`docs/RUNBOOK.md`](./docs/RUNBOOK.md#environment-configuration). The brief overview below covers what most contributors need to get a dev instance running.

@@ -51,6 +51,15 @@ tesseract --version
 pdftoppm -v
 ```
 
+### Optional: `just` task runner
+
+The repo ships with a [`justfile`](../justfile) that wraps the longer commands documented in this guide and `RUNBOOK.md` (running the standalone SurrealDB server, the API in embedded vs remote mode, resetting the local DB, etc.). Using it is optional — the underlying `cargo` and `surreal` commands still work directly.
+
+```bash
+brew install just     # macOS — one-time install
+just --list           # see all available recipes
+```
+
 ### Environment Setup
 
 1. Copy the example env file and fill in credentials:
@@ -235,6 +244,21 @@ tests/
 | `cargo doc --open` | Generate and open documentation |
 | `cargo tree` | Show dependency tree |
 | `cargo outdated` | Check for outdated dependencies |
+
+### `just` Recipes (Optional)
+
+If you've installed `just` (see [Optional: `just` task runner](#optional-just-task-runner)), the following recipes wrap the most common workflows. Run `just --list` to see them all with descriptions.
+
+| Recipe | Wraps |
+|--------|-------|
+| `just surreal` | `surreal start --user root --pass root --bind 127.0.0.1:8000 rocksdb:./data.surreal` — Terminal 1 (standalone server, lets Surrealist attach) |
+| `just dev` | `SURREAL_URL=ws://… SURREAL_USER=root SURREAL_PASS=root cargo run` — Terminal 2, paired with `just surreal` |
+| `just dev-embedded` | `cargo run` — embedded mode (no Surrealist GUI possible) |
+| `just reset-db` | `rm -rf ./data.surreal` — wipe local DB so next boot reseeds fixtures |
+| `just test` | `cargo test` |
+| `just check` | `cargo check` |
+| `just lint` | `cargo fmt --check && cargo clippy --all-targets -- -D warnings` (matches pre-commit gate) |
+| `just fmt` | `cargo fmt` |
 
 ## Environment Variables
 
