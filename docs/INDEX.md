@@ -1,6 +1,6 @@
 # Documentation Index
 
-Last Updated: 2026-05-08
+Last Updated: 2026-05-09
 
 Quick reference to all documentation for the PoolPay project.
 
@@ -44,7 +44,7 @@ Start here if you're deploying, running, or troubleshooting the service in produ
 - **[README.md](../README.md)** (in root) — Project overview
   - What the service does
   - Architecture and structure
-  - Testing overview (193 tests)
+  - Testing overview (328 tests)
   - Known limitations
 
 ## Key Topics at a Glance

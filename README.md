@@ -41,8 +41,11 @@ src/
 │   ├── handlers.rs — HTTP handlers (GET/POST/PATCH/DELETE)
 │   └── models.rs  — API request/response types, EntityId alias, DB/API structs
 tests/
-├── parser_tests.rs     — 28 parser integration tests
-└── api_integration.rs  — 75 API route and database integration tests
+├── api_integration.rs       — API route, auth, CRUD, optimistic concurrency control (OCC) integration tests
+├── auth_integration.rs      — HMAC + bootstrap + password + JWT integration tests
+├── ingestion_integration.rs — receipt ingestion pipeline tests
+├── parser_tests.rs          — receipt parser (sender / bank / amount) tests
+└── routing_integration.rs   — chat→group / phone→member resolution tests
 ```
 
 The project uses a **lib + bin** layout: `src/lib.rs` exposes all modules as a library crate (`poolpay`), and `src/main.rs` is the binary entry point that imports from it. This allows `tests/` to import the public API directly, keeping integration tests separate from source files.
@@ -85,16 +88,23 @@ brew install tesseract poppler pkgconf
 | `cargo check` | Fast type-check without producing a binary |
 | `RUST_LOG=debug cargo run` | Run with verbose debug logging |
 
+The repo also ships a [`justfile`](./justfile) with convenience recipes (`just dev`, `just surreal`, `just reset-db`, `just test`, …). Optional: `brew install just`, then `just --list`. See [docs/CONTRIBUTING.md § just Recipes](./docs/CONTRIBUTING.md#just-recipes-optional).
+
 ## Environment variables
+
+The full list — including auth rate-limiting, JWT keys, and SurrealDB connection options — lives in [`.env.example`](./.env.example) and [`docs/RUNBOOK.md`](./docs/RUNBOOK.md#environment-configuration). The brief overview below covers what most contributors need to get a dev instance running.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `GREEN_API_INSTANCE_ID` | Yes | — | Instance ID from the Green API dashboard |
 | `GREEN_API_TOKEN` | Yes | — | API token shown next to your instance |
-| `APP_ENV` | No | `development` | Set to `production` to enable CORS restrictions and disable `/api/test/reset` |
+| `NEXTAUTH_BACKEND_SECRET` | Yes | — | Shared HMAC secret for NextAuth → backend signing (≥ 32 bytes; generate with `openssl rand -hex 32`) |
+| `APP_ENV` | No | unset | Set to `production` to enable strict CORS and disable `/api/test/reset`; `development` / `test` mounts the reset endpoint and unlocks dev-only fixture seeders. For local dev set `APP_ENV=development` (or provide `JWT_KEYS`) — JWT verifier init fails closed otherwise and the service won't boot |
 | `DASHBOARD_ORIGIN` | No (required if `APP_ENV=production`) | — | CORS origin for the dashboard (e.g., `https://dashboard.example.com`) |
 | `API_BIND_ADDR` | No | `0.0.0.0:8080` | Socket address for the HTTP server |
-| `SEED_ON_EMPTY` | No | `false` | Set to `true` to seed fixture data when all database tables are empty |
+| `SURREAL_URL` | No | embedded RocksDB at `./data.surreal` | Embedded (`rocksdb://` / `mem://`) or remote (`ws://` / `wss://` / `http://` / `https://`, case-insensitive). Remote schemes require `SURREAL_USER` + `SURREAL_PASS` |
+| `SURREAL_USER` / `SURREAL_PASS` | Conditional | — | Required when `SURREAL_URL` is a network scheme. No defaults — boot fails with a typed error if missing, empty, or whitespace-only |
+| `SEED_ON_EMPTY` | No | `false` | Seed fixture data when all database tables are empty |
 | `RECEIPT_DOWNLOAD_DIR` | No | OS temp dir | Directory where receipt files are saved during OCR |
 | `RUST_LOG` | No | `info` | Log verbosity — `debug`, `info`, `warn`, `error` |
 
@@ -104,26 +114,16 @@ brew install tesseract poppler pkgconf
 cargo test
 ```
 
-106 tests total — 3 models + 28 parser + 75 API integration:
+328 tests across 6 binaries (in-memory SurrealDB; no filesystem or external API calls):
 
-**Models** (`src/models.rs` — `#[cfg(test)]` module, 3 tests):
-
-| Group | Tests | What's covered |
+| Binary | Tests | What's covered |
 |---|---|---|
-| `notification_id_message` | 3 | `idMessage` deserialises from body level (not messageData), absent field is `None`, `MessageData` does not contain `idMessage` |
-
-**Parser** (`tests/parser_tests.rs`, 28 tests):
-
-| Group | Tests | What's covered |
-|---|---|---|
-| Amount | 11 | `₦` symbol, `#` → `₦` normalisation, mid-number OCR spaces, `NGN` prefix, trailing zeros, no decimal, absent amount |
-| Sender | 8 | Primary label, case insensitivity, fallback labels (`Sender:`, `From:`, `Originator:`), OCR garbage after name, absent sender, whitespace trimming |
-| Bank | 7 | Next-line extraction, pipe-separator stripping, known-bank fallback, case insensitivity, absent bank, leading-space trimming |
-| Combined | 2 | Full realistic receipts (OPay style, heavy OCR noise) |
-
-**API Integration** (`tests/api_integration.rs`, 75 tests):
-
-Covers admin CRUD for groups, members, cycles, and payments including auth (bearer token validation, missing/invalid token rejection), validation (empty names, invalid dates, negative amounts), soft delete guards (cannot delete group with members, member with active cycles), optimistic concurrency (version mismatch conflicts), cross-group validation (member and cycle must belong to same group), and fixture seeding.
+| `src/lib.rs` (unit) | 36 | Inline `#[cfg(test)]` modules — models, password hashing, HMAC primitives, scheme detection, URL redaction, env-credential gates |
+| `tests/api_integration.rs` | 132 | Admin CRUD (groups, members, cycles, payments), bearer auth, JWT verification, validation, soft-delete guards, optimistic concurrency, cross-group constraints, admin-user CRUD, group-admin grants |
+| `tests/auth_integration.rs` | 105 | HMAC `verify-credentials` / `ensure-user`, bootstrap idempotency, change-password (wrong-current 400 + token-version invalidation), refresh rotation + reuse detection, dev-fixture seeder gates |
+| `tests/parser_tests.rs` | 35 | Amount (`₦`, `#`-normalisation, OCR spacing, `NGN` prefix), sender (primary + fallback labels), bank (line-after, pipe stripping, known-bank fallback), combined receipts |
+| `tests/routing_integration.rs` | 12 | Chat-id → group + phone → member resolution; soft-delete handling on routing lookups |
+| `tests/ingestion_integration.rs` | 8 | End-to-end receipt ingestion pipeline (Green API webhook → OCR → parse → persist → reply) |
 
 ## Known limitations
 

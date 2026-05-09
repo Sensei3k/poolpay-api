@@ -1,6 +1,6 @@
 # Contributing to PoolPay
 
-Last Updated: 2026-04-14
+Last Updated: 2026-05-09
 
 ## Prerequisites
 
@@ -49,6 +49,15 @@ Verify installation:
 ```bash
 tesseract --version
 pdftoppm -v
+```
+
+### Optional: `just` task runner
+
+The repo ships with a [`justfile`](../justfile) that wraps the longer commands documented in this guide and `RUNBOOK.md` (running the standalone SurrealDB server, the API in embedded vs remote mode, resetting the local DB, etc.). Using it is optional — the underlying `cargo` and `surreal` commands still work directly.
+
+```bash
+brew install just     # macOS — one-time install
+just --list           # see all available recipes
 ```
 
 ### Environment Setup
@@ -122,12 +131,13 @@ Supported log levels: `debug`, `info`, `warn`, `error`.
 cargo test
 ```
 
-Runs 193 tests across unit + integration suites:
-- **Unit tests** — models, parser, password hashing, HMAC primitives
-- **Parser integration** — amount extraction, sender detection, bank matching
-- **API integration** — admin CRUD, auth, validation, soft delete, version conflicts, route handlers
-- **Auth integration** — HMAC-gated `verify-credentials` / `ensure-user`, bootstrap idempotency, field-length caps
-- **Routing / ingestion integration** — chat→group resolution, receipt ingestion pipeline
+Runs 328 tests across 6 binaries:
+- **Unit tests** (`src/lib.rs`, 36) — models, password hashing, HMAC primitives, SurrealDB scheme detection (`is_remote_scheme`), URL userinfo redaction, env-credential gates
+- **API integration** (132) — admin CRUD (groups / members / cycles / payments), JWT verification + bearer auth, validation, soft-delete guards, optimistic concurrency, admin-user CRUD, group-admin grants + revokes
+- **Auth integration** (105) — HMAC `verify-credentials` / `ensure-user` / `issue`, bootstrap idempotency, change-password (wrong-current 400 + `token_version` invalidation), refresh rotation + reuse detection, dev-fixture seeder gates
+- **Parser integration** (35) — amount, sender, bank extraction; combined receipts
+- **Routing integration** (12) — chat→group / phone→member resolution; soft-delete handling
+- **Ingestion integration** (8) — end-to-end receipt pipeline (webhook → OCR → parse → persist → reply)
 
 Tests use an in-memory SurrealDB instance and do not touch the filesystem or call external APIs.
 
@@ -235,6 +245,21 @@ tests/
 | `cargo tree` | Show dependency tree |
 | `cargo outdated` | Check for outdated dependencies |
 
+### `just` Recipes (Optional)
+
+If you've installed `just` (see [Optional: `just` task runner](#optional-just-task-runner)), the following recipes wrap the most common workflows. Run `just --list` to see them all with descriptions.
+
+| Recipe | Wraps |
+|--------|-------|
+| `just surreal` | `surreal start --user root --pass root --bind 127.0.0.1:8000 rocksdb:./data.surreal` — Terminal 1 (standalone server, lets Surrealist attach) |
+| `just dev` | `SURREAL_URL=ws://… SURREAL_USER=root SURREAL_PASS=root cargo run` — Terminal 2, paired with `just surreal` |
+| `just dev-embedded` | `cargo run` — embedded mode (no Surrealist GUI possible) |
+| `just reset-db` | `rm -rf ./data.surreal` — wipe local DB so next boot reseeds fixtures |
+| `just test` | `cargo test` |
+| `just check` | `cargo check` |
+| `just lint` | `cargo fmt --check && cargo clippy --all-targets -- -D warnings` (run before pushing) |
+| `just fmt` | `cargo fmt` |
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -250,6 +275,10 @@ tests/
 | `SEED_ON_EMPTY` | No | `false` | Set to `true` to seed fixture data when all database tables are empty |
 | `RECEIPT_DOWNLOAD_DIR` | No | OS temp dir | Directory for temporary receipt files during OCR |
 | `RUST_LOG` | No | `info` | Log level filter: `debug`, `info`, `warn`, `error` |
+| `SURREAL_URL` | No | embedded RocksDB at `./data.surreal` | Embedded (`rocksdb://` / `mem://`) or remote (`ws://` / `wss://` / `http://` / `https://`, case-insensitive) — see [RUNBOOK § Environment Configuration](./RUNBOOK.md#environment-configuration) |
+| `SURREAL_USER` / `SURREAL_PASS` | Conditional | — | Required only when `SURREAL_URL` is a network scheme. Boot fails with a typed error if missing, empty, or whitespace-only |
+
+For auth rate-limiting, JWT key material, and proxy-header trust (`AUTH_*`, `JWT_*`, `TRUST_PROXY_HEADERS`), see [RUNBOOK § Auth Rate Limiting](./RUNBOOK.md#auth-rate-limiting) and [RUNBOOK § JWT Verification + Refresh Rotation](./RUNBOOK.md#jwt-verification--refresh-rotation). Production must set `JWT_KEYS`. Local development only falls back to an ephemeral keypair when `APP_ENV` is explicitly `development` or `test` — leaving `APP_ENV` unset (or any other value) fails closed and the service will not boot without `JWT_KEYS`.
 
 ## Git Workflow
 

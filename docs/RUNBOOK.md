@@ -1,6 +1,6 @@
 # Runbook: PoolPay Service
 
-Last Updated: 2026-04-14
+Last Updated: 2026-05-09
 
 Operational guide for running and troubleshooting the PoolPay service in development and production.
 
@@ -121,6 +121,32 @@ JWT_LEEWAY_SECS=60
 
 # Refresh-token lifetime (seconds). Default: 14 days.
 JWT_REFRESH_TTL_SECS=1209600
+
+# --- SurrealDB connection (PR #43) ---
+# Default: embedded RocksDB at `./data.surreal` (no env var needed). The
+# embedded engine takes an exclusive file lock — a Surrealist GUI cannot
+# attach while `cargo run` is up.
+#
+# Embedded values: rocksdb://path | mem://
+# Remote values:   ws://host:port | wss://host:port | http://host:port | https://host:port
+# Scheme matching is case-insensitive (RFC 3986 §3.1).
+# SURREAL_URL=ws://127.0.0.1:8000
+
+# REQUIRED when SURREAL_URL is a network scheme. No defaults — missing,
+# empty (`SURREAL_USER=`), or whitespace-only values short-circuit boot
+# with a typed `InitError` BEFORE any outbound socket opens. The connect-
+# success log redacts `user:pass@` from the URL via `redact_url_userinfo`.
+# SURREAL_USER=root
+# SURREAL_PASS=root
+
+# --- Dev fixture seeding (development only) ---
+# The four `admin{1..4}@poolpay.test` fixtures (admin1 = group-admin on
+# fixture group 1; admin2 = orphan admin; admin3 = super_admin; admin4 =
+# orphan admin baseline) all share a hardcoded password defined in
+# `src/auth/bootstrap.rs` as `DUMMY_ADMIN_PASSWORD = "PoolPayQA2026!"`. There
+# is no env var override — the constant is the source of truth, and the
+# seed path only runs when SEED_ON_EMPTY=true AND APP_ENV ∈ {development,
+# test}, so it cannot leak into a production deploy.
 ```
 
 ### Auth Rate Limiting
@@ -234,9 +260,34 @@ Both tasks are monitored — if either fails, the process exits rather than sile
 
 ## Database
 
+### SurrealDB Connection (`SURREAL_URL`)
+
+By default the service uses SurrealDB with RocksDB storage, persisting to `./data.surreal/`. Setting `SURREAL_URL` overrides the connection target without code changes — the API can run against an embedded RocksDB or in-memory engine, or against a standalone SurrealDB instance over the network. See PR #43 for the full mechanism.
+
+| `SURREAL_URL` value | Mode | Engine | Creds required |
+|---------------------|------|--------|----------------|
+| *(unset)* | Embedded | RocksDB at `./data.surreal` | No |
+| `rocksdb://path/to/db` | Embedded | RocksDB | No |
+| `mem://` | Embedded | In-memory | No |
+| `ws://host:port`, `wss://host:port` | Remote | SurrealDB WebSocket | **Yes** (`SURREAL_USER` + `SURREAL_PASS`) |
+| `http://host:port`, `https://host:port` | Remote | SurrealDB HTTP | **Yes** (`SURREAL_USER` + `SURREAL_PASS`) |
+| Mixed-case (`WS://`, `HTTPS://`) | Remote | Same as lowercase (RFC 3986 §3.1) | **Yes** |
+
+Remote signin **fails closed** — `SURREAL_USER` and `SURREAL_PASS` are required, with no `root/root` defaults. Missing, empty (`SURREAL_USER=`), and whitespace-only values all short-circuit boot with a typed `InitError` *before* any outbound connection attempt. The `info!("SurrealDB connected")` line strips `user:pass@` from the URL via `redact_url_userinfo` so credentials never land in operator logs.
+
+To run a local SurrealDB server alongside the API (e.g. so a Surrealist GUI can attach):
+
+```bash
+# Start a standalone SurrealDB on 127.0.0.1:8000 against the existing RocksDB store
+surreal start --user root --pass root --bind 127.0.0.1:8000 rocksdb:./data.surreal
+
+# Point the API at it
+SURREAL_URL=ws://127.0.0.1:8000 SURREAL_USER=root SURREAL_PASS=root cargo run
+```
+
 ### SurrealDB (Embedded)
 
-The service uses SurrealDB with RocksDB storage, persisting to `./data.surreal/`.
+The default embedded engine uses RocksDB, persisting to `./data.surreal/`.
 
 **Initialization:**
 - On startup, creates namespace `circle` and database `main`
