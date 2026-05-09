@@ -1,6 +1,6 @@
 # Documentation Index
 
-Last Updated: 2026-04-14
+Last Updated: 2026-05-08
 
 Quick reference to all documentation for the PoolPay project.
 
@@ -15,6 +15,16 @@ Start here if you're setting up the development environment or contributing code
   - Code standards and best practices
   - Git workflow and commit conventions
   - Troubleshooting common build issues
+
+## For AI-Assisted Development
+
+Optional. Skip if you don't use AI agents.
+
+- **[ai-workflow.md](./ai-workflow.md)** — Setup for AI-assisted development
+  - Graphify (codebase knowledge graph) install + first run
+  - Supported agents (Claude Code, Cursor, Codex, Aider, etc.)
+  - Maintenance and useful slash commands
+  - Why graph artefacts are gitignored
 
 ## For Operations
 

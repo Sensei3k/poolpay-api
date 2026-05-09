@@ -2,6 +2,8 @@
 
 A Rust service that manages PoolPay savings groups with a REST API and WhatsApp receipt OCR. Built with Axum, SurrealDB, and Green API.
 
+> Docs index: [`docs/INDEX.md`](./docs/INDEX.md). For AI-assisted development setup see [`docs/ai-workflow.md`](./docs/ai-workflow.md) (optional).
+
 ## What it does
 
 **REST API** for managing multi-group PoolPay savings groups:
