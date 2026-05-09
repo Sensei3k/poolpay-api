@@ -275,7 +275,7 @@ If you've installed `just` (see [Optional: `just` task runner](#optional-just-ta
 | `SEED_ON_EMPTY` | No | `false` | Set to `true` to seed fixture data when all database tables are empty |
 | `RECEIPT_DOWNLOAD_DIR` | No | OS temp dir | Directory for temporary receipt files during OCR |
 | `RUST_LOG` | No | `info` | Log level filter: `debug`, `info`, `warn`, `error` |
-| `SURREAL_URL` | No | embedded RocksDB at `./data.surreal` | Embedded (`rocksdb://` / `mem://` / `surrealkv://`) or remote (`ws://` / `wss://` / `http://` / `https://`, case-insensitive) — see [RUNBOOK § Environment Configuration](./RUNBOOK.md#environment-configuration) |
+| `SURREAL_URL` | No | embedded RocksDB at `./data.surreal` | Embedded (`rocksdb://` / `mem://`) or remote (`ws://` / `wss://` / `http://` / `https://`, case-insensitive) — see [RUNBOOK § Environment Configuration](./RUNBOOK.md#environment-configuration) |
 | `SURREAL_USER` / `SURREAL_PASS` | Conditional | — | Required only when `SURREAL_URL` is a network scheme. Boot fails with a typed error if missing, empty, or whitespace-only |
 
 For auth rate-limiting, JWT key material, and proxy-header trust (`AUTH_*`, `JWT_*`, `TRUST_PROXY_HEADERS`), see [RUNBOOK § Auth Rate Limiting](./RUNBOOK.md#auth-rate-limiting) and [RUNBOOK § JWT Verification + Refresh Rotation](./RUNBOOK.md#jwt-verification--refresh-rotation). Production must set `JWT_KEYS`. Local development only falls back to an ephemeral keypair when `APP_ENV` is explicitly `development` or `test` — leaving `APP_ENV` unset (or any other value) fails closed and the service will not boot without `JWT_KEYS`.

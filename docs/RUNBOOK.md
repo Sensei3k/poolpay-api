@@ -127,7 +127,7 @@ JWT_REFRESH_TTL_SECS=1209600
 # embedded engine takes an exclusive file lock — a Surrealist GUI cannot
 # attach while `cargo run` is up.
 #
-# Embedded values: rocksdb://path | mem:// | surrealkv://path
+# Embedded values: rocksdb://path | mem://
 # Remote values:   ws://host:port | wss://host:port | http://host:port | https://host:port
 # Scheme matching is case-insensitive (RFC 3986 §3.1).
 # SURREAL_URL=ws://127.0.0.1:8000
@@ -269,7 +269,6 @@ By default the service uses SurrealDB with RocksDB storage, persisting to `./dat
 | *(unset)* | Embedded | RocksDB at `./data.surreal` | No |
 | `rocksdb://path/to/db` | Embedded | RocksDB | No |
 | `mem://` | Embedded | In-memory | No |
-| `surrealkv://path` | Embedded | SurrealKV | No |
 | `ws://host:port`, `wss://host:port` | Remote | SurrealDB WebSocket | **Yes** (`SURREAL_USER` + `SURREAL_PASS`) |
 | `http://host:port`, `https://host:port` | Remote | SurrealDB HTTP | **Yes** (`SURREAL_USER` + `SURREAL_PASS`) |
 | Mixed-case (`WS://`, `HTTPS://`) | Remote | Same as lowercase (RFC 3986 §3.1) | **Yes** |
