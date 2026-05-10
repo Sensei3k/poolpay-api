@@ -2,6 +2,7 @@ pub mod admin_users;
 pub mod auth_endpoints;
 pub mod handlers;
 pub mod models;
+pub mod pagination;
 
 use axum::{
     http::{header, Method},
@@ -10,6 +11,7 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 
+use crate::api::pagination::{HEADER_LIMIT, HEADER_OFFSET, HEADER_TOTAL_COUNT};
 use crate::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use crate::auth::rate_limit::{self, CredentialFailureLimiter, RateLimitConfig};
 use crate::db::DbConn;
@@ -166,10 +168,18 @@ fn build_cors() -> CorsLayer {
             .parse()
             .expect("DASHBOARD_ORIGIN is not a valid header value");
 
+        // Pagination headers must be in `expose_headers` or browsers
+        // will block `fetch()` from reading `X-Total-Count` / `X-Limit`
+        // / `X-Offset` even though the server sets them.
         CorsLayer::new()
             .allow_origin(parsed)
             .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+            .expose_headers([
+                HEADER_TOTAL_COUNT,
+                HEADER_LIMIT,
+                HEADER_OFFSET,
+            ])
     } else {
         CorsLayer::permissive()
     }

@@ -2240,3 +2240,153 @@ async fn delete_payment_unknown_cycle_denies_non_scoped_admin_opaquely() {
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
+
+// ── Pagination ────────────────────────────────────────────────────────────────
+//
+// Cover the limit/offset contract added in #16: defaults, hard cap,
+// validation errors, header trio, and the count-vs-page invariant when
+// filters and pagination combine. All five list endpoints share the same
+// parser (`api::pagination`), so per-handler coverage is intentionally
+// thin — the contract tests below pick the most informative endpoint
+// for each rule and rely on the shared parser unit tests in
+// `src/api/pagination.rs` for the rest.
+
+/// Read the `X-Total-Count` header as `u32`, panicking with a clear
+/// message if it's missing or unparseable. Centralised so each test
+/// reads the contract the same way.
+fn total_count_header(resp: &Response) -> u32 {
+    resp.headers()
+        .get("x-total-count")
+        .expect("X-Total-Count header missing")
+        .to_str()
+        .expect("X-Total-Count is not valid ASCII")
+        .parse::<u32>()
+        .expect("X-Total-Count is not a u32")
+}
+
+#[tokio::test]
+async fn pagination_default_limit_returns_all_payments_with_total_header() {
+    // Fixture has 49 payments; with the default limit of 50 the body
+    // returns all of them and X-Total-Count reports 49.
+    let resp = call(test_app().await, get("/api/payments")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(total_count_header(&resp), 49);
+    assert_eq!(resp.headers().get("x-limit").unwrap(), "50");
+    assert_eq!(resp.headers().get("x-offset").unwrap(), "0");
+    let payments: Vec<serde_json::Value> = json_body(resp).await;
+    assert_eq!(payments.len(), 49);
+}
+
+#[tokio::test]
+async fn pagination_explicit_limit_truncates_body_but_not_total_count() {
+    // ?limit=10 returns 10 rows in the body; the header still reports
+    // the total matching the endpoint's filters (for payments, the
+    // active/undeleted total) so the FE can render "showing 10 of 49".
+    let resp = call(test_app().await, get("/api/payments?limit=10")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(total_count_header(&resp), 49);
+    assert_eq!(resp.headers().get("x-limit").unwrap(), "10");
+    let payments: Vec<serde_json::Value> = json_body(resp).await;
+    assert_eq!(payments.len(), 10);
+}
+
+#[tokio::test]
+async fn pagination_offset_skips_rows_and_keeps_total_count_stable() {
+    // Take the first 10 rows, then take the next 10 by offsetting; the
+    // page two contents must not overlap with page one (id-disjoint).
+    let app = test_app().await;
+    let page1: Vec<serde_json::Value> =
+        json_body(call(app.clone(), get("/api/payments?limit=10")).await).await;
+    let resp = call(app, get("/api/payments?limit=10&offset=10")).await;
+    assert_eq!(total_count_header(&resp), 49);
+    assert_eq!(resp.headers().get("x-offset").unwrap(), "10");
+    let page2: Vec<serde_json::Value> = json_body(resp).await;
+    assert_eq!(page2.len(), 10);
+    let page1_ids: std::collections::HashSet<&str> =
+        page1.iter().map(|p| p["id"].as_str().unwrap()).collect();
+    for p in &page2 {
+        let id = p["id"].as_str().unwrap();
+        assert!(
+            !page1_ids.contains(id),
+            "offset page must not overlap with first page; saw {id} on both"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pagination_limit_over_max_returns_400() {
+    let resp = call(test_app().await, get("/api/payments?limit=300")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn pagination_limit_zero_returns_400() {
+    // A zero-row page is never useful — clamping silently would mask
+    // FE bugs. We reject and document the contract.
+    let resp = call(test_app().await, get("/api/payments?limit=0")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn pagination_non_numeric_limit_returns_400() {
+    let resp = call(test_app().await, get("/api/payments?limit=abc")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn pagination_negative_offset_returns_400() {
+    // The parser accepts only non-negative integers; a leading `-` is a
+    // signed digit that fails `u32::parse`.
+    let resp = call(test_app().await, get("/api/payments?offset=-1")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn pagination_filter_and_limit_combine_correctly_for_members() {
+    // Group 1 has 6 members; with limit=2 the body returns 2 rows but
+    // X-Total-Count still reports the filtered total (6).
+    let resp = call(test_app().await, get("/api/members?groupId=1&limit=2")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(total_count_header(&resp), 6);
+    let members: Vec<serde_json::Value> = json_body(resp).await;
+    assert_eq!(members.len(), 2);
+    for m in &members {
+        assert_eq!(m["groupId"], "1");
+    }
+}
+
+#[tokio::test]
+async fn pagination_filter_and_limit_combine_correctly_for_payments_by_cycle() {
+    // Cycle 1 has 6 fixture payments. limit=3 must return 3 rows; the
+    // header reports 6, not the table-wide 49.
+    let resp = call(test_app().await, get("/api/payments?cycleId=1&limit=3")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(total_count_header(&resp), 6);
+    let payments: Vec<serde_json::Value> = json_body(resp).await;
+    assert_eq!(payments.len(), 3);
+    for p in &payments {
+        assert_eq!(p["cycleId"], "1");
+    }
+}
+
+#[tokio::test]
+async fn pagination_excludes_soft_deleted_receipts_from_total_count() {
+    // The receipts fixture seeds two rows — one active, one
+    // soft-deleted. After filtering, the count + body should both
+    // surface only the active row.
+    let resp = call(test_app().await, get("/api/receipts?limit=200")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let total = total_count_header(&resp);
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    assert_eq!(
+        receipts.len() as u32,
+        total,
+        "header must equal body length when limit > total"
+    );
+    assert!(
+        receipts
+            .iter()
+            .all(|r| r.get("deletedAt").is_none() || r["deletedAt"].is_null()),
+        "soft-deleted rows must be excluded from the page"
+    );
+}

@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use serde::Deserialize;
@@ -15,20 +15,33 @@ use crate::api::models::{
     MemberContent, Payment, PaymentContent, Receipt, ReceiptContent, ReceiptStatus,
     UpdateCycleRequest, UpdateGroupRequest, UpdateMemberRequest, now_iso, record_id_to_string,
 };
+use crate::api::pagination::{
+    header_u32, Pagination, PaginationParams, HEADER_LIMIT, HEADER_OFFSET, HEADER_TOTAL_COUNT,
+};
 use crate::db::{DbConn, reseed};
 
 // ── Query params ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+pub struct GroupsQuery {
+    #[serde(flatten)]
+    pub pagination: PaginationParams,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct GroupIdQuery {
     #[serde(rename = "groupId")]
     pub group_id: Option<EntityId>,
+    #[serde(flatten)]
+    pub pagination: PaginationParams,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PaymentsQuery {
     #[serde(rename = "cycleId")]
     pub cycle_id: Option<EntityId>,
+    #[serde(flatten)]
+    pub pagination: PaginationParams,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,96 +49,223 @@ pub struct ReceiptsQuery {
     #[serde(rename = "groupId")]
     pub group_id: Option<EntityId>,
     pub status: Option<String>,
+    #[serde(flatten)]
+    pub pagination: PaginationParams,
+}
+
+/// Build the standard `X-Total-Count` / `X-Limit` / `X-Offset` header
+/// trio for a paginated list response. Centralised so every handler
+/// emits the exact same casing.
+fn pagination_headers(total: u32, page: Pagination) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(HEADER_TOTAL_COUNT, header_u32(total));
+    headers.insert(HEADER_LIMIT, header_u32(page.limit));
+    headers.insert(HEADER_OFFSET, header_u32(page.offset));
+    headers
+}
+
+/// Wrapper used by handlers that need to bind a `count()` aggregate's
+/// `count` column out of a SurrealDB response. Lives here (rather than
+/// in `models`) because it's a query-shape concern, not a domain type.
+#[derive(Debug, Deserialize, SurrealValue)]
+struct CountRow {
+    count: i64,
+}
+
+/// Pull the first `count()` aggregate out of a freshly-resolved query
+/// response. Returns 0 when the aggregate yielded no rows (which is
+/// what SurrealDB does for an empty `GROUP ALL`).
+fn take_count(resp: &mut surrealdb::IndexedResults, idx: usize) -> Result<u32, AppError> {
+    let rows: Vec<CountRow> = resp.take(idx)?;
+    let total = rows.first().map(|r| r.count).unwrap_or(0);
+    // Counts are non-negative by construction; clamp the impossible
+    // negative branch to zero rather than over-reporting via wrap.
+    Ok(u32::try_from(total.max(0)).unwrap_or(u32::MAX))
 }
 
 // ── Public GET handlers ──────────────────────────────────────────────────────
 
-pub async fn get_groups(State(db): State<DbConn>) -> Result<Json<Vec<Group>>, AppError> {
-    let rows: Vec<DbGroup> = db.select("group").await?;
-    let groups: Result<Vec<Group>, AppError> = rows
-        .into_iter()
-        .map(Group::try_from)
-        .collect();
-    let groups = groups?;
-    let filtered: Vec<Group> = groups.into_iter().filter(|g| g.deleted_at.is_none()).collect();
-    Ok(Json(filtered))
+pub async fn get_groups(
+    State(db): State<DbConn>,
+    Query(params): Query<GroupsQuery>,
+) -> Result<(HeaderMap, Json<Vec<Group>>), AppError> {
+    let page = Pagination::from_params(&params.pagination)?;
+
+    // One round-trip: count() + page query, indexed in declaration order.
+    // The page query uses an explicit ORDER BY so offset pagination is
+    // stable — without it the DB is free to reorder rows between calls,
+    // which would make `?offset=` produce duplicate/missing items.
+    let mut resp = db
+        .query(
+            "SELECT count() FROM group WHERE deleted_at IS NONE GROUP ALL; \
+             SELECT * FROM group WHERE deleted_at IS NONE \
+             ORDER BY created_at ASC, id ASC LIMIT $limit START $offset",
+        )
+        .bind(("limit", page.limit as i64))
+        .bind(("offset", page.offset as i64))
+        .await?;
+
+    let total = take_count(&mut resp, 0)?;
+    let rows: Vec<DbGroup> = resp.take(1)?;
+    let groups: Result<Vec<Group>, AppError> = rows.into_iter().map(Group::try_from).collect();
+    Ok((pagination_headers(total, page), Json(groups?)))
 }
 
 pub async fn get_members(
     State(db): State<DbConn>,
     Query(params): Query<GroupIdQuery>,
-) -> Result<Json<Vec<Member>>, AppError> {
-    let rows: Vec<DbMember> = db.select("member").await?;
+) -> Result<(HeaderMap, Json<Vec<Member>>), AppError> {
+    let page = Pagination::from_params(&params.pagination)?;
+
+    // The `WHERE` is shared between count and page so the X-Total-Count
+    // reflects the total *matching* rows, not the table-wide total.
+    let where_clause = match params.group_id {
+        Some(_) => "deleted_at IS NONE AND group_id = $gid",
+        None => "deleted_at IS NONE",
+    };
+    let sql = format!(
+        "SELECT count() FROM member WHERE {where_clause} GROUP ALL; \
+         SELECT * FROM member WHERE {where_clause} \
+         ORDER BY created_at ASC, id ASC LIMIT $limit START $offset"
+    );
+
+    let mut q = db
+        .query(sql)
+        .bind(("limit", page.limit as i64))
+        .bind(("offset", page.offset as i64));
+    if let Some(gid) = params.group_id {
+        q = q.bind(("gid", gid));
+    }
+    let mut resp = q.await?;
+    let total = take_count(&mut resp, 0)?;
+    let rows: Vec<DbMember> = resp.take(1)?;
     let members: Result<Vec<Member>, AppError> = rows.into_iter().map(Member::try_from).collect();
-    let members = members?;
-
-    let filtered: Vec<Member> = members
-        .into_iter()
-        .filter(|m| m.deleted_at.is_none())
-        .filter(|m| params.group_id.as_ref().is_none_or(|gid| m.group_id == *gid))
-        .collect();
-
-    Ok(Json(filtered))
+    Ok((pagination_headers(total, page), Json(members?)))
 }
 
 pub async fn get_cycles(
     State(db): State<DbConn>,
     Query(params): Query<GroupIdQuery>,
-) -> Result<Json<Vec<Cycle>>, AppError> {
-    let rows: Vec<DbCycle> = db.select("cycle").await?;
+) -> Result<(HeaderMap, Json<Vec<Cycle>>), AppError> {
+    let page = Pagination::from_params(&params.pagination)?;
+
+    // Cycles are hard-deleted (no `deleted_at`), so the only optional
+    // predicate is `group_id`. The two-statement `count() + select`
+    // shape mirrors the other handlers for uniformity.
+    let (count_sql, page_sql) = match params.group_id.as_ref() {
+        Some(_) => (
+            "SELECT count() FROM cycle WHERE group_id = $gid GROUP ALL".to_string(),
+            "SELECT * FROM cycle WHERE group_id = $gid \
+             ORDER BY created_at ASC, id ASC LIMIT $limit START $offset"
+                .to_string(),
+        ),
+        None => (
+            "SELECT count() FROM cycle GROUP ALL".to_string(),
+            "SELECT * FROM cycle ORDER BY created_at ASC, id ASC LIMIT $limit START $offset"
+                .to_string(),
+        ),
+    };
+    let sql = format!("{count_sql}; {page_sql}");
+
+    let mut q = db
+        .query(sql)
+        .bind(("limit", page.limit as i64))
+        .bind(("offset", page.offset as i64));
+    if let Some(gid) = params.group_id {
+        q = q.bind(("gid", gid));
+    }
+    let mut resp = q.await?;
+    let total = take_count(&mut resp, 0)?;
+    let rows: Vec<DbCycle> = resp.take(1)?;
     let cycles: Result<Vec<Cycle>, AppError> = rows.into_iter().map(Cycle::try_from).collect();
-    let cycles = cycles?;
-
-    let filtered: Vec<Cycle> = cycles
-        .into_iter()
-        .filter(|c| params.group_id.as_ref().is_none_or(|gid| c.group_id == *gid))
-        .collect();
-
-    Ok(Json(filtered))
+    Ok((pagination_headers(total, page), Json(cycles?)))
 }
 
 pub async fn get_payments(
     State(db): State<DbConn>,
     Query(params): Query<PaymentsQuery>,
-) -> Result<Json<Vec<Payment>>, AppError> {
-    let rows: Vec<DbPayment> = db.select("payment").await?;
+) -> Result<(HeaderMap, Json<Vec<Payment>>), AppError> {
+    let page = Pagination::from_params(&params.pagination)?;
+
+    let where_clause = match params.cycle_id {
+        Some(_) => "deleted_at IS NONE AND cycle_id = $cid",
+        None => "deleted_at IS NONE",
+    };
+    let sql = format!(
+        "SELECT count() FROM payment WHERE {where_clause} GROUP ALL; \
+         SELECT * FROM payment WHERE {where_clause} \
+         ORDER BY created_at ASC, id ASC LIMIT $limit START $offset"
+    );
+
+    let mut q = db
+        .query(sql)
+        .bind(("limit", page.limit as i64))
+        .bind(("offset", page.offset as i64));
+    if let Some(cid) = params.cycle_id {
+        q = q.bind(("cid", cid));
+    }
+    let mut resp = q.await?;
+    let total = take_count(&mut resp, 0)?;
+    let rows: Vec<DbPayment> = resp.take(1)?;
     let payments: Result<Vec<Payment>, AppError> =
         rows.into_iter().map(Payment::try_from).collect();
-    let payments = payments?;
-
-    let filtered: Vec<Payment> = payments
-        .into_iter()
-        .filter(|p| p.deleted_at.is_none())
-        .filter(|p| params.cycle_id.as_ref().is_none_or(|cid| p.cycle_id == *cid))
-        .collect();
-
-    Ok(Json(filtered))
+    Ok((pagination_headers(total, page), Json(payments?)))
 }
 
 pub async fn get_receipts(
     State(db): State<DbConn>,
     Query(params): Query<ReceiptsQuery>,
-) -> Result<Json<Vec<Receipt>>, AppError> {
-    // Validate status filter up-front so an unknown value returns 400 rather
-    // than silently producing an empty list.
+) -> Result<(HeaderMap, Json<Vec<Receipt>>), AppError> {
+    // Validate status filter up-front so an unknown value returns 400
+    // rather than silently producing an empty list.
     let status_filter: Option<ReceiptStatus> = match params.status.as_deref() {
         None => None,
         Some(s) => Some(s.parse::<ReceiptStatus>().map_err(AppError::BadRequest)?),
     };
 
-    let rows: Vec<DbReceipt> = db.select("receipt").await?;
+    let page = Pagination::from_params(&params.pagination)?;
+
+    // Build the WHERE clause dynamically based on which optional
+    // filters are present. The base predicate (`deleted_at IS NONE`) is
+    // always applied; `group_id` and `status` join with AND when
+    // supplied. The same WHERE drives both the count and the page so
+    // X-Total-Count reflects the filtered total.
+    let mut where_clause = String::from("deleted_at IS NONE");
+    if params.group_id.is_some() {
+        where_clause.push_str(" AND group_id = $gid");
+    }
+    if status_filter.is_some() {
+        where_clause.push_str(" AND status = $status");
+    }
+    let sql = format!(
+        "SELECT count() FROM receipt WHERE {where_clause} GROUP ALL; \
+         SELECT * FROM receipt WHERE {where_clause} \
+         ORDER BY received_at ASC, id ASC LIMIT $limit START $offset"
+    );
+
+    let mut q = db
+        .query(sql)
+        .bind(("limit", page.limit as i64))
+        .bind(("offset", page.offset as i64));
+    if let Some(gid) = params.group_id {
+        q = q.bind(("gid", gid));
+    }
+    if let Some(s) = status_filter {
+        // Persist the canonical lowercase form so the WHERE matches the
+        // stored value (`status: "pending" | "confirmed" | "rejected"`).
+        let stored = match s {
+            ReceiptStatus::Pending => "pending",
+            ReceiptStatus::Confirmed => "confirmed",
+            ReceiptStatus::Rejected => "rejected",
+        };
+        q = q.bind(("status", stored.to_string()));
+    }
+    let mut resp = q.await?;
+    let total = take_count(&mut resp, 0)?;
+    let rows: Vec<DbReceipt> = resp.take(1)?;
     let receipts: Result<Vec<Receipt>, AppError> =
         rows.into_iter().map(Receipt::try_from).collect();
-    let receipts = receipts?;
-
-    let filtered: Vec<Receipt> = receipts
-        .into_iter()
-        .filter(|r| r.deleted_at.is_none())
-        .filter(|r| params.group_id.as_ref().is_none_or(|gid| r.group_id == *gid))
-        .filter(|r| status_filter.as_ref().is_none_or(|s| r.status == *s))
-        .collect();
-
-    Ok(Json(filtered))
+    Ok((pagination_headers(total, page), Json(receipts?)))
 }
 
 // ── Admin Group handlers ─────────────────────────────────────────────────────
