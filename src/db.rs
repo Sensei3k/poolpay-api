@@ -186,14 +186,13 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 /// Slice 5 additions to the receipt table.
 ///
 /// Two new optional fields:
-///   - `raw_image_url`     — direct URL to the WhatsApp screenshot, captured
-///                           by the bot and persisted so admins can review
-///                           the original artefact during confirm/reject.
-///   - `rejection_reason`  — short human note recorded when an admin rejects
-///                           or flags a receipt. Must NOT contain PII
-///                           (sender phone, OCR text, member name) — that
-///                           is a handler-side invariant; the schema is
-///                           open-ended so legacy rows stay readable.
+///   - `raw_image_url`: direct URL to the WhatsApp screenshot, captured by
+///     the bot and persisted so admins can review the original artefact
+///     during confirm/reject.
+///   - `rejection_reason`: short human note recorded when an admin rejects
+///     or flags a receipt. Must NOT contain PII (sender phone, OCR text,
+///     member name). That is a handler-side invariant; the schema stays
+///     open-ended so legacy rows remain readable.
 ///
 /// Two new indexes:
 ///   - `receipt_sender_received` over `(sender_phone, received_at)` powers

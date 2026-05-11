@@ -3,6 +3,7 @@ pub mod auth_endpoints;
 pub mod handlers;
 pub mod models;
 pub mod pagination;
+pub mod webhooks;
 
 use axum::{
     http::{header, Method},
@@ -100,9 +101,15 @@ pub fn router_with_config(
         .route("/api/admin/groups/{gid}/cycles", post(create_cycle))
         .route("/api/admin/cycles/{id}", patch(update_cycle))
         .route("/api/admin/cycles/{id}", delete(delete_cycle))
-        // Admin Receipt endpoints
+        // Admin Receipt endpoints. The legacy confirm/reject POST routes
+        // stay live alongside the new unified PATCH /api/receipts/{id}
+        // landing in the next commit so the FE can migrate without a
+        // synchronised cut; slice 6 drops them after callers move.
         .route("/api/admin/receipts/{id}/confirm", post(confirm_receipt))
         .route("/api/admin/receipts/{id}/reject", post(reject_receipt))
+        // Slice 5 inbound webhook for the WhatsApp bot. Bound to
+        // `WA_WEBHOOK_SECRET`, fail-closed when unset.
+        .route("/api/webhooks/whatsapp", post(webhooks::whatsapp_webhook))
         // Admin WhatsApp link endpoints
         .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
         .route("/api/admin/whatsapp-links", post(create_whatsapp_link))
