@@ -257,6 +257,7 @@ pub async fn get_receipts(
             ReceiptStatus::Pending => "pending",
             ReceiptStatus::Confirmed => "confirmed",
             ReceiptStatus::Rejected => "rejected",
+            ReceiptStatus::Flagged => "flagged",
         };
         q = q.bind(("status", stored.to_string()));
     }
@@ -864,12 +865,21 @@ async fn load_active_receipt_opt(db: &DbConn, id: &str) -> Result<Option<DbRecei
     Ok(row.filter(|r| r.deleted_at.is_none()))
 }
 
+/// Optional new fields to set on the receipt row when transitioning state.
+/// Used by the slice 5 PATCH endpoint to attach a `rejection_reason`
+/// without disturbing any other column.
+#[derive(Default)]
+struct ReceiptPatchFields {
+    rejection_reason: Option<String>,
+}
+
 fn receipt_content_from(
     row: &DbReceipt,
     status: &str,
     updated_at: String,
     confirmed_by: Option<String>,
     rejected_by: Option<String>,
+    patch: ReceiptPatchFields,
 ) -> ReceiptContent {
     ReceiptContent {
         whatsapp_message_id: row.whatsapp_message_id.clone(),
@@ -885,6 +895,9 @@ fn receipt_content_from(
         ocr_text: row.ocr_text.clone(),
         sender_label: row.sender_label.clone(),
         bank_label: row.bank_label.clone(),
+        raw_image_url: row.raw_image_url.clone(),
+        // `None` on the patch means "keep prior value"; a `Some` overrides it.
+        rejection_reason: patch.rejection_reason.or_else(|| row.rejection_reason.clone()),
         received_at: row.received_at.clone(),
         created_at: row.created_at.clone(),
         updated_at,
@@ -1003,6 +1016,7 @@ pub async fn confirm_receipt(
         now,
         Some(actor_id),
         receipt.rejected_by.clone(),
+        ReceiptPatchFields::default(),
     );
     let updated: Option<DbReceipt> = db.upsert(("receipt", id.as_str())).content(content).await?;
     let updated = updated.ok_or_else(|| AppError::Internal("receipt update failed".into()))?;
@@ -1038,6 +1052,7 @@ pub async fn reject_receipt(
         now_iso(),
         receipt.confirmed_by.clone(),
         Some(auth.0.user_id.clone()),
+        ReceiptPatchFields::default(),
     );
     let updated: Option<DbReceipt> = db.upsert(("receipt", id.as_str())).content(content).await?;
     let updated = updated.ok_or_else(|| AppError::Internal("receipt update failed".into()))?;
