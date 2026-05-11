@@ -121,9 +121,18 @@ pub async fn whatsapp_webhook(
     // poisoning the queue with rows the admin can neither act on nor purge.
     // Validate at the boundary and collapse the failure to 401, consistent
     // with the opaque-failure rule above.
-    if chrono::DateTime::parse_from_rfc3339(&payload.received_at).is_err() {
-        return Err(AppError::Unauthorized);
-    }
+    //
+    // We also normalise the timestamp to a canonical UTC RFC3339 string before
+    // persisting. The DB stores `received_at` as a string and `/api/receipts`
+    // orders by it (`ORDER BY received_at ASC`), so a mix of offsets like
+    // `…+01:00` and `…+00:00` would sort lexicographically — breaking
+    // absolute-time ordering of the admin queue. Converting to UTC makes the
+    // lexicographic sort equivalent to a chronological sort.
+    let parsed_received_at =
+        chrono::DateTime::parse_from_rfc3339(&payload.received_at)
+            .map_err(|_| AppError::Unauthorized)?
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     let parsed = ParsedReceipt {
         sender: payload.parsed.sender,
@@ -137,7 +146,7 @@ pub async fn whatsapp_webhook(
         message_id: &payload.message_id,
         ocr_text: &payload.ocr_text,
         parsed: &parsed,
-        received_at: payload.received_at,
+        received_at: parsed_received_at,
         raw_image_url: payload.raw_image_url,
     };
 
