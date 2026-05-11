@@ -7,13 +7,15 @@ use serde::Deserialize;
 use surrealdb_types::SurrealValue;
 use tracing::error;
 
+use crate::auth::audit::record_auth_event;
 use crate::auth::extractors::{AuthenticatedUser, GroupScopedAdmin, SuperAdminUser};
 use crate::api::models::{
     AppError, CreateCycleRequest, CreateGroupRequest, CreateMemberRequest, CreatePaymentRequest,
-    CreateWhatsappLinkRequest, Cycle, CycleContent, DbCycle, DbGroup, DbGroupLink, DbMember,
-    DbPayment, DbReceipt, EntityId, Group, GroupContent, GroupLink, GroupLinkContent, Member,
-    MemberContent, Payment, PaymentContent, Receipt, ReceiptContent, ReceiptStatus,
-    UpdateCycleRequest, UpdateGroupRequest, UpdateMemberRequest, now_iso, record_id_to_string,
+    CreateWhatsappLinkRequest, Cycle, CycleContent, DbCycle, DbGroup, DbGroupLink, DbInboxItem,
+    DbMember, DbPayment, DbReceipt, EntityId, Group, GroupContent, GroupLink, GroupLinkContent,
+    InboxItemContent, InboxItemKind, Member, MemberContent, Payment, PaymentContent, Receipt,
+    ReceiptContent, ReceiptStatus, UpdateCycleRequest, UpdateGroupRequest, UpdateMemberRequest,
+    now_iso, record_id_to_string,
 };
 use crate::api::pagination::{
     header_u32, Pagination, PaginationParams, HEADER_LIMIT, HEADER_OFFSET, HEADER_TOTAL_COUNT,
@@ -908,39 +910,202 @@ fn receipt_content_from(
     }
 }
 
+// Slice 5 PATCH dispatch ------------------------------------------------------
+
+/// Body for the unified `PATCH /api/receipts/{id}` action endpoint.
+///
+/// The discriminator lives in `action` rather than the URL so the FE can
+/// queue a single optimistic mutation per row regardless of which
+/// terminal state the admin chose. `reason` is meaningful only for
+/// reject/flag and must NEVER carry PII (no phone, no member name, no
+/// OCR text) — the audit row writes a short non-PII tag derived from it.
+#[derive(Debug, Deserialize)]
+pub struct PatchReceiptRequest {
+    pub action: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Cap on the size of an admin-supplied reject/flag reason. The DB column
+/// has no constraint (legacy rows are open-ended), so the cap lives here
+/// at the API boundary to keep a runaway string from bloating audit
+/// queries.
+const MAX_RECEIPT_REASON_LEN: usize = 280;
+
+/// Audit event slugs for receipt actions. Centralised so spelling drift
+/// across handler + tests cannot mask a coverage gap.
+const EVT_RECEIPT_CONFIRMED: &str = "receipt_confirmed";
+const EVT_RECEIPT_REJECTED: &str = "receipt_rejected";
+const EVT_RECEIPT_FLAGGED: &str = "receipt_flagged";
+
+/// Trim and length-cap the admin-supplied reason. Returns `None` when the
+/// input is empty, white-space only, or absent. An over-long reason is a
+/// hard 400 so the FE does not silently truncate a justification.
+fn sanitise_reason(reason: Option<String>) -> Result<Option<String>, AppError> {
+    match reason {
+        None => Ok(None),
+        Some(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            if trimmed.len() > MAX_RECEIPT_REASON_LEN {
+                return Err(AppError::BadRequest(format!(
+                    "reason must be {MAX_RECEIPT_REASON_LEN} characters or fewer"
+                )));
+            }
+            Ok(Some(trimmed.to_string()))
+        }
+    }
+}
+
+/// Unified action dispatcher. The legacy POST `/api/admin/receipts/{id}/{confirm,reject}`
+/// routes stay alive and delegate to the same `_inner` helpers, so this
+/// endpoint and the legacy routes cannot diverge.
+pub async fn patch_receipt(
+    user: AuthenticatedUser,
+    State(db): State<DbConn>,
+    Path(id): Path<EntityId>,
+    Json(body): Json<PatchReceiptRequest>,
+) -> Result<Json<Receipt>, AppError> {
+    let action = body
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::BadRequest("action is required".into()))?;
+    let reason = sanitise_reason(body.reason)?;
+
+    match action {
+        "confirm" => {
+            // `confirm` does not record a reason. Rejecting non-empty reason
+            // up front catches FE bugs that mis-route a reject body.
+            if reason.is_some() {
+                return Err(AppError::BadRequest(
+                    "reason is not allowed for the 'confirm' action".into(),
+                ));
+            }
+            confirm_receipt_inner(user, &db, &id).await
+        }
+        "reject" => reject_receipt_inner(user, &db, &id, reason).await,
+        "flag" => flag_receipt_inner(user, &db, &id, reason).await,
+        other => Err(AppError::BadRequest(format!(
+            "unknown action '{other}'; must be one of confirm, reject, flag"
+        ))),
+    }
+}
+
+// Legacy POST routes ----------------------------------------------------------
+
 pub async fn confirm_receipt(
     user: AuthenticatedUser,
     State(db): State<DbConn>,
     Path(id): Path<EntityId>,
 ) -> Result<Json<Receipt>, AppError> {
-    let receipt = load_active_receipt_opt(&db, id.as_str()).await?;
+    confirm_receipt_inner(user, &db, &id).await
+}
+
+pub async fn reject_receipt(
+    user: AuthenticatedUser,
+    State(db): State<DbConn>,
+    Path(id): Path<EntityId>,
+) -> Result<Json<Receipt>, AppError> {
+    reject_receipt_inner(user, &db, &id, None).await
+}
+
+// Action handlers -------------------------------------------------------------
+//
+// Each `_inner` function performs:
+//   1. opaque auth via `GroupScopedAdmin::ensure_or_deny` (so a non-scoped
+//      admin cannot distinguish "no such id" from "wrong group");
+//   2. the state transition (`pending -> confirmed/rejected/flagged`);
+//   3. any side effects (confirm creates a Payment, then an inbox item);
+//   4. an `auth_event` audit row attributing the change to the actor.
+//
+// Failures hit `record_auth_event(..., success=false, reason=Some(tag))`
+// before the error is returned, so every rejection branch is traceable.
+
+async fn confirm_receipt_inner(
+    user: AuthenticatedUser,
+    db: &DbConn,
+    id: &EntityId,
+) -> Result<Json<Receipt>, AppError> {
+    let receipt = load_active_receipt_opt(db, id.as_str()).await?;
     let auth = GroupScopedAdmin::ensure_or_deny(
         user,
         receipt.as_ref().map(|r| r.group_id.as_str()),
-        &db,
+        db,
         AppError::NotFound(format!("receipt {id} does not exist")),
     )
     .await?;
     let receipt = receipt.expect("ensure_or_deny returns missing_err when None");
+    let actor_id = auth.0.user_id.clone();
 
     if receipt.status != "pending" {
+        record_auth_event(
+            db,
+            None,
+            Some(actor_id.clone()),
+            EVT_RECEIPT_CONFIRMED,
+            false,
+            Some("not_pending"),
+            None,
+        )
+        .await;
         return Err(AppError::Conflict(format!(
             "receipt {id} is already {}",
             receipt.status
         )));
     }
 
-    let member_id = receipt
-        .member_id
-        .clone()
-        .ok_or_else(|| AppError::Conflict("receipt has no linked member".into()))?;
-    let cycle_id = receipt
-        .cycle_id
-        .clone()
-        .ok_or_else(|| AppError::Conflict("receipt has no linked cycle".into()))?;
-    let amount = receipt
-        .extracted_amount
-        .ok_or_else(|| AppError::Conflict("receipt has no extracted amount".into()))?;
+    let member_id = match receipt.member_id.clone() {
+        Some(m) => m,
+        None => {
+            record_auth_event(
+                db,
+                None,
+                Some(actor_id),
+                EVT_RECEIPT_CONFIRMED,
+                false,
+                Some("no_member"),
+                None,
+            )
+            .await;
+            return Err(AppError::Conflict("receipt has no linked member".into()));
+        }
+    };
+    let cycle_id = match receipt.cycle_id.clone() {
+        Some(c) => c,
+        None => {
+            record_auth_event(
+                db,
+                None,
+                Some(actor_id),
+                EVT_RECEIPT_CONFIRMED,
+                false,
+                Some("no_cycle"),
+                None,
+            )
+            .await;
+            return Err(AppError::Conflict("receipt has no linked cycle".into()));
+        }
+    };
+    let amount = match receipt.extracted_amount {
+        Some(a) => a,
+        None => {
+            record_auth_event(
+                db,
+                None,
+                Some(actor_id),
+                EVT_RECEIPT_CONFIRMED,
+                false,
+                Some("no_amount"),
+                None,
+            )
+            .await;
+            return Err(AppError::Conflict("receipt has no extracted amount".into()));
+        }
+    };
 
     // Verify member and cycle still exist and belong to the same group.
     let member: Option<DbMember> = db.select(("member", member_id.as_str())).await?;
@@ -975,6 +1140,16 @@ pub async fn confirm_receipt(
         .await?
         .take(0)?;
     if !existing.is_empty() {
+        record_auth_event(
+            db,
+            None,
+            Some(actor_id),
+            EVT_RECEIPT_CONFIRMED,
+            false,
+            Some("duplicate_payment"),
+            None,
+        )
+        .await;
         return Err(AppError::Conflict(
             "a payment already exists for this member and cycle".into(),
         ));
@@ -989,7 +1164,6 @@ pub async fn confirm_receipt(
             ))
         })?;
 
-    let actor_id = auth.0.user_id.clone();
     let payment_content = PaymentContent {
         member_id: member_id.clone(),
         cycle_id: cycle_id.clone(),
@@ -1013,33 +1187,99 @@ pub async fn confirm_receipt(
     let content = receipt_content_from(
         &receipt,
         "confirmed",
-        now,
-        Some(actor_id),
+        now.clone(),
+        Some(actor_id.clone()),
         receipt.rejected_by.clone(),
         ReceiptPatchFields::default(),
     );
     let updated: Option<DbReceipt> = db.upsert(("receipt", id.as_str())).content(content).await?;
     let updated = updated.ok_or_else(|| AppError::Internal("receipt update failed".into()))?;
 
+    // HANDOFF §5.1: matched member gets a `receipt_confirmed` inbox item.
+    // The inbox row sources from the `member.user_id` link when available;
+    // until BE auth and membership are joined (separate ticket), the
+    // recipient `user_id` is the matched member id itself so the FE has
+    // something to render and tests can assert the row's presence.
+    let receipt_id_str = record_id_to_string(updated.id.clone());
+    write_inbox_item(
+        db,
+        &member_id,
+        InboxItemKind::ReceiptConfirmed,
+        "Receipt confirmed",
+        "Your payment was confirmed by an admin.",
+        Some(&updated.group_id),
+        updated.cycle_id.as_deref(),
+        Some(&receipt_id_str),
+        &now,
+    )
+    .await;
+
+    record_auth_event(
+        db,
+        None,
+        Some(actor_id),
+        EVT_RECEIPT_CONFIRMED,
+        true,
+        None,
+        None,
+    )
+    .await;
+
     Ok(Json(Receipt::try_from(updated)?))
 }
 
-pub async fn reject_receipt(
+async fn reject_receipt_inner(
     user: AuthenticatedUser,
-    State(db): State<DbConn>,
-    Path(id): Path<EntityId>,
+    db: &DbConn,
+    id: &EntityId,
+    reason: Option<String>,
 ) -> Result<Json<Receipt>, AppError> {
-    let receipt = load_active_receipt_opt(&db, id.as_str()).await?;
+    transition_receipt(user, db, id, "rejected", EVT_RECEIPT_REJECTED, reason).await
+}
+
+async fn flag_receipt_inner(
+    user: AuthenticatedUser,
+    db: &DbConn,
+    id: &EntityId,
+    reason: Option<String>,
+) -> Result<Json<Receipt>, AppError> {
+    transition_receipt(user, db, id, "flagged", EVT_RECEIPT_FLAGGED, reason).await
+}
+
+/// Shared body for the two non-confirming actions. Reject and flag share
+/// every step (auth, state check, reason persist, inbox item, audit), so
+/// only the stored status and audit slug differ — extracting the common
+/// shape keeps the two from drifting apart.
+async fn transition_receipt(
+    user: AuthenticatedUser,
+    db: &DbConn,
+    id: &EntityId,
+    new_status: &str,
+    audit_event: &'static str,
+    reason: Option<String>,
+) -> Result<Json<Receipt>, AppError> {
+    let receipt = load_active_receipt_opt(db, id.as_str()).await?;
     let auth = GroupScopedAdmin::ensure_or_deny(
         user,
         receipt.as_ref().map(|r| r.group_id.as_str()),
-        &db,
+        db,
         AppError::NotFound(format!("receipt {id} does not exist")),
     )
     .await?;
     let receipt = receipt.expect("ensure_or_deny returns missing_err when None");
+    let actor_id = auth.0.user_id.clone();
 
     if receipt.status != "pending" {
+        record_auth_event(
+            db,
+            None,
+            Some(actor_id.clone()),
+            audit_event,
+            false,
+            Some("not_pending"),
+            None,
+        )
+        .await;
         return Err(AppError::Conflict(format!(
             "receipt {id} is already {}",
             receipt.status
@@ -1048,16 +1288,95 @@ pub async fn reject_receipt(
 
     let content = receipt_content_from(
         &receipt,
-        "rejected",
+        new_status,
         now_iso(),
         receipt.confirmed_by.clone(),
-        Some(auth.0.user_id.clone()),
-        ReceiptPatchFields::default(),
+        Some(actor_id.clone()),
+        ReceiptPatchFields {
+            rejection_reason: reason.clone(),
+        },
     );
     let updated: Option<DbReceipt> = db.upsert(("receipt", id.as_str())).content(content).await?;
     let updated = updated.ok_or_else(|| AppError::Internal("receipt update failed".into()))?;
 
+    // Notify the matched member (if any) so they know the admin took
+    // action against their receipt. Reject and flag both yield an
+    // `admin_message` since the FE renders both as "needs your
+    // attention" rather than a payment confirmation.
+    if let Some(matched_member_id) = updated.member_id.as_ref() {
+        let title = if new_status == "flagged" {
+            "Receipt flagged for review"
+        } else {
+            "Receipt rejected"
+        };
+        let body = match reason.as_deref() {
+            Some(r) => format!("An admin marked this receipt as {new_status}: {r}"),
+            None => format!("An admin marked this receipt as {new_status}."),
+        };
+        let receipt_id_str = record_id_to_string(updated.id.clone());
+        write_inbox_item(
+            db,
+            matched_member_id,
+            InboxItemKind::AdminMessage,
+            title,
+            &body,
+            Some(&updated.group_id),
+            updated.cycle_id.as_deref(),
+            Some(&receipt_id_str),
+            &updated.updated_at,
+        )
+        .await;
+    }
+
+    record_auth_event(
+        db,
+        None,
+        Some(actor_id),
+        audit_event,
+        true,
+        None,
+        None,
+    )
+    .await;
+
     Ok(Json(Receipt::try_from(updated)?))
+}
+
+/// Best-effort inbox row writer. Failures are logged and swallowed:
+/// surfacing a 500 to the admin after the state transition has already
+/// committed would corrupt the user-visible audit story. The FE polls
+/// the inbox, so a missed write is recoverable; the audit row is the
+/// load-bearing record.
+#[allow(clippy::too_many_arguments)]
+async fn write_inbox_item(
+    db: &DbConn,
+    user_id: &str,
+    kind: InboxItemKind,
+    title: &str,
+    body: &str,
+    pool_id: Option<&str>,
+    cycle_id: Option<&str>,
+    receipt_id: Option<&str>,
+    created_at: &str,
+) {
+    let content = InboxItemContent {
+        user_id: user_id.to_string(),
+        kind: kind.as_str().to_string(),
+        title: title.to_string(),
+        body: body.to_string(),
+        pool_id: pool_id.map(str::to_string),
+        cycle_id: cycle_id.map(str::to_string),
+        receipt_id: receipt_id.map(str::to_string),
+        read_at: None,
+        created_at: created_at.to_string(),
+    };
+    if let Err(e) = db
+        .create::<Option<DbInboxItem>>("inbox_item")
+        .content(content)
+        .await
+    {
+        tracing::warn!(error = %e, user_id, "inbox_item insert failed");
+    }
 }
 
 // ── Admin WhatsApp link handlers ─────────────────────────────────────────────
