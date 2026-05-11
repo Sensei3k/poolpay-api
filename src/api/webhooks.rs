@@ -115,6 +115,16 @@ pub async fn whatsapp_webhook(
         return Err(AppError::Unauthorized);
     }
 
+    // `received_at` is parsed downstream during confirm (`confirm_receipt_inner`
+    // derives `payment_date` via `DateTime::parse_from_rfc3339`). A non-RFC3339
+    // value would ingest as `pending` then become impossible to confirm (409),
+    // poisoning the queue with rows the admin can neither act on nor purge.
+    // Validate at the boundary and collapse the failure to 401, consistent
+    // with the opaque-failure rule above.
+    if chrono::DateTime::parse_from_rfc3339(&payload.received_at).is_err() {
+        return Err(AppError::Unauthorized);
+    }
+
     let parsed = ParsedReceipt {
         sender: payload.parsed.sender,
         bank: payload.parsed.bank,
