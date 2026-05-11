@@ -1022,8 +1022,13 @@ pub async fn reject_receipt(
 //   3. any side effects (confirm creates a Payment, then an inbox item);
 //   4. an `auth_event` audit row attributing the change to the actor.
 //
-// Failures hit `record_auth_event(..., success=false, reason=Some(tag))`
-// before the error is returned, so every rejection branch is traceable.
+// Explicit post-auth validation branches (wrong status, missing member,
+// missing cycle, duplicate payment) emit
+// `record_auth_event(..., success=false, reason=Some(tag))` before
+// returning, so those rejection branches are traceable. Pre-auth
+// failures from `GroupScopedAdmin::ensure_or_deny` and any
+// `?`-propagated DB errors return without an audit row — the auth
+// extractor and DB layers own their own observability.
 
 async fn confirm_receipt_inner(
     user: AuthenticatedUser,
