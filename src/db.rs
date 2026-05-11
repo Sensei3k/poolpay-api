@@ -199,8 +199,11 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 ///     the "show every receipt this phone has ever sent" admin-side history
 ///     lookups landing in the FE slice 5 modal.
 ///   - `receipt_status_received` over `(status, received_at)` powers the
-///     admin queue's "pending, newest first" default sort without a table
-///     scan as receipt volume grows.
+///     admin queue's "filtered by status, oldest first" default sort (FIFO
+///     so the backlog drains in arrival order) without a table scan as
+///     receipt volume grows. `GET /api/receipts` issues
+///     `ORDER BY received_at ASC, id ASC` — keep the index and the handler
+///     in lock-step if the contract ever flips to newest-first.
 ///
 /// The receipt table itself stays SCHEMALESS so existing fixtures and
 /// in-flight writes are unaffected — new fields land as plain optional
