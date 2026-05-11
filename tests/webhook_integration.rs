@@ -328,6 +328,11 @@ async fn webhook_persists_receipt_row_visible_to_admin_list() {
     // End-to-end persistence check: a successful webhook ingest must show
     // up in `GET /api/receipts`. Confirms the receipt row materialises
     // through the same listing the FE admin queue consumes.
+    //
+    // `GET /api/receipts` is a public read endpoint, so it deliberately
+    // strips bot-supplied (`rawImageUrl`) and admin-supplied
+    // (`rejectionReason`) fields — we assert the row appears and carries
+    // the public identifiers, and that the sensitive fields are absent.
     let app = webhook_app().await;
     let body = payload_matching_member("WAMSG-PERSIST");
 
@@ -355,5 +360,12 @@ async fn webhook_persists_receipt_row_visible_to_admin_list() {
         .find(|r| r["id"] == receipt_id)
         .expect("ingested receipt must appear in /api/receipts");
     assert_eq!(row["whatsappMessageId"], "WAMSG-PERSIST");
-    assert_eq!(row["rawImageUrl"], "https://example.com/receipt.jpg");
+    assert!(
+        row.get("rawImageUrl").is_none(),
+        "public /api/receipts must not expose bot-supplied rawImageUrl"
+    );
+    assert!(
+        row.get("rejectionReason").is_none(),
+        "public /api/receipts must not expose admin-supplied rejectionReason"
+    );
 }

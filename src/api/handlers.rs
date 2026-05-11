@@ -266,8 +266,22 @@ pub async fn get_receipts(
     let mut resp = q.await?;
     let total = take_count(&mut resp, 0)?;
     let rows: Vec<DbReceipt> = resp.take(1)?;
-    let receipts: Result<Vec<Receipt>, AppError> =
-        rows.into_iter().map(Receipt::try_from).collect();
+    // `GET /api/receipts` is a public read endpoint — strip fields the bot
+    // or admins populate that we do not want unauthenticated callers to see.
+    // `raw_image_url` is a bot-supplied URL pointing at the source screenshot
+    // and `rejection_reason` is an admin-supplied note; both stay populated
+    // on the auth-gated PATCH/admin paths.
+    let receipts: Result<Vec<Receipt>, AppError> = rows
+        .into_iter()
+        .map(Receipt::try_from)
+        .map(|r| {
+            r.map(|mut receipt| {
+                receipt.raw_image_url = None;
+                receipt.rejection_reason = None;
+                receipt
+            })
+        })
+        .collect();
     Ok((pagination_headers(total, page), Json(receipts?)))
 }
 
