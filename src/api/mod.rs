@@ -36,7 +36,7 @@ pub fn router(db: DbConn) -> Router {
 }
 
 /// Process-cached verifier used by `router()`. Exposed so the BE-4
-/// `mint_admin_jwt()` test helper can sign tokens with the same key the
+/// `mint_user_jwt()` test helper can sign tokens with the same key the
 /// running app uses to verify them — without it, tests would build a
 /// fresh ephemeral keypair and the token's signature would be rejected.
 pub fn shared_verifier() -> SharedVerifier {

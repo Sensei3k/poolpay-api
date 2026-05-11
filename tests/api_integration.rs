@@ -181,20 +181,22 @@ fn post_json(uri: &str, body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
-/// Mint an admin access token signed by the same verifier the app uses.
-/// Caller passes both `sub` (must match a seeded `user` row) and `role`
-/// (`super_admin` or `admin`) so a single test can sign tokens for
-/// distinct user fixtures — needed for the `SuperAdminUser` 403 case,
-/// which has to present a JWT for a real `admin`-role user.
+/// Mint an access token for the given role, signed by the same verifier
+/// the app uses. Caller passes both `sub` (must match a seeded `user`
+/// row) and `role` (`super_admin`, `admin`, or `member`) so a single
+/// test can sign tokens for distinct user fixtures — needed for cases
+/// like the `SuperAdminUser` 403, which has to present a JWT for a real
+/// `admin`-role user, and for member-only assertions that confirm
+/// admin-gated fields are stripped from non-admin callers.
 ///
-/// `SuperAdminUser` re-reads the role from the DB row (not the JWT
-/// claim), so the role argument here only populates the claim for
-/// signing; it is not currently used for authorisation or consistency
-/// checks against the DB user.
-fn mint_admin_jwt(sub: &str, role: &str) -> String {
+/// Role-agnostic by design: the `SuperAdminUser` extractor re-reads the
+/// role from the DB row (not the JWT claim), so the role argument here
+/// only populates the claim for signing; it is not currently used for
+/// authorisation or consistency checks against the DB user.
+fn mint_user_jwt(sub: &str, role: &str) -> String {
     assert!(
         matches!(role, "super_admin" | "admin" | "member"),
-        "mint_admin_jwt only mints known user roles; got {role}"
+        "mint_user_jwt only mints known user roles; got {role}"
     );
     // `shared_verifier()` fails closed if `APP_ENV` is not `test` /
     // `development` and `JWT_KEYS` is absent. Mirror the env init here
@@ -213,18 +215,18 @@ fn mint_admin_jwt(sub: &str, role: &str) -> String {
 }
 
 fn super_admin_bearer() -> String {
-    format!("Bearer {}", mint_admin_jwt(TEST_SUPER_ADMIN_SUB, "super_admin"))
+    format!("Bearer {}", mint_user_jwt(TEST_SUPER_ADMIN_SUB, "super_admin"))
 }
 
 fn admin_bearer() -> String {
-    format!("Bearer {}", mint_admin_jwt(TEST_ADMIN_SUB, "admin"))
+    format!("Bearer {}", mint_user_jwt(TEST_ADMIN_SUB, "admin"))
 }
 
 /// Bearer for an `admin`-role user with a matching `group_admin` row
 /// for `TEST_SCOPED_ADMIN_GROUP`. Used to verify that scoped admins —
 /// not just super-admins — can reach `GroupScopedAdmin` handlers.
 fn scoped_admin_bearer() -> String {
-    format!("Bearer {}", mint_admin_jwt(TEST_SCOPED_ADMIN_SUB, "admin"))
+    format!("Bearer {}", mint_user_jwt(TEST_SCOPED_ADMIN_SUB, "admin"))
 }
 
 /// Bearer for a `member`-role user. Used to verify that handlers which
@@ -232,7 +234,7 @@ fn scoped_admin_bearer() -> String {
 /// (e.g. `GET /api/receipts`) still strip those fields for member
 /// callers — a valid token is not the same as admin authority.
 fn member_bearer() -> String {
-    format!("Bearer {}", mint_admin_jwt(TEST_MEMBER_SUB, "member"))
+    format!("Bearer {}", mint_user_jwt(TEST_MEMBER_SUB, "member"))
 }
 
 fn post_json_jwt(uri: &str, body: serde_json::Value) -> Request<Body> {
