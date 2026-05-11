@@ -1036,8 +1036,18 @@ pub async fn reject_receipt(
 //   3. any side effects (confirm creates a Payment, then an inbox item);
 //   4. an `auth_event` audit row attributing the change to the actor.
 //
-// Failures hit `record_auth_event(..., success=false, reason=Some(tag))`
-// before the error is returned, so every rejection branch is traceable.
+// Audit coverage is partial by design: post-auth state-machine rejections
+// that the actor could trigger (`not_pending`, `no_member`, `no_cycle`,
+// `no_amount`, `duplicate_payment`) record `record_auth_event(success=false,
+// reason=tag)` before returning. Other branches are deliberately not
+// audited here:
+//   - Auth-layer denials from `GroupScopedAdmin::ensure_or_deny` (403/404)
+//     return before an actor identity is bound to the receipt action and
+//     are owned by the auth layer's own logging.
+//   - Pure data-integrity 409s after lookup (missing/cross-group member or
+//     cycle, invalid `received_at`) and any 500s reflect data corruption
+//     or upstream bugs, not actor intent — the load-bearing signal is the
+//     error response plus the tracing log, not the audit table.
 
 async fn confirm_receipt_inner(
     user: AuthenticatedUser,
