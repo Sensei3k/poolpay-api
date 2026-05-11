@@ -165,11 +165,6 @@ pub enum ReceiptStatus {
     Pending,
     Confirmed,
     Rejected,
-    /// HANDOFF §4: admin marked the receipt as suspicious but did not commit
-    /// to confirm or reject. Stays out of the contribution ledger (same as
-    /// rejected) but lives in the queue under a distinct filter so the team
-    /// can revisit it.
-    Flagged,
 }
 
 impl std::str::FromStr for ReceiptStatus {
@@ -179,56 +174,7 @@ impl std::str::FromStr for ReceiptStatus {
             "pending" => Ok(Self::Pending),
             "confirmed" => Ok(Self::Confirmed),
             "rejected" => Ok(Self::Rejected),
-            "flagged" => Ok(Self::Flagged),
             _ => Err(format!("unknown receipt status: {s}")),
-        }
-    }
-}
-
-/// HANDOFF §4: closed vocabulary for `inbox_item.kind`. The DB-side
-/// `ASSERT $value IN [...]` mirrors this enum; both must stay in sync.
-/// The FE switches presentation on the kind, so widening this set is a
-/// cross-repo contract change.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InboxItemKind {
-    /// Admin confirmed a WhatsApp receipt linked to the recipient member.
-    ReceiptConfirmed,
-    /// New cycle is about to open in a pool the recipient belongs to.
-    CycleStarting,
-    /// Recipient is the upcoming cycle's payout target.
-    PayoutScheduled,
-    /// Free-form admin note (used by reject/flag flows).
-    AdminMessage,
-    /// Cycle closed without the recipient's contribution.
-    Overdue,
-}
-
-impl InboxItemKind {
-    /// Canonical lowercase string used on the wire and at the DB layer.
-    /// Kept centralised so handlers, the ASSERT clause in `db.rs`, and any
-    /// future filter parser never drift.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::ReceiptConfirmed => "receipt_confirmed",
-            Self::CycleStarting => "cycle_starting",
-            Self::PayoutScheduled => "payout_scheduled",
-            Self::AdminMessage => "admin_message",
-            Self::Overdue => "overdue",
-        }
-    }
-}
-
-impl std::str::FromStr for InboxItemKind {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "receipt_confirmed" => Ok(Self::ReceiptConfirmed),
-            "cycle_starting" => Ok(Self::CycleStarting),
-            "payout_scheduled" => Ok(Self::PayoutScheduled),
-            "admin_message" => Ok(Self::AdminMessage),
-            "overdue" => Ok(Self::Overdue),
-            _ => Err(format!("unknown inbox item kind: {s}")),
         }
     }
 }
@@ -321,14 +267,6 @@ pub struct DbReceipt {
     pub ocr_text: Option<String>,
     pub sender_label: Option<String>,
     pub bank_label: Option<String>,
-    /// HANDOFF §4: direct URL to the WhatsApp screenshot the bot captured.
-    /// Optional so legacy rows ingested before slice 5 still deserialise.
-    #[surreal(default)]
-    pub raw_image_url: Option<String>,
-    /// HANDOFF §4: short admin-supplied note explaining a reject/flag
-    /// decision. Optional; never carries PII (no phone, no OCR text).
-    #[surreal(default)]
-    pub rejection_reason: Option<String>,
     pub received_at: String,
     pub created_at: String,
     pub updated_at: String,
@@ -495,10 +433,6 @@ pub struct Receipt {
     pub sender_label: Option<String>,
     #[serde(rename = "bankLabel", skip_serializing_if = "Option::is_none")]
     pub bank_label: Option<String>,
-    #[serde(rename = "rawImageUrl", skip_serializing_if = "Option::is_none")]
-    pub raw_image_url: Option<String>,
-    #[serde(rename = "rejectionReason", skip_serializing_if = "Option::is_none")]
-    pub rejection_reason: Option<String>,
     #[serde(rename = "receivedAt")]
     pub received_at: String,
     #[serde(rename = "createdAt")]
@@ -639,8 +573,6 @@ impl TryFrom<DbReceipt> for Receipt {
             ocr_text: db.ocr_text,
             sender_label: db.sender_label,
             bank_label: db.bank_label,
-            raw_image_url: db.raw_image_url,
-            rejection_reason: db.rejection_reason,
             received_at: db.received_at,
             created_at: db.created_at,
             updated_at: db.updated_at,
@@ -742,8 +674,6 @@ pub struct ReceiptContent {
     pub ocr_text: Option<String>,
     pub sender_label: Option<String>,
     pub bank_label: Option<String>,
-    pub raw_image_url: Option<String>,
-    pub rejection_reason: Option<String>,
     pub received_at: String,
     pub created_at: String,
     pub updated_at: String,
@@ -760,76 +690,6 @@ pub struct GroupLinkContent {
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
-}
-
-/// Insert shape for the `inbox_item` table. SCHEMAFULL on the DB side, so
-/// every field listed in `define_inbox_table` is mandatory unless declared
-/// `option<...>` there.
-#[derive(Debug, Clone, Serialize, SurrealValue)]
-pub struct InboxItemContent {
-    pub user_id: String,
-    pub kind: String,
-    pub title: String,
-    pub body: String,
-    pub pool_id: Option<String>,
-    pub cycle_id: Option<String>,
-    pub receipt_id: Option<String>,
-    pub read_at: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Deserialize, SurrealValue)]
-pub struct DbInboxItem {
-    pub id: RecordId,
-    pub user_id: String,
-    pub kind: String,
-    pub title: String,
-    pub body: String,
-    pub pool_id: Option<String>,
-    pub cycle_id: Option<String>,
-    pub receipt_id: Option<String>,
-    pub read_at: Option<String>,
-    pub created_at: String,
-}
-
-/// API-facing shape for inbox items. camelCase across the wire so the
-/// Next.js FE reads it without an adapter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboxItem {
-    pub id: EntityId,
-    #[serde(rename = "userId")]
-    pub user_id: String,
-    pub kind: InboxItemKind,
-    pub title: String,
-    pub body: String,
-    #[serde(rename = "poolId", skip_serializing_if = "Option::is_none")]
-    pub pool_id: Option<String>,
-    #[serde(rename = "cycleId", skip_serializing_if = "Option::is_none")]
-    pub cycle_id: Option<String>,
-    #[serde(rename = "receiptId", skip_serializing_if = "Option::is_none")]
-    pub receipt_id: Option<String>,
-    #[serde(rename = "readAt", skip_serializing_if = "Option::is_none")]
-    pub read_at: Option<String>,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-}
-
-impl TryFrom<DbInboxItem> for InboxItem {
-    type Error = AppError;
-    fn try_from(db: DbInboxItem) -> Result<Self, AppError> {
-        Ok(Self {
-            id: record_id_to_string(db.id),
-            user_id: db.user_id,
-            kind: db.kind.parse().map_err(AppError::Internal)?,
-            title: db.title,
-            body: db.body,
-            pool_id: db.pool_id,
-            cycle_id: db.cycle_id,
-            receipt_id: db.receipt_id,
-            read_at: db.read_at,
-            created_at: db.created_at,
-        })
-    }
 }
 
 // ── Request bodies ──────────────────────────────────────────────────────────

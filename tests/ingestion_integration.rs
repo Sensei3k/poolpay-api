@@ -54,7 +54,6 @@ fn input<'a>(
         ocr_text: "raw OCR text",
         parsed,
         received_at: now_iso(),
-        raw_image_url: None,
     }
 }
 

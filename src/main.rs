@@ -209,9 +209,6 @@ async fn main() {
                                                     ocr_text: &text,
                                                     parsed: &parsed,
                                                     received_at: now_iso(),
-                                                    // Green API polling path does not capture
-                                                    // a raw image URL; the slice 5 webhook does.
-                                                    raw_image_url: None,
                                                 };
                                                 match ingestion::ingest_receipt(&surreal_db, input).await {
                                                     Ok(outcome) => {
