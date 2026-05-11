@@ -28,6 +28,11 @@ pub struct IngestionInput<'a> {
     pub ocr_text: &'a str,
     pub parsed: &'a ParsedReceipt,
     pub received_at: String,
+    /// Optional direct URL to the WhatsApp screenshot, captured by the bot.
+    /// Persisted on the receipt row so admins can review the original
+    /// artefact during confirm/reject in the slice 5 FE modal. Older
+    /// pipelines that pre-date this field still ingest correctly.
+    pub raw_image_url: Option<String>,
 }
 
 /// What happened with the ingestion attempt. Carries everything the reply
@@ -111,6 +116,8 @@ pub async fn ingest_receipt(
         ocr_text: Some(input.ocr_text.to_string()),
         sender_label: input.parsed.sender.clone(),
         bank_label: input.parsed.bank.clone(),
+        raw_image_url: input.raw_image_url,
+        rejection_reason: None,
         received_at: input.received_at,
         created_at: now.clone(),
         updated_at: now,
