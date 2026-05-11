@@ -940,10 +940,13 @@ pub struct PatchReceiptRequest {
     pub reason: Option<String>,
 }
 
-/// Cap on the size of an admin-supplied reject/flag reason. The DB column
-/// has no constraint (legacy rows are open-ended), so the cap lives here
-/// at the API boundary to keep a runaway string from bloating audit
-/// queries.
+/// Cap on the size of an admin-supplied reject/flag reason, measured in
+/// Unicode scalar values (chars), not bytes. The DB column has no
+/// constraint (legacy rows are open-ended), so the cap lives here at
+/// the API boundary to keep a runaway string from bloating audit
+/// queries. Counting chars keeps non-ASCII justifications (e.g.
+/// Yoruba/Igbo diacritics) from being rejected at under 280 visible
+/// characters because of multi-byte UTF-8 encoding.
 const MAX_RECEIPT_REASON_LEN: usize = 280;
 
 /// Audit event slugs for receipt actions. Centralised so spelling drift
@@ -963,7 +966,7 @@ fn sanitise_reason(reason: Option<String>) -> Result<Option<String>, AppError> {
             if trimmed.is_empty() {
                 return Ok(None);
             }
-            if trimmed.len() > MAX_RECEIPT_REASON_LEN {
+            if trimmed.chars().count() > MAX_RECEIPT_REASON_LEN {
                 return Err(AppError::BadRequest(format!(
                     "reason must be {MAX_RECEIPT_REASON_LEN} characters or fewer"
                 )));
