@@ -99,19 +99,20 @@ pub async fn whatsapp_webhook(
     State(db): State<DbConn>,
     WebhookVerifiedJson(payload): WebhookVerifiedJson<WebhookPayload>,
 ) -> Result<(StatusCode, Json<WebhookResponse>), AppError> {
-    // `message_id` is the duplicate-detection key — refusing an empty value
-    // here keeps a malformed bot post from silently coalescing every
+    // Required identifier fields. The module-level contract is that every
+    // verification/validation failure on the webhook path collapses to 401
+    // so a probing caller cannot distinguish "valid signature, bad payload"
+    // from "bad signature" (avoiding a signature/probing oracle). These
+    // checks therefore return `Unauthorized`, not `BadRequest`.
+    //
+    // `message_id` is also the duplicate-detection key — refusing an empty
+    // value here keeps a malformed bot post from silently coalescing every
     // unrelated message under "" in the index.
-    if payload.message_id.trim().is_empty() {
-        return Err(AppError::BadRequest("messageId must not be empty".into()));
-    }
-    if payload.chat_id.trim().is_empty() {
-        return Err(AppError::BadRequest("chatId must not be empty".into()));
-    }
-    if payload.sender_phone.trim().is_empty() {
-        return Err(AppError::BadRequest(
-            "senderPhone must not be empty".into(),
-        ));
+    if payload.message_id.trim().is_empty()
+        || payload.chat_id.trim().is_empty()
+        || payload.sender_phone.trim().is_empty()
+    {
+        return Err(AppError::Unauthorized);
     }
 
     let parsed = ParsedReceipt {
