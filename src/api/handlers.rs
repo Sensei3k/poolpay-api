@@ -1200,6 +1200,12 @@ async fn confirm_receipt_inner(
     // until BE auth and membership are joined (separate ticket), the
     // recipient `user_id` is the matched member id itself so the FE has
     // something to render and tests can assert the row's presence.
+    //
+    // SECURITY: `user_id` here is the matched member id from the receipt,
+    // not an authenticated session id. Future endpoints listing inbox items
+    // by `user_id` MUST NOT treat this column as an authenticated user
+    // identity. The auth and membership join lands in a follow-up; do not
+    // consume this column as a session principal until it does.
     let receipt_id_str = record_id_to_string(updated.id.clone());
     write_inbox_item(
         db,
@@ -1359,6 +1365,11 @@ async fn write_inbox_item(
     receipt_id: Option<&str>,
     created_at: &str,
 ) {
+    // SECURITY: `user_id` here is the matched member id from the receipt,
+    // not an authenticated session id. Future endpoints listing inbox items
+    // by `user_id` MUST NOT treat this column as an authenticated user
+    // identity. The auth and membership join lands in a follow-up; do not
+    // consume this column as a session principal until it does.
     let content = InboxItemContent {
         user_id: user_id.to_string(),
         kind: kind.as_str().to_string(),

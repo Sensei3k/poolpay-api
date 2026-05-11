@@ -156,7 +156,15 @@ fn extract_timestamp(headers: &HeaderMap) -> Result<i64, AppError> {
         .ok_or(AppError::Unauthorized)?;
     let ts: i64 = raw.parse().map_err(|_| AppError::Unauthorized)?;
     let now = chrono::Utc::now().timestamp();
-    if (now - ts).abs() > TIMESTAMP_TOLERANCE_SECS {
+    // Explicit saturating bounds rather than `(now - ts).abs()`: a near
+    // `i64::MIN` timestamp would wrap signed subtraction and `i64::MIN.abs()`
+    // is itself `i64::MIN` (overflow), which can slip past a naive
+    // `.abs() > TIMESTAMP_TOLERANCE_SECS` check at a narrow `now`. Saturating
+    // arithmetic clamps to the i64 range so out-of-window timestamps stay
+    // out-of-window regardless of how extreme the attacker-supplied value is.
+    let lower = now.saturating_sub(TIMESTAMP_TOLERANCE_SECS);
+    let upper = now.saturating_add(TIMESTAMP_TOLERANCE_SECS);
+    if ts < lower || ts > upper {
         return Err(AppError::Unauthorized);
     }
     Ok(ts)
