@@ -2483,7 +2483,10 @@ async fn patch_receipt_flag_returns_200_and_sets_flagged_status() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value = json_body(resp).await;
     assert_eq!(body["status"], "flagged");
-    assert_eq!(body["rejectedBy"], TEST_SUPER_ADMIN_SUB);
+    // `flag` is "needs review", not a rejection: `rejectedBy` must NOT be
+    // populated with the flagging admin or downstream consumers will
+    // interpret it as proof of rejection.
+    assert!(body.get("rejectedBy").is_none() || body["rejectedBy"].is_null());
     assert_eq!(body["rejectionReason"], "needs review");
 }
 

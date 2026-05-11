@@ -1316,12 +1316,24 @@ async fn transition_receipt(
         )));
     }
 
+    // `rejected_by` only carries meaning for an actual reject. `flag` is a
+    // distinct "needs review" state per `ReceiptStatus::Flagged`, and
+    // writing the flagging admin into `rejected_by` would make the API
+    // model lie to consumers (the FE renders `rejectedBy` as proof of
+    // rejection). Leave the column untouched on flag; a future
+    // `actioned_by`/`flagged_by` column can attribute the action without
+    // overloading the rejection field.
+    let next_rejected_by = if new_status == "rejected" {
+        Some(actor_id.clone())
+    } else {
+        receipt.rejected_by.clone()
+    };
     let content = receipt_content_from(
         &receipt,
         new_status,
         now_iso(),
         receipt.confirmed_by.clone(),
-        Some(actor_id.clone()),
+        next_rejected_by,
         ReceiptPatchFields {
             rejection_reason: reason.clone(),
         },
