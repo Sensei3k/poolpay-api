@@ -323,6 +323,83 @@ async fn webhook_sender_phone_no_match_still_ingests() {
     );
 }
 
+// ── `rawImageUrl` boundary validation ─────────────────────────────────────────
+
+#[tokio::test]
+async fn webhook_https_raw_image_url_ingests() {
+    // Baseline: an absolute https URL passes the boundary check. Confirms
+    // the new gate doesn't regress the existing happy path that ships a
+    // screenshot URL alongside the payload.
+    let app = webhook_app().await;
+    let body = serde_json::json!({
+        "chatId": LINKED_CHAT_ID,
+        "senderPhone": "2348031234567",
+        "messageId": "WAMSG-URL-HTTPS-OK",
+        "ocrText": "",
+        "receivedAt": "2026-03-10T10:00:00+00:00",
+        "rawImageUrl": "https://example.com/receipt.jpg"
+    });
+    let resp = call(app, signed_request(&body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    assert_eq!(v["outcome"], "ingested");
+}
+
+#[tokio::test]
+async fn webhook_javascript_raw_image_url_returns_401() {
+    // A `javascript:` URI would render as an executable link when an admin
+    // clicks it in the FE review modal. The boundary check must reject and
+    // collapse to the same opaque 401 used by the other payload gates.
+    let app = webhook_app().await;
+    let body = serde_json::json!({
+        "chatId": LINKED_CHAT_ID,
+        "senderPhone": "2348031234567",
+        "messageId": "WAMSG-URL-JS",
+        "ocrText": "",
+        "receivedAt": "2026-03-10T10:00:00+00:00",
+        "rawImageUrl": "javascript:alert(1)"
+    });
+    let resp = call(app, signed_request(&body)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn webhook_relative_raw_image_url_returns_401() {
+    // A relative path bypasses scheme checks at render time and resolves
+    // against whatever origin happens to host the FE — admin-side XSS / data
+    // exfiltration vector. Reject at the boundary.
+    let app = webhook_app().await;
+    let body = serde_json::json!({
+        "chatId": LINKED_CHAT_ID,
+        "senderPhone": "2348031234567",
+        "messageId": "WAMSG-URL-RELATIVE",
+        "ocrText": "",
+        "receivedAt": "2026-03-10T10:00:00+00:00",
+        "rawImageUrl": "/foo.png"
+    });
+    let resp = call(app, signed_request(&body)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn webhook_missing_raw_image_url_still_ingests() {
+    // Regression guard: `rawImageUrl` is optional. A bot post that omits
+    // the field must continue to ingest cleanly — the validation only
+    // applies when the field is `Some`.
+    let app = webhook_app().await;
+    let body = serde_json::json!({
+        "chatId": LINKED_CHAT_ID,
+        "senderPhone": "2348031234567",
+        "messageId": "WAMSG-URL-NONE",
+        "ocrText": "",
+        "receivedAt": "2026-03-10T10:00:00+00:00"
+    });
+    let resp = call(app, signed_request(&body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = json_body(resp).await;
+    assert_eq!(v["outcome"], "ingested");
+}
+
 #[tokio::test]
 async fn webhook_persists_receipt_row_visible_to_admin_list() {
     // End-to-end persistence check: a successful webhook ingest must show

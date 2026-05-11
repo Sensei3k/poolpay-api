@@ -134,6 +134,21 @@ pub async fn whatsapp_webhook(
             .with_timezone(&chrono::Utc)
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
+    // `raw_image_url` is persisted verbatim and surfaced to admins in the FE
+    // review modal. Reject anything that is not an absolute http(s) URL so a
+    // bot post can't smuggle a `javascript:` / `data:` / `file:` URI or a
+    // relative path into an admin-rendered link. Collapse to the same opaque
+    // 401 the other payload gates use — a probing caller must not learn
+    // which validation step rejected the request.
+    //
+    // `None` is permitted: the field is documented as optional and a bot
+    // running ahead of OCR may legitimately omit the screenshot URL.
+    if let Some(url) = payload.raw_image_url.as_deref() {
+        if !is_http_or_https_url(url) {
+            return Err(AppError::Unauthorized);
+        }
+    }
+
     let parsed = ParsedReceipt {
         sender: payload.parsed.sender,
         bank: payload.parsed.bank,
@@ -176,4 +191,55 @@ pub async fn whatsapp_webhook(
         },
     };
     Ok((StatusCode::OK, Json(resp)))
+}
+
+/// True when `url` is a syntactically absolute `http://` or `https://` URL
+/// with a non-empty host segment. Deliberately minimal — we don't pull in
+/// a URL crate just to gate this one optional field, and the property we
+/// care about (no `javascript:` / `data:` / `file:` / relative paths) is
+/// fully captured by checking the scheme prefix plus a non-empty authority.
+///
+/// Lower-cased before comparison so `HTTPS://…` (legal per RFC 3986) is
+/// still accepted. Whitespace at either end is rejected — we trim before
+/// the prefix check so a leading space can't sneak a different scheme past
+/// the gate.
+fn is_http_or_https_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = if let Some(r) = lower.strip_prefix("https://") {
+        r
+    } else if let Some(r) = lower.strip_prefix("http://") {
+        r
+    } else {
+        return false;
+    };
+    // Authority must be non-empty and must not start with `/` (which would
+    // mean `http:///path` — no host).
+    let host_end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..host_end];
+    !authority.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_http_or_https_url;
+
+    #[test]
+    fn accepts_http_and_https() {
+        assert!(is_http_or_https_url("https://example.com/x.jpg"));
+        assert!(is_http_or_https_url("http://example.com/x.jpg"));
+        assert!(is_http_or_https_url("HTTPS://example.com/x.jpg"));
+    }
+
+    #[test]
+    fn rejects_dangerous_or_relative_urls() {
+        assert!(!is_http_or_https_url("javascript:alert(1)"));
+        assert!(!is_http_or_https_url("data:image/png;base64,AAA"));
+        assert!(!is_http_or_https_url("file:///etc/passwd"));
+        assert!(!is_http_or_https_url("/foo.png"));
+        assert!(!is_http_or_https_url("example.com/x.jpg"));
+        assert!(!is_http_or_https_url(""));
+        assert!(!is_http_or_https_url("https://"));
+        assert!(!is_http_or_https_url("http:///path"));
+    }
 }
