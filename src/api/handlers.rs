@@ -1084,7 +1084,7 @@ async fn confirm_receipt_inner(
     if receipt.status != "pending" {
         record_auth_event(
             db,
-            None,
+            receipt.member_id.clone(),
             Some(actor_id.clone()),
             EVT_RECEIPT_CONFIRMED,
             false,
@@ -1101,6 +1101,10 @@ async fn confirm_receipt_inner(
     let member_id = match receipt.member_id.clone() {
         Some(m) => m,
         None => {
+            // Subject genuinely unknown here — the receipt has no matched
+            // member, so leave `user_id=None`. Every other branch below
+            // this point has a `member_id` in scope and passes it as the
+            // audit subject.
             record_auth_event(
                 db,
                 None,
@@ -1119,7 +1123,7 @@ async fn confirm_receipt_inner(
         None => {
             record_auth_event(
                 db,
-                None,
+                Some(member_id.clone()),
                 Some(actor_id),
                 EVT_RECEIPT_CONFIRMED,
                 false,
@@ -1135,7 +1139,7 @@ async fn confirm_receipt_inner(
         None => {
             record_auth_event(
                 db,
-                None,
+                Some(member_id.clone()),
                 Some(actor_id),
                 EVT_RECEIPT_CONFIRMED,
                 false,
@@ -1182,7 +1186,7 @@ async fn confirm_receipt_inner(
     if !existing.is_empty() {
         record_auth_event(
             db,
-            None,
+            Some(member_id.clone()),
             Some(actor_id),
             EVT_RECEIPT_CONFIRMED,
             false,
@@ -1262,7 +1266,7 @@ async fn confirm_receipt_inner(
 
     record_auth_event(
         db,
-        None,
+        Some(member_id),
         Some(actor_id),
         EVT_RECEIPT_CONFIRMED,
         true,
@@ -1318,7 +1322,7 @@ async fn transition_receipt(
     if receipt.status != "pending" {
         record_auth_event(
             db,
-            None,
+            receipt.member_id.clone(),
             Some(actor_id.clone()),
             audit_event,
             false,
@@ -1388,7 +1392,7 @@ async fn transition_receipt(
 
     record_auth_event(
         db,
-        None,
+        updated.member_id.clone(),
         Some(actor_id),
         audit_event,
         true,

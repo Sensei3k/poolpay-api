@@ -1944,7 +1944,7 @@ async fn confirm_receipt_soft_deleted_returns_404() {
 
 #[tokio::test]
 async fn confirm_receipt_marks_status_and_creates_payment() {
-    let app = test_app_with_auth().await;
+    let (app, db) = test_app_with_auth_and_db().await;
 
     let payments_before: Vec<serde_json::Value> =
         json_body(call(app.clone(), get("/api/payments")).await).await;
@@ -1974,6 +1974,34 @@ async fn confirm_receipt_marks_status_and_creates_payment() {
     assert!(new_payment["confirmedAt"].is_string());
     // Audit: same admin is attributed on the payment created from the receipt.
     assert_eq!(new_payment["confirmedBy"], TEST_SUPER_ADMIN_SUB);
+
+    // Audit: the `auth_event` row carries the linked member as the subject
+    // (user_id), not null. Receipt 1's fixture has member_id="4".
+    use surrealdb_types::SurrealValue;
+    #[derive(Debug, serde::Deserialize, SurrealValue)]
+    struct AuthEventRow {
+        user_id: Option<String>,
+        actor_id: Option<String>,
+        success: bool,
+    }
+    let rows: Vec<AuthEventRow> = db
+        .query(
+            "SELECT user_id, actor_id, success FROM auth_event \
+             WHERE event_type = 'receipt_confirmed' AND success = true",
+        )
+        .await
+        .expect("select auth_event")
+        .take(0)
+        .expect("decode auth_event rows");
+    let event = rows
+        .into_iter()
+        .find(|r| r.success && r.actor_id.as_deref() == Some(TEST_SUPER_ADMIN_SUB))
+        .expect("expected successful receipt_confirmed auth_event for this admin");
+    assert_eq!(
+        event.user_id.as_deref(),
+        Some("4"),
+        "auth_event.user_id should be the linked member id, not null"
+    );
 }
 
 #[tokio::test]
