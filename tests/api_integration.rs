@@ -86,6 +86,10 @@ async fn test_app_with_auth_and_db() -> (Router, db::DbConn) {
 const TEST_SUPER_ADMIN_SUB: &str = "test-super-admin";
 const TEST_ADMIN_SUB: &str = "test-admin";
 const TEST_SCOPED_ADMIN_SUB: &str = "test-scoped-admin";
+/// `member`-role fixture user — used to assert that member tokens still
+/// receive the stripped public projection on `GET /api/receipts` (admin
+/// review fields are admin-only).
+const TEST_MEMBER_SUB: &str = "test-member";
 /// Fixture group the scoped admin is granted access to — matches the
 /// single group id produced by `db::init_memory()`.
 const TEST_SCOPED_ADMIN_GROUP: &str = "1";
@@ -109,6 +113,7 @@ async fn seed_test_admin_users(db: &poolpay::db::DbConn) {
         (TEST_SUPER_ADMIN_SUB, "super_admin"),
         (TEST_ADMIN_SUB, "admin"),
         (TEST_SCOPED_ADMIN_SUB, "admin"),
+        (TEST_MEMBER_SUB, "member"),
     ] {
         let now = now_iso();
         let content = UserContent {
@@ -188,8 +193,8 @@ fn post_json(uri: &str, body: serde_json::Value) -> Request<Body> {
 /// checks against the DB user.
 fn mint_admin_jwt(sub: &str, role: &str) -> String {
     assert!(
-        matches!(role, "super_admin" | "admin"),
-        "mint_admin_jwt only mints admin-tier roles; got {role}"
+        matches!(role, "super_admin" | "admin" | "member"),
+        "mint_admin_jwt only mints known user roles; got {role}"
     );
     // `shared_verifier()` fails closed if `APP_ENV` is not `test` /
     // `development` and `JWT_KEYS` is absent. Mirror the env init here
@@ -220,6 +225,14 @@ fn admin_bearer() -> String {
 /// not just super-admins — can reach `GroupScopedAdmin` handlers.
 fn scoped_admin_bearer() -> String {
     format!("Bearer {}", mint_admin_jwt(TEST_SCOPED_ADMIN_SUB, "admin"))
+}
+
+/// Bearer for a `member`-role user. Used to verify that handlers which
+/// release admin-only fields when `OptionalAuth` resolves to an admin
+/// (e.g. `GET /api/receipts`) still strip those fields for member
+/// callers — a valid token is not the same as admin authority.
+fn member_bearer() -> String {
+    format!("Bearer {}", mint_admin_jwt(TEST_MEMBER_SUB, "member"))
 }
 
 fn post_json_jwt(uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -277,10 +290,14 @@ fn post_empty_jwt_with(uri: &str, bearer: &str) -> Request<Body> {
 }
 
 fn get_jwt(uri: &str) -> Request<Body> {
+    get_jwt_with(uri, &super_admin_bearer())
+}
+
+fn get_jwt_with(uri: &str, bearer: &str) -> Request<Body> {
     Request::builder()
         .method(Method::GET)
         .uri(uri)
-        .header("authorization", super_admin_bearer())
+        .header("authorization", bearer)
         .body(Body::empty())
         .unwrap()
 }
@@ -1788,6 +1805,115 @@ async fn reset_restores_receipts_to_fixture_count() {
     let after: Vec<serde_json::Value> =
         json_body(call(app, get("/api/receipts")).await).await;
     assert_eq!(after.len(), baseline);
+}
+
+/// Seed admin-review fields on receipt id `1` so the projection tests
+/// can prove which callers see them and which do not. The fixture leaves
+/// both fields `None`, but the serializer skips `None`, so without a
+/// real value present we cannot distinguish "field stripped" from
+/// "field never set" — write a known value here and assert against it.
+async fn seed_admin_review_fields_on_receipt_one(db: &poolpay::db::DbConn) {
+    use surrealdb::types::RecordId;
+    db.query("UPDATE $id SET raw_image_url = $url, rejection_reason = $reason")
+        .bind(("id", RecordId::new("receipt", "1".to_string())))
+        .bind(("url", "https://example.invalid/screenshot.png".to_string()))
+        .bind(("reason", "needs manual review".to_string()))
+        .await
+        .expect("seed admin-review fields")
+        .check()
+        .expect("admin-review field update must succeed");
+}
+
+#[tokio::test]
+async fn get_receipts_anonymous_strips_admin_review_fields() {
+    // Anonymous callers must never see `rawImageUrl` or `rejectionReason`,
+    // even when the underlying row has them populated.
+    let (app, db) = test_app_with_auth_and_db().await;
+    seed_admin_review_fields_on_receipt_one(&db).await;
+
+    let resp = call(app, get("/api/receipts")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    let r = receipts
+        .iter()
+        .find(|r| r["id"] == "1")
+        .expect("receipt 1 must be in the listing");
+    assert!(
+        r.get("rawImageUrl").is_none(),
+        "anonymous callers must not see rawImageUrl: {r}"
+    );
+    assert!(
+        r.get("rejectionReason").is_none(),
+        "anonymous callers must not see rejectionReason: {r}"
+    );
+}
+
+#[tokio::test]
+async fn get_receipts_member_token_strips_admin_review_fields() {
+    // A valid token is not the same as admin authority — `member`-role
+    // callers must receive the same stripped public projection as
+    // anonymous callers.
+    let (app, db) = test_app_with_auth_and_db().await;
+    seed_admin_review_fields_on_receipt_one(&db).await;
+
+    let resp = call(app, get_jwt_with("/api/receipts", &member_bearer())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    let r = receipts
+        .iter()
+        .find(|r| r["id"] == "1")
+        .expect("receipt 1 must be in the listing");
+    assert!(
+        r.get("rawImageUrl").is_none(),
+        "member-token callers must not see rawImageUrl: {r}"
+    );
+    assert!(
+        r.get("rejectionReason").is_none(),
+        "member-token callers must not see rejectionReason: {r}"
+    );
+}
+
+#[tokio::test]
+async fn get_receipts_admin_token_includes_admin_review_fields() {
+    // Admin-tier callers (`admin` or `super_admin`) are the only callers
+    // who get `rawImageUrl` and `rejectionReason` in the listing — they
+    // need them to review pending receipts before confirming/rejecting.
+    let (app, db) = test_app_with_auth_and_db().await;
+    seed_admin_review_fields_on_receipt_one(&db).await;
+
+    let resp = call(app, get_jwt_with("/api/receipts", &admin_bearer())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    let r = receipts
+        .iter()
+        .find(|r| r["id"] == "1")
+        .expect("receipt 1 must be in the listing");
+    assert_eq!(
+        r["rawImageUrl"], "https://example.invalid/screenshot.png",
+        "admin callers must see rawImageUrl: {r}"
+    );
+    assert_eq!(
+        r["rejectionReason"], "needs manual review",
+        "admin callers must see rejectionReason: {r}"
+    );
+}
+
+#[tokio::test]
+async fn get_receipts_super_admin_token_includes_admin_review_fields() {
+    // `super_admin` is strictly more privileged than `admin`; if `admin`
+    // sees the review fields, super-admin must as well.
+    let (app, db) = test_app_with_auth_and_db().await;
+    seed_admin_review_fields_on_receipt_one(&db).await;
+
+    let resp = call(app, get_jwt_with("/api/receipts", &super_admin_bearer())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    let r = receipts
+        .iter()
+        .find(|r| r["id"] == "1")
+        .expect("receipt 1 must be in the listing");
+    assert_eq!(r["rawImageUrl"], "https://example.invalid/screenshot.png");
+    assert_eq!(r["rejectionReason"], "needs manual review");
 }
 
 // ── POST /api/admin/receipts/{id}/confirm ────────────────────────────────────
