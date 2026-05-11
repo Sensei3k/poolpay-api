@@ -15,6 +15,9 @@
 //! leaked: every verification failure collapses to a single
 //! `AppError::Unauthorized`.
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
 use axum::{
     body::{Bytes, to_bytes},
     extract::{FromRequest, Request},
@@ -136,17 +139,40 @@ where
 }
 
 /// Read the secret env var for a given source, treating unset, empty, or
-/// whitespace-only values as misconfiguration. Logged once per failed
-/// request so a noisy 401 line surfaces in production even when the
-/// caller's request shape is otherwise plausible.
+/// whitespace-only values as misconfiguration. The first failure for a
+/// given env var emits a loud `error!` so operators see the
+/// misconfiguration in logs; subsequent failures stay silent to prevent a
+/// hot endpoint from amplifying the log volume on every request while
+/// still failing closed with 401.
 fn resolve_secret<Src: HmacSecretSource>() -> Result<String, AppError> {
     let name = Src::env_var_name();
     let raw = std::env::var(name).unwrap_or_default();
     if raw.trim().is_empty() {
-        tracing::error!(env_var = name, "HMAC secret is not set — rejecting request");
+        log_missing_secret_once(name);
         return Err(AppError::Unauthorized);
     }
     Ok(raw)
+}
+
+/// Tracks env-var names we have already logged a "secret missing" error
+/// for. Keyed by `&'static str` so the set never grows beyond the small,
+/// fixed number of HMAC sources compiled in.
+fn missing_secret_log_state() -> &'static Mutex<HashSet<&'static str>> {
+    static STATE: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn log_missing_secret_once(name: &'static str) {
+    let mut guard = match missing_secret_log_state().lock() {
+        Ok(g) => g,
+        // A poisoned mutex here just means a previous panic happened while
+        // logging — we still want to fail closed, so silently skip the
+        // dedup tracking rather than panicking the request.
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.insert(name) {
+        tracing::error!(env_var = name, "HMAC secret is not set — rejecting request");
+    }
 }
 
 fn extract_timestamp(headers: &HeaderMap) -> Result<i64, AppError> {
