@@ -138,13 +138,13 @@ async fn webhook_valid_hmac_ingests_returns_200() {
 }
 
 #[tokio::test]
-async fn webhook_missing_secret_returns_401() {
-    // Pinned scenario: the binary as a whole sets WA_WEBHOOK_SECRET on
-    // first use, so we cannot un-set it without racing every other test
-    // in this file. Instead simulate "missing secret" by signing with the
-    // wrong key — the resolver still loads the real secret, but the
-    // signature fails, which is the same 401 the caller would see for an
-    // unset secret (every failure path collapses to Unauthorized).
+async fn webhook_wrong_secret_returns_401() {
+    // The binary as a whole sets WA_WEBHOOK_SECRET on first use, so we
+    // cannot un-set it without racing every other test in this file —
+    // dedicated "unset secret" coverage lives in unit tests for
+    // `resolve_secret`. Here we exercise the wrong-secret / invalid
+    // signature branch: the resolver loads the real secret, but the
+    // signature fails verification and the request collapses to 401.
     let app = webhook_app().await;
     let body = payload_matching_member("WAMSG-MISSING-SECRET");
     let bytes = serde_json::to_vec(&body).unwrap();
