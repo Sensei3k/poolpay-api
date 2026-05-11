@@ -108,9 +108,18 @@ pub async fn whatsapp_webhook(
     // `message_id` is also the duplicate-detection key — refusing an empty
     // value here keeps a malformed bot post from silently coalescing every
     // unrelated message under "" in the index.
+    //
+    // `received_at` is persisted verbatim on the receipt and later parsed
+    // as RFC 3339 by `confirm_receipt` to derive the payment date. A
+    // malformed value would let ingest succeed but then 409 every confirm
+    // attempt forever — so we reject it here, collapsed to the same 401
+    // as every other webhook validation failure (no signature/probing
+    // oracle).
     if payload.message_id.trim().is_empty()
         || payload.chat_id.trim().is_empty()
         || payload.sender_phone.trim().is_empty()
+        || payload.received_at.trim().is_empty()
+        || chrono::DateTime::parse_from_rfc3339(&payload.received_at).is_err()
     {
         return Err(AppError::Unauthorized);
     }
