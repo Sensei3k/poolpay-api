@@ -268,22 +268,26 @@ pub async fn get_receipts(
     let total = take_count(&mut resp, 0)?;
     let rows: Vec<DbReceipt> = resp.take(1)?;
     // `GET /api/receipts` is public by default but exposes the admin-review
-    // fields (`raw_image_url`, `rejection_reason`) when the caller presents a
-    // valid Bearer token. `raw_image_url` is the bot-supplied screenshot URL
-    // an admin needs to inspect a pending receipt before confirming/rejecting;
-    // `rejection_reason` is an admin-supplied note. Without this gating, an
-    // admin had no read path to fetch `raw_image_url` (no separate admin list
-    // endpoint exists). Token verification + status/version checks happen in
-    // `OptionalAuth`, so seeing `Some(_)` here is sufficient to release the
-    // fields — any failure mode collapses to `None`, which keeps the public
-    // projection in place.
-    let is_authenticated = auth.is_some();
+    // fields (`raw_image_url`, `rejection_reason`) only to callers presenting
+    // a valid admin-tier Bearer token. `raw_image_url` is the bot-supplied
+    // screenshot URL an admin needs to inspect a pending receipt before
+    // confirming/rejecting; `rejection_reason` is an admin-supplied note.
+    // Without this gating, an admin had no read path to fetch `raw_image_url`
+    // (no separate admin list endpoint exists). Member-role tokens are
+    // treated like anonymous callers here — they get the stripped public
+    // projection. Token verification + status/version checks happen in
+    // `OptionalAuth`, so any failure mode collapses to `None`, which also
+    // keeps the public projection in place.
+    let is_admin = auth
+        .as_ref()
+        .map(|u| matches!(u.role.as_str(), "admin" | "super_admin"))
+        .unwrap_or(false);
     let receipts: Result<Vec<Receipt>, AppError> = rows
         .into_iter()
         .map(Receipt::try_from)
         .map(|r| {
             r.map(|mut receipt| {
-                if !is_authenticated {
+                if !is_admin {
                     receipt.raw_image_url = None;
                     receipt.rejection_reason = None;
                 }
