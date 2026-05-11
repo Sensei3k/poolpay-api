@@ -8,7 +8,7 @@ use surrealdb_types::SurrealValue;
 use tracing::error;
 
 use crate::auth::audit::record_auth_event;
-use crate::auth::extractors::{AuthenticatedUser, GroupScopedAdmin, SuperAdminUser};
+use crate::auth::extractors::{AuthenticatedUser, GroupScopedAdmin, OptionalAuth, SuperAdminUser};
 use crate::api::models::{
     AppError, CreateCycleRequest, CreateGroupRequest, CreateMemberRequest, CreatePaymentRequest,
     CreateWhatsappLinkRequest, Cycle, CycleContent, DbCycle, DbGroup, DbGroupLink, DbInboxItem,
@@ -216,6 +216,7 @@ pub async fn get_payments(
 
 pub async fn get_receipts(
     State(db): State<DbConn>,
+    OptionalAuth(auth): OptionalAuth,
     Query(params): Query<ReceiptsQuery>,
 ) -> Result<(HeaderMap, Json<Vec<Receipt>>), AppError> {
     // Validate status filter up-front so an unknown value returns 400
@@ -266,18 +267,26 @@ pub async fn get_receipts(
     let mut resp = q.await?;
     let total = take_count(&mut resp, 0)?;
     let rows: Vec<DbReceipt> = resp.take(1)?;
-    // `GET /api/receipts` is a public read endpoint — strip fields the bot
-    // or admins populate that we do not want unauthenticated callers to see.
-    // `raw_image_url` is a bot-supplied URL pointing at the source screenshot
-    // and `rejection_reason` is an admin-supplied note; both stay populated
-    // on the auth-gated PATCH/admin paths.
+    // `GET /api/receipts` is public by default but exposes the admin-review
+    // fields (`raw_image_url`, `rejection_reason`) when the caller presents a
+    // valid Bearer token. `raw_image_url` is the bot-supplied screenshot URL
+    // an admin needs to inspect a pending receipt before confirming/rejecting;
+    // `rejection_reason` is an admin-supplied note. Without this gating, an
+    // admin had no read path to fetch `raw_image_url` (no separate admin list
+    // endpoint exists). Token verification + status/version checks happen in
+    // `OptionalAuth`, so seeing `Some(_)` here is sufficient to release the
+    // fields — any failure mode collapses to `None`, which keeps the public
+    // projection in place.
+    let is_authenticated = auth.is_some();
     let receipts: Result<Vec<Receipt>, AppError> = rows
         .into_iter()
         .map(Receipt::try_from)
         .map(|r| {
             r.map(|mut receipt| {
-                receipt.raw_image_url = None;
-                receipt.rejection_reason = None;
+                if !is_authenticated {
+                    receipt.raw_image_url = None;
+                    receipt.rejection_reason = None;
+                }
                 receipt
             })
         })
