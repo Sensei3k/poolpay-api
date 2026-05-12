@@ -3,6 +3,7 @@ pub mod auth_endpoints;
 pub mod handlers;
 pub mod models;
 pub mod pagination;
+pub mod webhooks;
 
 use axum::{
     http::{header, Method},
@@ -20,7 +21,8 @@ use handlers::{
     confirm_receipt, create_cycle, create_group, create_member, create_payment,
     create_whatsapp_link, delete_cycle, delete_group, delete_member, delete_payment,
     delete_whatsapp_link, get_cycles, get_groups, get_members, get_payments, get_receipts,
-    get_whatsapp_links, reject_receipt, reset_db, update_cycle, update_group, update_member,
+    get_whatsapp_links, patch_receipt, reject_receipt, reset_db, update_cycle, update_group,
+    update_member,
 };
 
 /// Build the Axum router with all API routes and CORS middleware.
@@ -34,7 +36,7 @@ pub fn router(db: DbConn) -> Router {
 }
 
 /// Process-cached verifier used by `router()`. Exposed so the BE-4
-/// `mint_admin_jwt()` test helper can sign tokens with the same key the
+/// `mint_user_jwt()` test helper can sign tokens with the same key the
 /// running app uses to verify them — without it, tests would build a
 /// fresh ephemeral keypair and the token's signature would be rejected.
 pub fn shared_verifier() -> SharedVerifier {
@@ -100,9 +102,19 @@ pub fn router_with_config(
         .route("/api/admin/groups/{gid}/cycles", post(create_cycle))
         .route("/api/admin/cycles/{id}", patch(update_cycle))
         .route("/api/admin/cycles/{id}", delete(delete_cycle))
-        // Admin Receipt endpoints
+        // Admin Receipt endpoints. The legacy confirm/reject POST routes
+        // stay live alongside the new unified PATCH /api/receipts/{id} so
+        // the FE can migrate without a synchronised cut; slice 6 drops
+        // the POST routes once callers have moved across.
         .route("/api/admin/receipts/{id}/confirm", post(confirm_receipt))
         .route("/api/admin/receipts/{id}/reject", post(reject_receipt))
+        // Slice 5 unified action endpoint. Accepts
+        // `{ action: 'confirm' | 'reject' | 'flag', reason?: string }`
+        // and gates on `GroupScopedAdmin` via the inner helpers.
+        .route("/api/receipts/{id}", patch(patch_receipt))
+        // Slice 5 inbound webhook for the WhatsApp bot. Bound to
+        // `WA_WEBHOOK_SECRET`, fail-closed when unset.
+        .route("/api/webhooks/whatsapp", post(webhooks::whatsapp_webhook))
         // Admin WhatsApp link endpoints
         .route("/api/admin/whatsapp-links", get(get_whatsapp_links))
         .route("/api/admin/whatsapp-links", post(create_whatsapp_link))

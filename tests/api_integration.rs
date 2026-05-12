@@ -86,6 +86,10 @@ async fn test_app_with_auth_and_db() -> (Router, db::DbConn) {
 const TEST_SUPER_ADMIN_SUB: &str = "test-super-admin";
 const TEST_ADMIN_SUB: &str = "test-admin";
 const TEST_SCOPED_ADMIN_SUB: &str = "test-scoped-admin";
+/// `member`-role fixture user — used to assert that member tokens still
+/// receive the stripped public projection on `GET /api/receipts` (admin
+/// review fields are admin-only).
+const TEST_MEMBER_SUB: &str = "test-member";
 /// Fixture group the scoped admin is granted access to — matches the
 /// single group id produced by `db::init_memory()`.
 const TEST_SCOPED_ADMIN_GROUP: &str = "1";
@@ -109,6 +113,7 @@ async fn seed_test_admin_users(db: &poolpay::db::DbConn) {
         (TEST_SUPER_ADMIN_SUB, "super_admin"),
         (TEST_ADMIN_SUB, "admin"),
         (TEST_SCOPED_ADMIN_SUB, "admin"),
+        (TEST_MEMBER_SUB, "member"),
     ] {
         let now = now_iso();
         let content = UserContent {
@@ -176,20 +181,22 @@ fn post_json(uri: &str, body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
-/// Mint an admin access token signed by the same verifier the app uses.
-/// Caller passes both `sub` (must match a seeded `user` row) and `role`
-/// (`super_admin` or `admin`) so a single test can sign tokens for
-/// distinct user fixtures — needed for the `SuperAdminUser` 403 case,
-/// which has to present a JWT for a real `admin`-role user.
+/// Mint an access token for the given role, signed by the same verifier
+/// the app uses. Caller passes both `sub` (must match a seeded `user`
+/// row) and `role` (`super_admin`, `admin`, or `member`) so a single
+/// test can sign tokens for distinct user fixtures — needed for cases
+/// like the `SuperAdminUser` 403, which has to present a JWT for a real
+/// `admin`-role user, and for member-only assertions that confirm
+/// admin-gated fields are stripped from non-admin callers.
 ///
-/// `SuperAdminUser` re-reads the role from the DB row (not the JWT
-/// claim), so the role argument here only populates the claim for
-/// signing; it is not currently used for authorisation or consistency
-/// checks against the DB user.
-fn mint_admin_jwt(sub: &str, role: &str) -> String {
+/// Role-agnostic by design: the `SuperAdminUser` extractor re-reads the
+/// role from the DB row (not the JWT claim), so the role argument here
+/// only populates the claim for signing; it is not currently used for
+/// authorisation or consistency checks against the DB user.
+fn mint_user_jwt(sub: &str, role: &str) -> String {
     assert!(
-        matches!(role, "super_admin" | "admin"),
-        "mint_admin_jwt only mints admin-tier roles; got {role}"
+        matches!(role, "super_admin" | "admin" | "member"),
+        "mint_user_jwt only mints known user roles; got {role}"
     );
     // `shared_verifier()` fails closed if `APP_ENV` is not `test` /
     // `development` and `JWT_KEYS` is absent. Mirror the env init here
@@ -208,18 +215,26 @@ fn mint_admin_jwt(sub: &str, role: &str) -> String {
 }
 
 fn super_admin_bearer() -> String {
-    format!("Bearer {}", mint_admin_jwt(TEST_SUPER_ADMIN_SUB, "super_admin"))
+    format!("Bearer {}", mint_user_jwt(TEST_SUPER_ADMIN_SUB, "super_admin"))
 }
 
 fn admin_bearer() -> String {
-    format!("Bearer {}", mint_admin_jwt(TEST_ADMIN_SUB, "admin"))
+    format!("Bearer {}", mint_user_jwt(TEST_ADMIN_SUB, "admin"))
 }
 
 /// Bearer for an `admin`-role user with a matching `group_admin` row
 /// for `TEST_SCOPED_ADMIN_GROUP`. Used to verify that scoped admins —
 /// not just super-admins — can reach `GroupScopedAdmin` handlers.
 fn scoped_admin_bearer() -> String {
-    format!("Bearer {}", mint_admin_jwt(TEST_SCOPED_ADMIN_SUB, "admin"))
+    format!("Bearer {}", mint_user_jwt(TEST_SCOPED_ADMIN_SUB, "admin"))
+}
+
+/// Bearer for a `member`-role user. Used to verify that handlers which
+/// release admin-only fields when `OptionalAuth` resolves to an admin
+/// (e.g. `GET /api/receipts`) still strip those fields for member
+/// callers — a valid token is not the same as admin authority.
+fn member_bearer() -> String {
+    format!("Bearer {}", mint_user_jwt(TEST_MEMBER_SUB, "member"))
 }
 
 fn post_json_jwt(uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -277,10 +292,14 @@ fn post_empty_jwt_with(uri: &str, bearer: &str) -> Request<Body> {
 }
 
 fn get_jwt(uri: &str) -> Request<Body> {
+    get_jwt_with(uri, &super_admin_bearer())
+}
+
+fn get_jwt_with(uri: &str, bearer: &str) -> Request<Body> {
     Request::builder()
         .method(Method::GET)
         .uri(uri)
-        .header("authorization", super_admin_bearer())
+        .header("authorization", bearer)
         .body(Body::empty())
         .unwrap()
 }
@@ -1790,6 +1809,115 @@ async fn reset_restores_receipts_to_fixture_count() {
     assert_eq!(after.len(), baseline);
 }
 
+/// Seed admin-review fields on receipt id `1` so the projection tests
+/// can prove which callers see them and which do not. The fixture leaves
+/// both fields `None`, but the serializer skips `None`, so without a
+/// real value present we cannot distinguish "field stripped" from
+/// "field never set" — write a known value here and assert against it.
+async fn seed_admin_review_fields_on_receipt_one(db: &poolpay::db::DbConn) {
+    use surrealdb::types::RecordId;
+    db.query("UPDATE $id SET raw_image_url = $url, rejection_reason = $reason")
+        .bind(("id", RecordId::new("receipt", "1".to_string())))
+        .bind(("url", "https://example.invalid/screenshot.png".to_string()))
+        .bind(("reason", "needs manual review".to_string()))
+        .await
+        .expect("seed admin-review fields")
+        .check()
+        .expect("admin-review field update must succeed");
+}
+
+#[tokio::test]
+async fn get_receipts_anonymous_strips_admin_review_fields() {
+    // Anonymous callers must never see `rawImageUrl` or `rejectionReason`,
+    // even when the underlying row has them populated.
+    let (app, db) = test_app_with_auth_and_db().await;
+    seed_admin_review_fields_on_receipt_one(&db).await;
+
+    let resp = call(app, get("/api/receipts")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    let r = receipts
+        .iter()
+        .find(|r| r["id"] == "1")
+        .expect("receipt 1 must be in the listing");
+    assert!(
+        r.get("rawImageUrl").is_none(),
+        "anonymous callers must not see rawImageUrl: {r}"
+    );
+    assert!(
+        r.get("rejectionReason").is_none(),
+        "anonymous callers must not see rejectionReason: {r}"
+    );
+}
+
+#[tokio::test]
+async fn get_receipts_member_token_strips_admin_review_fields() {
+    // A valid token is not the same as admin authority — `member`-role
+    // callers must receive the same stripped public projection as
+    // anonymous callers.
+    let (app, db) = test_app_with_auth_and_db().await;
+    seed_admin_review_fields_on_receipt_one(&db).await;
+
+    let resp = call(app, get_jwt_with("/api/receipts", &member_bearer())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    let r = receipts
+        .iter()
+        .find(|r| r["id"] == "1")
+        .expect("receipt 1 must be in the listing");
+    assert!(
+        r.get("rawImageUrl").is_none(),
+        "member-token callers must not see rawImageUrl: {r}"
+    );
+    assert!(
+        r.get("rejectionReason").is_none(),
+        "member-token callers must not see rejectionReason: {r}"
+    );
+}
+
+#[tokio::test]
+async fn get_receipts_admin_token_includes_admin_review_fields() {
+    // Admin-tier callers (`admin` or `super_admin`) are the only callers
+    // who get `rawImageUrl` and `rejectionReason` in the listing — they
+    // need them to review pending receipts before confirming/rejecting.
+    let (app, db) = test_app_with_auth_and_db().await;
+    seed_admin_review_fields_on_receipt_one(&db).await;
+
+    let resp = call(app, get_jwt_with("/api/receipts", &admin_bearer())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    let r = receipts
+        .iter()
+        .find(|r| r["id"] == "1")
+        .expect("receipt 1 must be in the listing");
+    assert_eq!(
+        r["rawImageUrl"], "https://example.invalid/screenshot.png",
+        "admin callers must see rawImageUrl: {r}"
+    );
+    assert_eq!(
+        r["rejectionReason"], "needs manual review",
+        "admin callers must see rejectionReason: {r}"
+    );
+}
+
+#[tokio::test]
+async fn get_receipts_super_admin_token_includes_admin_review_fields() {
+    // `super_admin` is strictly more privileged than `admin`; if `admin`
+    // sees the review fields, super-admin must as well.
+    let (app, db) = test_app_with_auth_and_db().await;
+    seed_admin_review_fields_on_receipt_one(&db).await;
+
+    let resp = call(app, get_jwt_with("/api/receipts", &super_admin_bearer())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let receipts: Vec<serde_json::Value> = json_body(resp).await;
+    let r = receipts
+        .iter()
+        .find(|r| r["id"] == "1")
+        .expect("receipt 1 must be in the listing");
+    assert_eq!(r["rawImageUrl"], "https://example.invalid/screenshot.png");
+    assert_eq!(r["rejectionReason"], "needs manual review");
+}
+
 // ── POST /api/admin/receipts/{id}/confirm ────────────────────────────────────
 
 #[tokio::test]
@@ -1816,7 +1944,7 @@ async fn confirm_receipt_soft_deleted_returns_404() {
 
 #[tokio::test]
 async fn confirm_receipt_marks_status_and_creates_payment() {
-    let app = test_app_with_auth().await;
+    let (app, db) = test_app_with_auth_and_db().await;
 
     let payments_before: Vec<serde_json::Value> =
         json_body(call(app.clone(), get("/api/payments")).await).await;
@@ -1846,6 +1974,34 @@ async fn confirm_receipt_marks_status_and_creates_payment() {
     assert!(new_payment["confirmedAt"].is_string());
     // Audit: same admin is attributed on the payment created from the receipt.
     assert_eq!(new_payment["confirmedBy"], TEST_SUPER_ADMIN_SUB);
+
+    // Audit: the `auth_event` row carries the linked member as the subject
+    // (user_id), not null. Receipt 1's fixture has member_id="4".
+    use surrealdb_types::SurrealValue;
+    #[derive(Debug, serde::Deserialize, SurrealValue)]
+    struct AuthEventRow {
+        user_id: Option<String>,
+        actor_id: Option<String>,
+        success: bool,
+    }
+    let rows: Vec<AuthEventRow> = db
+        .query(
+            "SELECT user_id, actor_id, success FROM auth_event \
+             WHERE event_type = 'receipt_confirmed' AND success = true",
+        )
+        .await
+        .expect("select auth_event")
+        .take(0)
+        .expect("decode auth_event rows");
+    let event = rows
+        .into_iter()
+        .find(|r| r.success && r.actor_id.as_deref() == Some(TEST_SUPER_ADMIN_SUB))
+        .expect("expected successful receipt_confirmed auth_event for this admin");
+    assert_eq!(
+        event.user_id.as_deref(),
+        Some("4"),
+        "auth_event.user_id should be the linked member id, not null"
+    );
 }
 
 #[tokio::test]
@@ -2388,5 +2544,528 @@ async fn pagination_excludes_soft_deleted_receipts_from_total_count() {
             .iter()
             .all(|r| r.get("deletedAt").is_none() || r["deletedAt"].is_null()),
         "soft-deleted rows must be excluded from the page"
+    );
+}
+
+// ── PATCH /api/receipts/{id} (Slice 5) ────────────────────────────────────────
+//
+// Covers the unified action endpoint: confirm / reject / flag dispatch,
+// scope gating, payload validation, and the side effects (payment row +
+// inbox item on confirm; rejection_reason persistence; member-scoped
+// inbox message on reject/flag).
+
+/// Pull every `inbox_item` for one user_id. Used by the PATCH + inbox
+/// suites to assert side-effect rows landed where they should. The query
+/// flows through the same SurrealDB handle the API uses, so an index
+/// regression would fail the read here too.
+async fn fetch_inbox_for_user(
+    db: &poolpay::db::DbConn,
+    user_id: &str,
+) -> Vec<serde_json::Value> {
+    use surrealdb_types::SurrealValue;
+    #[derive(Debug, serde::Deserialize, SurrealValue)]
+    struct Row {
+        kind: String,
+        title: String,
+        body: String,
+        pool_id: Option<String>,
+        receipt_id: Option<String>,
+        read_at: Option<String>,
+    }
+    let rows: Vec<Row> = db
+        .query("SELECT * FROM inbox_item WHERE user_id = $uid ORDER BY created_at ASC")
+        .bind(("uid", user_id.to_string()))
+        .await
+        .expect("inbox query")
+        .take(0)
+        .expect("inbox rows");
+    rows.into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "kind": r.kind,
+                "title": r.title,
+                "body": r.body,
+                "poolId": r.pool_id,
+                "receiptId": r.receipt_id,
+                "readAt": r.read_at,
+            })
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn patch_receipt_confirm_returns_200_and_sets_confirmed_status() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = json_body(resp).await;
+    assert_eq!(body["status"], "confirmed");
+    assert_eq!(body["confirmedBy"], TEST_SUPER_ADMIN_SUB);
+}
+
+#[tokio::test]
+async fn patch_receipt_reject_returns_200_and_persists_reason() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt(
+            "/api/receipts/1",
+            serde_json::json!({"action": "reject", "reason": "wrong amount"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = json_body(resp).await;
+    assert_eq!(body["status"], "rejected");
+    assert_eq!(body["rejectedBy"], TEST_SUPER_ADMIN_SUB);
+    assert_eq!(body["rejectionReason"], "wrong amount");
+}
+
+#[tokio::test]
+async fn patch_receipt_flag_returns_200_and_sets_flagged_status() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt(
+            "/api/receipts/1",
+            serde_json::json!({"action": "flag", "reason": "needs review"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = json_body(resp).await;
+    assert_eq!(body["status"], "flagged");
+    // `flag` is "needs review", not a rejection: `rejectedBy` must NOT be
+    // populated with the flagging admin or downstream consumers will
+    // interpret it as proof of rejection.
+    assert!(body.get("rejectedBy").is_none() || body["rejectedBy"].is_null());
+    assert_eq!(body["rejectionReason"], "needs review");
+}
+
+#[tokio::test]
+async fn patch_receipt_missing_action_returns_400() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"reason": "nope"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn patch_receipt_invalid_action_returns_400() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt(
+            "/api/receipts/1",
+            serde_json::json!({"action": "destroy"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn patch_receipt_scoped_admin_denied_cross_group_returns_403() {
+    // The scoped admin is granted access to group 1 only. Receipt 1 lives
+    // in group 1, so the scoped admin succeeds; to exercise the denied
+    // branch we need a receipt in a different group. Create a second
+    // group + a fresh receipt row directly via the SurrealDB handle.
+    use poolpay::api::models::{now_iso, ReceiptContent};
+    let (app, db) = test_app_with_auth_and_db().await;
+
+    // Create group 2 via the admin API (super-admin path).
+    let g = call(
+        app.clone(),
+        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "Off-limits"})),
+    )
+    .await;
+    assert_eq!(g.status(), StatusCode::CREATED);
+    let new_group: serde_json::Value = json_body(g).await;
+    let other_group_id = new_group["id"].as_str().unwrap().to_string();
+
+    // Insert a pending receipt directly in that group.
+    let now = now_iso();
+    let other_receipt_id = "patch-foreign-receipt";
+    let content = ReceiptContent {
+        whatsapp_message_id: "WAMSG-FOREIGN".into(),
+        group_id: other_group_id,
+        chat_id: "0000@g.us".into(),
+        sender_phone: "0000".into(),
+        member_id: None,
+        cycle_id: None,
+        extracted_amount: None,
+        expected_amount: None,
+        amount_matches: None,
+        status: "pending".into(),
+        ocr_text: None,
+        sender_label: None,
+        bank_label: None,
+        raw_image_url: None,
+        rejection_reason: None,
+        received_at: now.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+        deleted_at: None,
+        confirmed_by: None,
+        rejected_by: None,
+        deleted_by: None,
+    };
+    let _: Option<poolpay::api::models::DbReceipt> = db
+        .upsert(("receipt", other_receipt_id))
+        .content(content)
+        .await
+        .expect("seed off-limits receipt");
+
+    let resp = call(
+        app,
+        patch_json_jwt_with(
+            &format!("/api/receipts/{other_receipt_id}"),
+            serde_json::json!({"action": "reject"}),
+            &scoped_admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn patch_receipt_super_admin_allowed_cross_group() {
+    // Same setup as the denied case, but called with the super-admin
+    // bearer — must succeed regardless of which group the receipt lives in.
+    use poolpay::api::models::{now_iso, ReceiptContent};
+    let (app, db) = test_app_with_auth_and_db().await;
+    let g = call(
+        app.clone(),
+        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "Other"})),
+    )
+    .await;
+    let new_group: serde_json::Value = json_body(g).await;
+    let other_group_id = new_group["id"].as_str().unwrap().to_string();
+
+    let now = now_iso();
+    let other_receipt_id = "patch-super-cross-receipt";
+    let content = ReceiptContent {
+        whatsapp_message_id: "WAMSG-CROSS".into(),
+        group_id: other_group_id,
+        chat_id: "0001@g.us".into(),
+        sender_phone: "0000".into(),
+        member_id: None,
+        cycle_id: None,
+        extracted_amount: None,
+        expected_amount: None,
+        amount_matches: None,
+        status: "pending".into(),
+        ocr_text: None,
+        sender_label: None,
+        bank_label: None,
+        raw_image_url: None,
+        rejection_reason: None,
+        received_at: now.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+        deleted_at: None,
+        confirmed_by: None,
+        rejected_by: None,
+        deleted_by: None,
+    };
+    let _: Option<poolpay::api::models::DbReceipt> = db
+        .upsert(("receipt", other_receipt_id))
+        .content(content)
+        .await
+        .expect("seed cross-group receipt");
+
+    let resp = call(
+        app,
+        patch_json_jwt(
+            &format!("/api/receipts/{other_receipt_id}"),
+            serde_json::json!({"action": "reject"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn patch_receipt_double_confirm_returns_409() {
+    let app = test_app_with_auth().await;
+    let first = call(
+        app.clone(),
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = call(
+        app,
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn patch_receipt_reason_persisted_on_reject() {
+    let (app, db) = test_app_with_auth_and_db().await;
+    let resp = call(
+        app,
+        patch_json_jwt(
+            "/api/receipts/1",
+            serde_json::json!({"action": "reject", "reason": "duplicate"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Read the row directly via Surreal to make sure the value really
+    // lives in the DB and is not just echoed back from the request body.
+    let row: Option<poolpay::api::models::DbReceipt> =
+        db.select(("receipt", "1")).await.expect("select receipt");
+    let row = row.expect("receipt row");
+    assert_eq!(row.status, "rejected");
+    assert_eq!(row.rejection_reason.as_deref(), Some("duplicate"));
+}
+
+#[tokio::test]
+async fn patch_receipt_confirm_creates_payment_and_inbox_item() {
+    let (app, db) = test_app_with_auth_and_db().await;
+
+    let payments_before: Vec<serde_json::Value> =
+        json_body(call(app.clone(), get("/api/payments")).await).await;
+    let baseline = payments_before.len();
+
+    let resp = call(
+        app.clone(),
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Payment row created.
+    let payments_after: Vec<serde_json::Value> =
+        json_body(call(app, get("/api/payments")).await).await;
+    assert_eq!(payments_after.len(), baseline + 1);
+
+    // Inbox item created for the matched member (member id "4" per fixtures).
+    let inbox = fetch_inbox_for_user(&db, "4").await;
+    assert!(
+        inbox.iter().any(|r| r["kind"] == "receipt_confirmed"),
+        "expected a receipt_confirmed inbox row for matched member, got {inbox:?}"
+    );
+}
+
+#[tokio::test]
+async fn patch_receipt_reason_too_long_returns_400() {
+    let app = test_app_with_auth().await;
+    let oversized = "a".repeat(281);
+    let resp = call(
+        app,
+        patch_json_jwt(
+            "/api/receipts/1",
+            serde_json::json!({"action": "reject", "reason": oversized}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn patch_receipt_confirm_rejects_reason_field() {
+    // `reason` is meaningless for confirm; surface a 400 so FE bugs that
+    // mis-route a reject body do not silently bury an admin's note.
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt(
+            "/api/receipts/1",
+            serde_json::json!({"action": "confirm", "reason": "should not be here"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── inbox_item side effects (Slice 5) ─────────────────────────────────────────
+//
+// Verifies the new inbox_item table behaves end-to-end: rows materialise
+// on confirm, are scoped to the matched member, respect the SCHEMAFULL
+// kind ASSERT, are queryable via the index path, survive a soft-delete
+// of the underlying receipt, and surface a count the FE can gate on.
+
+#[tokio::test]
+async fn inbox_item_created_on_confirm() {
+    let (app, db) = test_app_with_auth_and_db().await;
+    let resp = call(
+        app,
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let inbox = fetch_inbox_for_user(&db, "4").await;
+    assert_eq!(inbox.len(), 1, "exactly one inbox row should land on confirm");
+    assert_eq!(inbox[0]["kind"], "receipt_confirmed");
+}
+
+#[tokio::test]
+async fn inbox_item_scoped_to_matched_member_only() {
+    let (app, db) = test_app_with_auth_and_db().await;
+    let resp = call(
+        app,
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Receipt 1's matched member is "4"; every other member must have an
+    // empty inbox. Pick member "1" (Adaeze) as the negative case.
+    let inbox_other = fetch_inbox_for_user(&db, "1").await;
+    assert!(
+        inbox_other.is_empty(),
+        "non-matched member must not receive an inbox row, got {inbox_other:?}"
+    );
+}
+
+#[tokio::test]
+async fn inbox_item_kind_enum_enforced_at_db_layer() {
+    // Insert directly via Surreal with an unsupported `kind`; the
+    // SCHEMAFULL ASSERT should reject it. Catches a future handler that
+    // forgets to validate.
+    use poolpay::api::models::{now_iso, InboxItemContent};
+    let (_app, db) = test_app_with_auth_and_db().await;
+    let now = now_iso();
+    let content = InboxItemContent {
+        user_id: "1".into(),
+        kind: "bogus_kind".into(),
+        title: "should fail".into(),
+        body: "".into(),
+        pool_id: None,
+        cycle_id: None,
+        receipt_id: None,
+        read_at: None,
+        created_at: now,
+    };
+    let result: Result<Option<poolpay::api::models::DbInboxItem>, _> =
+        db.create("inbox_item").content(content).await;
+    assert!(
+        result.is_err(),
+        "DB-side ASSERT must reject unknown inbox kinds; got Ok({:?})",
+        result.ok()
+    );
+}
+
+#[tokio::test]
+async fn inbox_item_queryable_via_user_index() {
+    // Confirms a receipt, then queries the index-backed (user_id) path
+    // and matches the row by receipt_id. Failing this would imply the
+    // schema's index never landed or the writer skipped a column.
+    let (app, db) = test_app_with_auth_and_db().await;
+    let resp = call(
+        app,
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let inbox = fetch_inbox_for_user(&db, "4").await;
+    let row = inbox.first().expect("expected one row");
+    assert_eq!(row["receiptId"], "1");
+    assert_eq!(row["poolId"], "1");
+}
+
+#[tokio::test]
+async fn inbox_item_survives_receipt_soft_delete() {
+    // Inbox is the user-facing audit trail; even when the underlying
+    // receipt is soft-deleted later, the inbox row stays so the user can
+    // still see they were notified. Confirms the FK is logical, not
+    // enforced via cascade.
+    use poolpay::api::models::{now_iso, ReceiptContent};
+    let (app, db) = test_app_with_auth_and_db().await;
+    let resp = call(
+        app,
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Soft-delete receipt 1 by replacing the row with deleted_at set.
+    let now = now_iso();
+    let updated = ReceiptContent {
+        whatsapp_message_id: "3EB0C123ABCD4567EF89".into(),
+        group_id: "1".into(),
+        chat_id: "2349000000001@g.us".into(),
+        sender_phone: "2348031234567".into(),
+        member_id: Some("4".into()),
+        cycle_id: Some("3".into()),
+        extracted_amount: Some(1_000_000),
+        expected_amount: Some(1_000_000),
+        amount_matches: Some(true),
+        status: "confirmed".into(),
+        ocr_text: None,
+        sender_label: None,
+        bank_label: None,
+        raw_image_url: None,
+        rejection_reason: None,
+        received_at: now.clone(),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        deleted_at: Some(now),
+        confirmed_by: Some(TEST_SUPER_ADMIN_SUB.into()),
+        rejected_by: None,
+        deleted_by: Some(TEST_SUPER_ADMIN_SUB.into()),
+    };
+    let _: Option<poolpay::api::models::DbReceipt> = db
+        .upsert(("receipt", "1"))
+        .content(updated)
+        .await
+        .expect("soft-delete receipt");
+
+    let inbox = fetch_inbox_for_user(&db, "4").await;
+    assert_eq!(
+        inbox.len(),
+        1,
+        "inbox row must survive a soft-delete of the source receipt"
+    );
+}
+
+#[tokio::test]
+async fn inbox_count_gates_admin_landing_when_zero() {
+    // HANDOFF §5.3: if an admin has no pending receipts to review the FE
+    // lands them on /home instead of /admin/receipts. The backend
+    // contract supporting this is "GET /api/receipts?status=pending"
+    // returning an empty list when no pending rows exist. Confirms that
+    // after every pending fixture row is acted on, the queue drains.
+    let app = test_app_with_auth().await;
+
+    let before = call(app.clone(), get("/api/receipts?status=pending&limit=200")).await;
+    let pre: Vec<serde_json::Value> = json_body(before).await;
+    assert!(
+        !pre.is_empty(),
+        "fixture must seed at least one pending receipt"
+    );
+
+    for r in &pre {
+        let id = r["id"].as_str().unwrap();
+        let resp = call(
+            app.clone(),
+            patch_json_jwt(
+                &format!("/api/receipts/{id}"),
+                serde_json::json!({"action": "reject"}),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "reject {id}");
+    }
+
+    let after = call(app, get("/api/receipts?status=pending&limit=200")).await;
+    let post: Vec<serde_json::Value> = json_body(after).await;
+    assert!(
+        post.is_empty(),
+        "queue must drain to zero so the admin lands on /home, got {post:?}"
     );
 }

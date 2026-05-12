@@ -176,7 +176,85 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     )
     .await?
     .check()?;
+
+    define_receipt_extensions(db).await?;
+    define_inbox_table(db).await?;
     define_auth_tables(db).await?;
+    Ok(())
+}
+
+/// Slice 5 additions to the receipt table.
+///
+/// Two new optional fields:
+///   - `raw_image_url`: direct URL to the WhatsApp screenshot, captured by
+///     the bot and persisted so admins can review the original artefact
+///     during confirm/reject.
+///   - `rejection_reason`: short human note recorded when an admin rejects
+///     or flags a receipt. Must NOT contain PII (sender phone, OCR text,
+///     member name). That is a handler-side invariant; the schema stays
+///     open-ended so legacy rows remain readable.
+///
+/// Two new indexes:
+///   - `receipt_sender_received` over `(sender_phone, received_at)` powers
+///     the "show every receipt this phone has ever sent" admin-side history
+///     lookups landing in the FE slice 5 modal.
+///   - `receipt_status_received` over `(status, received_at)` powers the
+///     admin queue's "filtered by status, oldest first" default sort (FIFO
+///     so the backlog drains in arrival order) without a table scan as
+///     receipt volume grows. `GET /api/receipts` issues
+///     `ORDER BY received_at ASC, id ASC` — keep the index and the handler
+///     in lock-step if the contract ever flips to newest-first.
+///
+/// The receipt table itself stays SCHEMALESS so existing fixtures and
+/// in-flight writes are unaffected — new fields land as plain optional
+/// columns. SCHEMAFULL would force a destructive backfill on every
+/// existing row.
+async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
+    db.query(
+        "DEFINE FIELD IF NOT EXISTS raw_image_url ON receipt TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS rejection_reason ON receipt TYPE option<string>;
+         DEFINE INDEX IF NOT EXISTS receipt_sender_received
+             ON receipt FIELDS sender_phone, received_at;
+         DEFINE INDEX IF NOT EXISTS receipt_status_received
+             ON receipt FIELDS status, received_at;",
+    )
+    .await?
+    .check()?;
+    Ok(())
+}
+
+/// `inbox_item` is the per-user notification stream rendered by the FE
+/// `/inbox` route (HANDOFF §4 and §5.1). SCHEMAFULL because the `kind`
+/// vocabulary is contract-bearing: the FE switches presentation on the
+/// value, and an unknown kind would render as a blank row. The DB-side
+/// `ASSERT $value IN [...]` guarantees the contract holds even if a
+/// future handler forgets to validate.
+///
+/// Indexes:
+///   - `inbox_item_user_created` powers the "newest first" feed query —
+///     `WHERE user_id = $uid ORDER BY created_at DESC`.
+///   - `inbox_item_user_unread`  powers the inbox-bell unread count and the
+///     "you have N pending items" badges on the home page.
+async fn define_inbox_table(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
+    db.query(
+        "DEFINE TABLE IF NOT EXISTS inbox_item SCHEMAFULL;
+         DEFINE FIELD IF NOT EXISTS user_id ON inbox_item TYPE string;
+         DEFINE FIELD IF NOT EXISTS kind ON inbox_item TYPE string
+             ASSERT $value IN ['receipt_confirmed', 'cycle_starting', 'payout_scheduled', 'admin_message', 'overdue'];
+         DEFINE FIELD IF NOT EXISTS title ON inbox_item TYPE string;
+         DEFINE FIELD IF NOT EXISTS body ON inbox_item TYPE string;
+         DEFINE FIELD IF NOT EXISTS pool_id ON inbox_item TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS cycle_id ON inbox_item TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS receipt_id ON inbox_item TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS read_at ON inbox_item TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS created_at ON inbox_item TYPE string;
+         DEFINE INDEX IF NOT EXISTS inbox_item_user_created
+             ON inbox_item FIELDS user_id, created_at;
+         DEFINE INDEX IF NOT EXISTS inbox_item_user_unread
+             ON inbox_item FIELDS user_id, read_at;",
+    )
+    .await?
+    .check()?;
     Ok(())
 }
 
@@ -574,6 +652,8 @@ fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
                 ocr_text: Some("NGN 10,000.00\nFrom: Tunde Bakare\nBank: GTBank".into()),
                 sender_label: Some("Tunde Bakare".into()),
                 bank_label: Some("GTBank".into()),
+                raw_image_url: None,
+                rejection_reason: None,
                 received_at: "2026-03-02T10:29:45+00:00".into(),
                 created_at: created_at.into(),
                 updated_at: created_at.into(),
@@ -599,6 +679,8 @@ fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
                 ocr_text: Some("NGN 5,000.00\nFrom: Chukwuemeka Eze".into()),
                 sender_label: Some("Chukwuemeka Eze".into()),
                 bank_label: None,
+                raw_image_url: None,
+                rejection_reason: None,
                 received_at: "2026-03-03T14:15:00+00:00".into(),
                 created_at: "2026-03-03T14:15:30+00:00".into(),
                 updated_at: "2026-03-03T16:00:00+00:00".into(),
