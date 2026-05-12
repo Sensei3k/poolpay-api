@@ -9,15 +9,15 @@
 //! becomes a deliberate, authenticated FE linking flow (not in BE-1).
 
 use axum::{
-    Extension, Json,
     body::to_bytes,
     extract::{Request, State},
+    Extension, Json,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::api::models::{
-    AppError, DbUser, DbUserIdentity, UserContent, UserIdentityContent, now_iso,
-    record_id_to_string,
+    now_iso, record_id_to_string, AppError, DbUser, DbUserIdentity, UserContent,
+    UserIdentityContent,
 };
 use crate::auth::audit::record_auth_event;
 use crate::auth::extractors::AuthenticatedUser;
@@ -26,7 +26,7 @@ use crate::auth::jwt::SharedVerifier;
 use crate::auth::password;
 use crate::auth::rate_limit::{ClientIp, CredentialFailureLimiter};
 use crate::auth::refresh::{self, RefreshError};
-use crate::db::{DbConn, is_unique_constraint_error};
+use crate::db::{is_unique_constraint_error, DbConn};
 use surrealdb::types::RecordId;
 
 const CREDENTIALS_PROVIDER: &str = "credentials";
@@ -398,8 +398,8 @@ pub async fn change_password(
     let body = to_bytes(http_req.into_body(), MAX_CHANGE_PASSWORD_BODY_BYTES)
         .await
         .map_err(|_| AppError::BadRequest("request body too large".into()))?;
-    let req: ChangePasswordRequest =
-        serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid JSON body".into()))?;
+    let req: ChangePasswordRequest = serde_json::from_slice(&body)
+        .map_err(|_| AppError::BadRequest("invalid JSON body".into()))?;
 
     if req.new_password.trim().is_empty() {
         return Err(AppError::BadRequest("newPassword required".into()));
@@ -552,14 +552,12 @@ async fn update_password_hash(
     new_hash: Option<&str>,
     now_rfc3339: &str,
 ) -> Result<(), AppError> {
-    db.query(
-        "UPDATE $id SET password_hash = $h, must_reset_password = false, updated_at = $now",
-    )
-    .bind(("id", RecordId::new("user", user_id.to_string())))
-    .bind(("h", new_hash.map(str::to_string)))
-    .bind(("now", now_rfc3339.to_string()))
-    .await?
-    .check()?;
+    db.query("UPDATE $id SET password_hash = $h, must_reset_password = false, updated_at = $now")
+        .bind(("id", RecordId::new("user", user_id.to_string())))
+        .bind(("h", new_hash.map(str::to_string)))
+        .bind(("now", now_rfc3339.to_string()))
+        .await?
+        .check()?;
     Ok(())
 }
 
@@ -792,8 +790,7 @@ pub async fn refresh_token_endpoint(
     let body = to_bytes(http_req.into_body(), MAX_REFRESH_BODY_BYTES)
         .await
         .map_err(|_| AppError::Unauthorized)?;
-    let req: RefreshRequest =
-        serde_json::from_slice(&body).map_err(|_| AppError::Unauthorized)?;
+    let req: RefreshRequest = serde_json::from_slice(&body).map_err(|_| AppError::Unauthorized)?;
     if req.refresh_token.is_empty() || req.refresh_token.len() > MAX_REFRESH_TOKEN_LEN {
         return Err(AppError::Unauthorized);
     }

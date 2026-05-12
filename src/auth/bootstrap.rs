@@ -7,11 +7,11 @@ use surrealdb::types::RecordId;
 use tracing::{info, warn};
 
 use crate::api::models::{
-    AuthEventContent, DbAuthEvent, DbGroup, DbGroupAdmin, DbUser, DbUserIdentity,
-    GroupAdminContent, UserContent, UserIdentityContent, now_iso, record_id_to_string,
+    now_iso, record_id_to_string, AuthEventContent, DbAuthEvent, DbGroup, DbGroupAdmin, DbUser,
+    DbUserIdentity, GroupAdminContent, UserContent, UserIdentityContent,
 };
 use crate::auth::password;
-use crate::db::{DbConn, FIXTURE_GROUP_ID, is_unique_constraint_error};
+use crate::db::{is_unique_constraint_error, DbConn, FIXTURE_GROUP_ID};
 
 const BOOTSTRAP_EVENT_TYPE: &str = "bootstrap_admin_created";
 const CREDENTIALS_PROVIDER: &str = "credentials";
@@ -41,10 +41,26 @@ struct DummyAdmin {
 }
 
 const DUMMY_ADMINS: [DummyAdmin; 4] = [
-    DummyAdmin { email: "admin1@poolpay.test", role: "admin",       grant_fixture_group: true  },
-    DummyAdmin { email: "admin2@poolpay.test", role: "admin",       grant_fixture_group: false },
-    DummyAdmin { email: "admin3@poolpay.test", role: "super_admin", grant_fixture_group: false },
-    DummyAdmin { email: "admin4@poolpay.test", role: "admin",       grant_fixture_group: false },
+    DummyAdmin {
+        email: "admin1@poolpay.test",
+        role: "admin",
+        grant_fixture_group: true,
+    },
+    DummyAdmin {
+        email: "admin2@poolpay.test",
+        role: "admin",
+        grant_fixture_group: false,
+    },
+    DummyAdmin {
+        email: "admin3@poolpay.test",
+        role: "super_admin",
+        grant_fixture_group: false,
+    },
+    DummyAdmin {
+        email: "admin4@poolpay.test",
+        role: "admin",
+        grant_fixture_group: false,
+    },
 ];
 
 /// Seed the initial admin account if none exists and the required env vars
@@ -424,8 +440,7 @@ async fn ensure_admin_fixture(
     // error. The user + identity rows are already persisted, so degrade to
     // a warn-and-continue on audit issues — matches the best-effort
     // contract documented on `seed_dummy_admins`.
-    let audit_result: Result<Option<DbAuthEvent>, _> =
-        db.create("auth_event").content(event).await;
+    let audit_result: Result<Option<DbAuthEvent>, _> = db.create("auth_event").content(event).await;
     if let Err(e) = audit_result {
         warn!(
             email_redacted = redact(email),
@@ -435,10 +450,7 @@ async fn ensure_admin_fixture(
         );
     }
 
-    info!(
-        email_redacted = redact(email),
-        "fixture admin created"
-    );
+    info!(email_redacted = redact(email), "fixture admin created");
     Ok(Some(user_id))
 }
 
@@ -546,8 +558,7 @@ async fn ensure_group_admin_grant(
         Ok(None) => {
             warn!(
                 user_id,
-                group_id,
-                "fixture group_admin grant returned no record — skipping audit event"
+                group_id, "fixture group_admin grant returned no record — skipping audit event"
             );
             Ok(())
         }

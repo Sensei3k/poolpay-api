@@ -21,24 +21,24 @@
 //! orphaned `user` row behind.
 
 use axum::{
-    Json,
     body::to_bytes,
     extract::{Path, Request, State},
     http::StatusCode,
+    Json,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId;
 
 use crate::api::models::{
-    AppError, DbGroup, DbGroupAdmin, DbUser, DbUserIdentity, EntityId, GroupAdminContent,
-    UserContent, UserIdentityContent, now_iso, record_id_to_string,
+    now_iso, record_id_to_string, AppError, DbGroup, DbGroupAdmin, DbUser, DbUserIdentity,
+    EntityId, GroupAdminContent, UserContent, UserIdentityContent,
 };
 use crate::auth::audit::record_auth_event;
 use crate::auth::extractors::SuperAdminUser;
 use crate::auth::password;
 use crate::auth::rate_limit::ClientIp;
 use crate::auth::refresh;
-use crate::db::{DbConn, is_unique_constraint_error};
+use crate::db::{is_unique_constraint_error, DbConn};
 
 const CREDENTIALS_PROVIDER: &str = "credentials";
 const MAX_EMAIL_LEN: usize = 320;
@@ -177,9 +177,7 @@ pub async fn create_admin_user(
             Some(&ip),
         )
         .await;
-        return Err(AppError::Conflict(
-            "email already registered".into(),
-        ));
+        return Err(AppError::Conflict("email already registered".into()));
     }
 
     let password_hash = match password::hash(&req.initial_password) {
@@ -302,7 +300,10 @@ pub async fn create_admin_user(
     )
     .await;
 
-    Ok((StatusCode::CREATED, Json(AdminUserResponse::from_db(&created))))
+    Ok((
+        StatusCode::CREATED,
+        Json(AdminUserResponse::from_db(&created)),
+    ))
 }
 
 // ── PATCH /api/admin/users/:id ────────────────────────────────────────────────
@@ -406,9 +407,7 @@ pub async fn update_admin_user(
         // a concurrent writer advanced `version` or soft-deleted the row
         // between read and write. Surface as a version mismatch so the
         // caller refetches and retries.
-        AppError::Conflict(
-            "version mismatch — record was modified by another request".into(),
-        )
+        AppError::Conflict("version mismatch — record was modified by another request".into())
     })?;
 
     let ip = client_ip.to_string();
@@ -652,9 +651,7 @@ pub async fn grant_group_admin(
                 Some(&ip),
             )
             .await;
-            return Err(AppError::NotFound(format!(
-                "user {user_id} does not exist"
-            )));
+            return Err(AppError::NotFound(format!("user {user_id} does not exist")));
         }
     };
 
@@ -715,8 +712,7 @@ pub async fn grant_group_admin(
         created_at: now.clone(),
         created_by: caller.user_id.clone(),
     };
-    let insert: Result<Option<DbGroupAdmin>, _> =
-        db.create("group_admin").content(content).await;
+    let insert: Result<Option<DbGroupAdmin>, _> = db.create("group_admin").content(content).await;
     match insert {
         Ok(Some(_)) => {}
         Ok(None) => {
@@ -908,4 +904,3 @@ pub async fn revoke_group_admin(
 
     Ok(StatusCode::NO_CONTENT)
 }
-

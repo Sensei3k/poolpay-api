@@ -16,7 +16,7 @@
 //! The list is illustrative, not constraining — `event_type` is a free
 //! string on the DB side. New events land here without schema change.
 
-use crate::api::models::{AuthEventContent, DbAuthEvent, now_iso};
+use crate::api::models::{now_iso, AuthEventContent, DbAuthEvent};
 use crate::db::DbConn;
 
 /// Writes a single row to the `auth_event` table. Always returns `()`;

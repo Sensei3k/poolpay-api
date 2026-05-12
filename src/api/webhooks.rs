@@ -143,11 +143,10 @@ pub async fn whatsapp_webhook(
     // `…+01:00` and `…+00:00` would sort lexicographically — breaking
     // absolute-time ordering of the admin queue. Converting to UTC makes the
     // lexicographic sort equivalent to a chronological sort.
-    let parsed_received_at =
-        chrono::DateTime::parse_from_rfc3339(&payload.received_at)
-            .map_err(|_| AppError::Unauthorized)?
-            .with_timezone(&chrono::Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let parsed_received_at = chrono::DateTime::parse_from_rfc3339(&payload.received_at)
+        .map_err(|_| AppError::Unauthorized)?
+        .with_timezone(&chrono::Utc)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     // `raw_image_url` is persisted verbatim and surfaced to admins in the FE
     // review modal. Reject anything that is not an absolute http(s) URL so a

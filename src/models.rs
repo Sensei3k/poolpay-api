@@ -138,7 +138,10 @@ mod tests {
         }"#;
 
         let notification: Notification = serde_json::from_str(json).unwrap();
-        assert_eq!(notification.body.id_message.as_deref(), Some("BAE5F4886F532D01"));
+        assert_eq!(
+            notification.body.id_message.as_deref(),
+            Some("BAE5F4886F532D01")
+        );
     }
 
     // Confirms that a notification without idMessage (e.g. a delivery receipt event)

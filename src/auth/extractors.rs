@@ -113,7 +113,11 @@ where
             return Err(AppError::Unauthorized);
         }
 
-        Ok(Self { user_id: claims.sub, role: user.role, token_version: user.token_version })
+        Ok(Self {
+            user_id: claims.sub,
+            role: user.role,
+            token_version: user.token_version,
+        })
     }
 }
 
@@ -164,7 +168,11 @@ where
         {
             return Ok(Self(None));
         }
-        Ok(Self(AuthenticatedUser::from_request_parts(parts, state).await.ok()))
+        Ok(Self(
+            AuthenticatedUser::from_request_parts(parts, state)
+                .await
+                .ok(),
+        ))
     }
 }
 
@@ -180,8 +188,7 @@ pub async fn require_group_scope(
     // "admin role required" vs "no access to this group" tells the caller
     // whether the JWT role is at least admin — cheap information we don't
     // need to give away.
-    let allowed =
-        user.role == "admin" && has_group_admin(db, &user.user_id, group_id).await?;
+    let allowed = user.role == "admin" && has_group_admin(db, &user.user_id, group_id).await?;
     if allowed {
         Ok(())
     } else {

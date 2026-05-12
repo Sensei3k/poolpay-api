@@ -14,16 +14,16 @@
 //!   This follows OAuth 2.0 Security BCP (RFC 9700) section 4.12.
 //! * Logout revokes every row in the family in one shot.
 
-use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use surrealdb::types::RecordId;
 use tracing::warn;
 
 use crate::api::models::{
-    AuthEventContent, DbAuthEvent, DbRefreshToken, DbUser, RefreshTokenContent, now_iso,
-    record_id_to_string,
+    now_iso, record_id_to_string, AuthEventContent, DbAuthEvent, DbRefreshToken, DbUser,
+    RefreshTokenContent,
 };
 use crate::db::DbConn;
 
@@ -63,7 +63,9 @@ impl std::fmt::Display for RefreshError {
 impl std::error::Error for RefreshError {}
 
 impl From<surrealdb::Error> for RefreshError {
-    fn from(e: surrealdb::Error) -> Self { Self::Db(e) }
+    fn from(e: surrealdb::Error) -> Self {
+        Self::Db(e)
+    }
 }
 
 /// Issue a brand-new refresh token for `user_id`. Used at login time and by
@@ -93,7 +95,11 @@ pub async fn issue(db: &DbConn, user_id: &str) -> Result<IssuedRefreshToken, Ref
             "refresh token create returned no record".to_string(),
         ));
     }
-    Ok(IssuedRefreshToken { plaintext, family_id, expires_at })
+    Ok(IssuedRefreshToken {
+        plaintext,
+        family_id,
+        expires_at,
+    })
 }
 
 /// Rotate a presented refresh token. Happy path: revoke the presented row
@@ -108,7 +114,9 @@ pub async fn rotate(
     presented: &str,
 ) -> Result<(IssuedRefreshToken, String), RefreshError> {
     let hashed = hash_token(presented);
-    let row = load_by_hash(db, &hashed).await?.ok_or(RefreshError::NotFound)?;
+    let row = load_by_hash(db, &hashed)
+        .await?
+        .ok_or(RefreshError::NotFound)?;
 
     // Cheap pre-checks. These are not the authoritative guard — the atomic
     // revoke below is — but they short-circuit the obvious cases without
@@ -142,11 +150,14 @@ pub async fn rotate(
         revoked_at: None,
         replaced_by: None,
     };
-    let new_row: Option<DbRefreshToken> =
-        db.create("refresh_token").content(new_content).await?;
+    let new_row: Option<DbRefreshToken> = db.create("refresh_token").content(new_content).await?;
     let new_id = match new_row {
         Some(r) => record_id_to_string(r.id),
-        None => return Err(RefreshError::Internal("new refresh_token row not returned".into())),
+        None => {
+            return Err(RefreshError::Internal(
+                "new refresh_token row not returned".into(),
+            ))
+        }
     };
 
     // Atomic guard: only one concurrent rotate per row can win the
@@ -179,7 +190,11 @@ pub async fn rotate(
     }
 
     Ok((
-        IssuedRefreshToken { plaintext: new_plain, family_id: row.family_id, expires_at },
+        IssuedRefreshToken {
+            plaintext: new_plain,
+            family_id: row.family_id,
+            expires_at,
+        },
         row.user_id,
     ))
 }
@@ -188,11 +203,13 @@ pub async fn rotate(
 /// event_type (`logout` vs `refresh_reuse_detected`).
 pub async fn revoke_family(db: &DbConn, family_id: &str) -> Result<(), RefreshError> {
     let now = now_iso();
-    db.query("UPDATE refresh_token SET revoked_at = $now WHERE family_id = $fid AND revoked_at IS NONE")
-        .bind(("now", now))
-        .bind(("fid", family_id.to_string()))
-        .await?
-        .check()?;
+    db.query(
+        "UPDATE refresh_token SET revoked_at = $now WHERE family_id = $fid AND revoked_at IS NONE",
+    )
+    .bind(("now", now))
+    .bind(("fid", family_id.to_string()))
+    .await?
+    .check()?;
     Ok(())
 }
 
@@ -203,22 +220,23 @@ pub async fn revoke_family(db: &DbConn, family_id: &str) -> Result<(), RefreshEr
 /// access-TTL and holders of old refresh tokens cannot mint replacements.
 pub async fn revoke_all_for_user(db: &DbConn, user_id: &str) -> Result<(), RefreshError> {
     let now = now_iso();
-    db.query("UPDATE refresh_token SET revoked_at = $now WHERE user_id = $uid AND revoked_at IS NONE")
-        .bind(("now", now))
-        .bind(("uid", user_id.to_string()))
-        .await?
-        .check()?;
+    db.query(
+        "UPDATE refresh_token SET revoked_at = $now WHERE user_id = $uid AND revoked_at IS NONE",
+    )
+    .bind(("now", now))
+    .bind(("uid", user_id.to_string()))
+    .await?
+    .check()?;
     Ok(())
 }
 
 /// Revoke the family of a presented refresh token. Used by `/api/auth/logout`.
 /// Returns the `user_id` so the caller can audit under the right subject.
-pub async fn revoke_by_presented(
-    db: &DbConn,
-    presented: &str,
-) -> Result<String, RefreshError> {
+pub async fn revoke_by_presented(db: &DbConn, presented: &str) -> Result<String, RefreshError> {
     let hashed = hash_token(presented);
-    let row = load_by_hash(db, &hashed).await?.ok_or(RefreshError::NotFound)?;
+    let row = load_by_hash(db, &hashed)
+        .await?
+        .ok_or(RefreshError::NotFound)?;
     revoke_family(db, &row.family_id).await?;
     Ok(row.user_id)
 }
@@ -245,7 +263,11 @@ async fn handle_reuse(db: &DbConn, stolen: &DbRefreshToken) {
         reason: Some(format!("family_id={}", stolen.family_id)),
         created_at: now_iso(),
     };
-    if let Err(e) = db.create::<Option<DbAuthEvent>>("auth_event").content(event).await {
+    if let Err(e) = db
+        .create::<Option<DbAuthEvent>>("auth_event")
+        .content(event)
+        .await
+    {
         warn!(error = %e, "Failed to record refresh_reuse_detected auth_event");
     }
 }
@@ -263,10 +285,7 @@ pub async fn bump_token_version(db: &DbConn, user_id: &str) -> Result<(), Refres
     Ok(())
 }
 
-async fn load_by_hash(
-    db: &DbConn,
-    hashed: &str,
-) -> Result<Option<DbRefreshToken>, RefreshError> {
+async fn load_by_hash(db: &DbConn, hashed: &str) -> Result<Option<DbRefreshToken>, RefreshError> {
     let mut resp = db
         .query("SELECT * FROM refresh_token WHERE hashed_token = $h LIMIT 1")
         .bind(("h", hashed.to_string()))
