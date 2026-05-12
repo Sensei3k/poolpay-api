@@ -214,10 +214,22 @@ fn is_http_or_https_url(url: &str) -> bool {
         return false;
     };
     // Authority must be non-empty and must not start with `/` (which would
-    // mean `http:///path` — no host).
-    let host_end = rest.find('/').unwrap_or(rest.len());
+    // mean `http:///path` — no host). The authority slice runs from the end
+    // of `://` to the first of `/`, `?`, or `#` so query- or fragment-only
+    // inputs like `https://?x=1` and `https://#frag` are also rejected.
+    let host_end = rest
+        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .unwrap_or(rest.len());
     let authority = &rest[..host_end];
-    !authority.is_empty()
+    if authority.is_empty() {
+        return false;
+    }
+    // Reject userinfo-only authorities like `https://@` or `https://user@`
+    // where the host segment after the last `@` is empty.
+    if let Some((_userinfo, host)) = authority.rsplit_once('@') {
+        return !host.is_empty();
+    }
+    true
 }
 
 #[cfg(test)]
@@ -241,5 +253,31 @@ mod tests {
         assert!(!is_http_or_https_url(""));
         assert!(!is_http_or_https_url("https://"));
         assert!(!is_http_or_https_url("http:///path"));
+    }
+
+    #[test]
+    fn rejects_empty_authority_with_query_or_fragment() {
+        // Authority slice ends at `?` or `#`, so these have no host at all.
+        assert!(!is_http_or_https_url("https://?x=1"));
+        assert!(!is_http_or_https_url("https://#frag"));
+        assert!(!is_http_or_https_url("http://?x=1"));
+        assert!(!is_http_or_https_url("http://#frag"));
+    }
+
+    #[test]
+    fn rejects_userinfo_only_authority() {
+        // No host after the userinfo `@` separator.
+        assert!(!is_http_or_https_url("https://@"));
+        assert!(!is_http_or_https_url("https://user@"));
+        assert!(!is_http_or_https_url("https://user:pass@"));
+    }
+
+    #[test]
+    fn accepts_urls_with_query_or_fragment() {
+        assert!(is_http_or_https_url("https://example.com"));
+        assert!(is_http_or_https_url("https://example.com/path?x=1"));
+        assert!(is_http_or_https_url("https://example.com#frag"));
+        assert!(is_http_or_https_url("https://example.com?x=1"));
+        assert!(is_http_or_https_url("https://user@example.com/x.jpg"));
     }
 }
