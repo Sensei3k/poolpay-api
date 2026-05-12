@@ -928,6 +928,10 @@ fn receipt_content_from(
         // `None` on the patch means "keep prior value"; a `Some` overrides it.
         rejection_reason: patch.rejection_reason.or_else(|| row.rejection_reason.clone()),
         received_at: row.received_at.clone(),
+        // Server-stamped on the original insert and immutable thereafter —
+        // a status transition (confirm/reject/flag) must not move the row's
+        // place in the admin queue's ingest-order timeline.
+        ingested_at: row.ingested_at.clone(),
         created_at: row.created_at.clone(),
         updated_at,
         deleted_at: row.deleted_at.clone(),

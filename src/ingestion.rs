@@ -8,7 +8,7 @@
 
 use tracing::info;
 
-use crate::api::models::{AppError, EntityId, ReceiptContent, now_iso};
+use crate::api::models::{AppError, EntityId, ReceiptContent, now_iso, server_now};
 use crate::db::DbConn;
 use crate::models::ParsedReceipt;
 use crate::parser;
@@ -102,6 +102,15 @@ pub async fn ingest_receipt(
     };
 
     let now = now_iso();
+    // `ingested_at` is the single server-controlled timestamp on the row.
+    // Both webhook and Green API polling reach the DB through this function,
+    // so stamping here once means every receipt — regardless of which path
+    // produced it — agrees on format (UTC, second precision, `Z` suffix per
+    // `server_now`). Downstream `payment_date` derivation and admin-queue
+    // `ORDER BY ingested_at` rely on that uniformity for chronological
+    // lex-sort. `received_at` is left untouched so the bot's claimed
+    // observation time stays available for forensics.
+    let ingested_at = server_now();
     let content = ReceiptContent {
         whatsapp_message_id: input.message_id.to_string(),
         group_id: group_id.clone(),
@@ -119,6 +128,7 @@ pub async fn ingest_receipt(
         raw_image_url: input.raw_image_url,
         rejection_reason: None,
         received_at: input.received_at,
+        ingested_at: Some(ingested_at),
         created_at: now.clone(),
         updated_at: now,
         deleted_at: None,
