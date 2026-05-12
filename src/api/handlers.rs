@@ -944,8 +944,10 @@ fn receipt_content_from(
 /// The discriminator lives in `action` rather than the URL so the FE can
 /// queue a single optimistic mutation per row regardless of which
 /// terminal state the admin chose. `reason` is meaningful only for
-/// reject/flag and must not carry PII (caller contract; sanitise_reason only trims and length-caps, it does not detect or redact PII) (no phone, no member name, no
-/// OCR text) — the audit row writes a short non-PII tag derived from it.
+/// reject/flag; keeping it PII-free (no phone, no member name, no OCR
+/// text) is a caller contract, since `sanitise_reason` only trims and
+/// length-caps to 280 Unicode scalar values and does not detect or redact
+/// PII — the audit row writes a short non-PII tag derived from it.
 #[derive(Debug, Deserialize)]
 pub struct PatchReceiptRequest {
     pub action: Option<String>,
