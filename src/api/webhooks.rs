@@ -214,10 +214,12 @@ pub async fn whatsapp_webhook(
 /// care about (no `javascript:` / `data:` / `file:` / relative paths) is
 /// fully captured by checking the scheme prefix plus a non-empty authority.
 ///
-/// Lower-cased before comparison so `HTTPS://…` (legal per RFC 3986) is
-/// still accepted. Whitespace at either end is rejected — we trim before
-/// the prefix check so a leading space can't sneak a different scheme past
-/// the gate.
+/// Surrounding whitespace is trimmed before validation, and the input is
+/// lower-cased before comparison so `HTTPS://…` (legal per RFC 3986) is
+/// still accepted. Trimming first means a leading space can't sneak a
+/// different scheme past the prefix check. The webhook handler trims
+/// `raw_image_url` at the boundary and persists the canonical (trimmed)
+/// form, so this normalisation matches what callers actually store.
 fn is_http_or_https_url(url: &str) -> bool {
     let trimmed = url.trim();
     let lower = trimmed.to_ascii_lowercase();
