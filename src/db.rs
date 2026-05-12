@@ -194,7 +194,14 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 ///     member name). That is a handler-side invariant; the schema stays
 ///     open-ended so legacy rows remain readable.
 ///
-/// Two new indexes:
+/// Three indexes:
+///   - `receipt_whatsapp_message_id_unique` over `(whatsapp_message_id)` is
+///     the DB-side dedup gate. The ingest pipeline reads the existing row
+///     first as a fast path, but the read-then-write window leaves a TOCTOU
+///     race under concurrent webhook delivery (Green API retries, bot
+///     replays). The UNIQUE constraint closes that window: a colliding
+///     insert fails atomically and the handler maps the violation to the
+///     same `DuplicateMessage` outcome the pre-check returns.
 ///   - `receipt_sender_received` over `(sender_phone, received_at)` powers
 ///     the "show every receipt this phone has ever sent" admin-side history
 ///     lookups landing in the FE slice 5 modal.
@@ -213,6 +220,8 @@ async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::E
     db.query(
         "DEFINE FIELD IF NOT EXISTS raw_image_url ON receipt TYPE option<string>;
          DEFINE FIELD IF NOT EXISTS rejection_reason ON receipt TYPE option<string>;
+         DEFINE INDEX IF NOT EXISTS receipt_whatsapp_message_id_unique
+             ON receipt FIELDS whatsapp_message_id UNIQUE;
          DEFINE INDEX IF NOT EXISTS receipt_sender_received
              ON receipt FIELDS sender_phone, received_at;
          DEFINE INDEX IF NOT EXISTS receipt_status_received
