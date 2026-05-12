@@ -1206,12 +1206,20 @@ async fn confirm_receipt_inner(
     }
 
     let now = now_iso();
-    let payment_date = chrono::DateTime::parse_from_rfc3339(&receipt.received_at)
+    // Source payment_date from the server-stamped ingested_at, never the
+    // bot-supplied received_at. Otherwise a bot that lies about its clock
+    // controls the financial record's date — the HMAC ±60s envelope
+    // bounds the request, not the body field. Falls back to received_at
+    // only for legacy rows whose ingested_at predates the schema landing
+    // (the migration backfills, so this is belt-and-braces).
+    let payment_source = receipt
+        .ingested_at
+        .as_deref()
+        .unwrap_or(&receipt.received_at);
+    let payment_date = chrono::DateTime::parse_from_rfc3339(payment_source)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .map_err(|_| {
-            AppError::Conflict(format!(
-                "receipt {id} has an invalid received_at timestamp"
-            ))
+            AppError::Conflict(format!("receipt {id} has an invalid ingested_at timestamp"))
         })?;
 
     let payment_content = PaymentContent {
