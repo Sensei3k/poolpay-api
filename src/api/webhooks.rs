@@ -108,10 +108,25 @@ pub async fn whatsapp_webhook(
     // `message_id` is also the duplicate-detection key — refusing an empty
     // value here keeps a malformed bot post from silently coalescing every
     // unrelated message under "" in the index.
-    if payload.message_id.trim().is_empty()
-        || payload.chat_id.trim().is_empty()
-        || payload.sender_phone.trim().is_empty()
-    {
+    //
+    // Normalise once at the boundary: trim into owned locals and pass the
+    // canonical (trimmed) form into every downstream consumer — routing,
+    // duplicate detection, persistence, and FE rendering. Without this, a
+    // bot post with stray whitespace around `chatId` would silently miss
+    // the exact-match `group_link` lookup, and a persisted `rawImageUrl`
+    // with leading/trailing spaces would render as a broken link in the
+    // admin modal. `raw_image_url` keeps `None` distinct from `Some("")`
+    // so the absence-vs-empty contract documented on the field is
+    // preserved.
+    let chat_id = payload.chat_id.trim().to_string();
+    let sender_phone = payload.sender_phone.trim().to_string();
+    let message_id = payload.message_id.trim().to_string();
+    let raw_image_url = payload
+        .raw_image_url
+        .as_deref()
+        .map(|s| s.trim().to_string());
+
+    if message_id.is_empty() || chat_id.is_empty() || sender_phone.is_empty() {
         return Err(AppError::Unauthorized);
     }
 
@@ -143,7 +158,7 @@ pub async fn whatsapp_webhook(
     //
     // `None` is permitted: the field is documented as optional and a bot
     // running ahead of OCR may legitimately omit the screenshot URL.
-    if let Some(url) = payload.raw_image_url.as_deref() {
+    if let Some(url) = raw_image_url.as_deref() {
         if !is_http_or_https_url(url) {
             return Err(AppError::Unauthorized);
         }
@@ -156,19 +171,19 @@ pub async fn whatsapp_webhook(
     };
 
     let input = IngestionInput {
-        chat_id: &payload.chat_id,
-        sender_phone: &payload.sender_phone,
-        message_id: &payload.message_id,
+        chat_id: &chat_id,
+        sender_phone: &sender_phone,
+        message_id: &message_id,
         ocr_text: &payload.ocr_text,
         parsed: &parsed,
         received_at: parsed_received_at,
-        raw_image_url: payload.raw_image_url,
+        raw_image_url,
     };
 
     let outcome = ingestion::ingest_receipt(&db, input).await?;
     info!(
-        chat_id = %payload.chat_id,
-        message_id = %payload.message_id,
+        chat_id = %chat_id,
+        message_id = %message_id,
         ?outcome,
         "Webhook ingest outcome"
     );

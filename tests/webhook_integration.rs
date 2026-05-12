@@ -401,6 +401,80 @@ async fn webhook_missing_raw_image_url_still_ingests() {
 }
 
 #[tokio::test]
+async fn webhook_trims_whitespace_padded_fields_and_routes() {
+    // A bot post that ships `chatId` / `senderPhone` / `messageId` /
+    // `rawImageUrl` with surrounding whitespace must still route to the
+    // linked group, match the member by phone, and persist the canonical
+    // (trimmed) values. Without boundary normalisation, the padded
+    // `chatId` would miss the exact-match `group_link` lookup and the
+    // ingest would collapse to `not_linked` even though the underlying
+    // chat is wired up — exactly the kind of silent miss that hides for
+    // weeks in prod.
+    let app = webhook_app().await;
+    let body = serde_json::json!({
+        "chatId": format!("  {LINKED_CHAT_ID}  "),
+        "senderPhone": "  2348031234567  ",
+        "messageId": "  WAMSG-TRIMMED  ",
+        "ocrText": "NGN 10,000.00\nFrom: Tunde Bakare",
+        "parsed": {
+            "sender": "Tunde Bakare",
+            "bank": "GTBank",
+            "amount": "10,000"
+        },
+        "receivedAt": "2026-03-10T10:00:00+00:00",
+        "rawImageUrl": "  https://example.com/receipt.jpg  "
+    });
+
+    let resp = call(app.clone(), signed_request(&body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let webhook_resp: serde_json::Value = json_body(resp).await;
+    assert_eq!(
+        webhook_resp["outcome"], "ingested",
+        "padded chatId must still route to the linked group (trim before lookup)"
+    );
+    assert_eq!(
+        webhook_resp["memberMatched"], true,
+        "padded senderPhone must still match the fixture member (trim before phone match)"
+    );
+    let receipt_id = webhook_resp["receiptId"]
+        .as_str()
+        .expect("ingested response must carry receiptId")
+        .to_string();
+
+    // Confirm the row persisted with canonical (trimmed) identifier
+    // values. `/api/receipts` exposes `chatId`, `senderPhone`, and
+    // `whatsappMessageId` to anonymous callers; `rawImageUrl` is admin-
+    // gated and exercised in unit coverage of the trim path itself.
+    let list = call(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/receipts?limit=200")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list.status(), StatusCode::OK);
+    let receipts: Vec<serde_json::Value> = json_body(list).await;
+    let row = receipts
+        .iter()
+        .find(|r| r["id"] == receipt_id)
+        .expect("ingested receipt must appear in /api/receipts");
+    assert_eq!(
+        row["whatsappMessageId"], "WAMSG-TRIMMED",
+        "persisted whatsappMessageId must be trimmed"
+    );
+    assert_eq!(
+        row["chatId"], LINKED_CHAT_ID,
+        "persisted chatId must be trimmed"
+    );
+    assert_eq!(
+        row["senderPhone"], "2348031234567",
+        "persisted senderPhone must be trimmed"
+    );
+}
+
+#[tokio::test]
 async fn webhook_persists_receipt_row_visible_to_admin_list() {
     // End-to-end persistence check: a successful webhook ingest must show
     // up in `GET /api/receipts`. Confirms the receipt row materialises
