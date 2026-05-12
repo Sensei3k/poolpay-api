@@ -9,7 +9,7 @@
 use tracing::info;
 
 use crate::api::models::{AppError, EntityId, ReceiptContent, now_iso};
-use crate::db::DbConn;
+use crate::db::{DbConn, is_unique_constraint_error};
 use crate::models::ParsedReceipt;
 use crate::parser;
 use crate::routing;
@@ -128,8 +128,26 @@ pub async fn ingest_receipt(
     };
 
     // `create` returns the inserted row(s) so we can surface the generated id.
+    //
+    // The earlier `find_receipt_by_message_id` pre-check is a fast path, not a
+    // gate: two webhook deliveries of the same message id can both observe
+    // "no row" before either insert lands. The DB-side UNIQUE index on
+    // `receipt.whatsapp_message_id` closes that TOCTOU window, so collapse the
+    // constraint violation here to the same `DuplicateMessage` outcome the
+    // pre-check returns. Callers (and the WhatsApp reply layer) then see a
+    // single, consistent dedup signal regardless of which path caught it.
     let created: Option<crate::api::models::DbReceipt> =
-        db.create("receipt").content(content).await?;
+        match db.create("receipt").content(content).await {
+            Ok(row) => row,
+            Err(e) if is_unique_constraint_error(&e.to_string()) => {
+                info!(
+                    message_id = input.message_id,
+                    "Ingestion skipped: unique-constraint violation on whatsapp_message_id (concurrent duplicate)"
+                );
+                return Ok(IngestionOutcome::DuplicateMessage);
+            }
+            Err(e) => return Err(e.into()),
+        };
     let receipt_id = created
         .map(|r| crate::api::models::record_id_to_string(r.id))
         .ok_or_else(|| AppError::Internal("Failed to persist receipt".to_string()))?;
