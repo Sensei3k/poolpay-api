@@ -183,9 +183,9 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     Ok(())
 }
 
-/// Slice 5 additions to the receipt table.
+/// Slice 5 + server-stamped-timestamp additions to the receipt table.
 ///
-/// Two new optional fields:
+/// Three optional fields:
 ///   - `raw_image_url`: direct URL to the WhatsApp screenshot, captured by
 ///     the bot and persisted so admins can review the original artefact
 ///     during confirm/reject.
@@ -193,16 +193,37 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 ///     or flags a receipt. Must NOT contain PII (sender phone, OCR text,
 ///     member name). That is a handler-side invariant; the schema stays
 ///     open-ended so legacy rows remain readable.
+///   - `ingested_at`: server-stamped wall-clock timestamp recorded at the
+///     moment the API persists the row. Treated as the source of truth for
+///     financial dates and admin-queue ordering — `received_at` is supplied
+///     by the bot and therefore controllable by an attacker who can spoof
+///     a webhook payload. `received_at` stays for forensics; financial and
+///     ordering paths must read `ingested_at` instead. Stored as
+///     `option<string>` rather than `string` so the schema migration is
+///     compatible with rows written by older binaries during a rolling
+///     deploy and with the fixture/test paths that hadn't yet been
+///     updated when this column landed. The application-layer contract
+///     (`ingestion::ingest_receipt`) always stamps it on insert.
 ///
-/// Two new indexes:
+/// Existing-row backfill: any row pre-dating this migration gets
+/// `ingested_at = received_at` once. The substitute is deterministic (we
+/// have no real ingest time on file for those rows) and idempotent — the
+/// `WHERE ingested_at IS NONE` guard skips rows already populated by the
+/// application path on every subsequent boot, so re-running the migration
+/// is a no-op.
+///
+/// Three indexes:
 ///   - `receipt_sender_received` over `(sender_phone, received_at)` powers
 ///     the "show every receipt this phone has ever sent" admin-side history
 ///     lookups landing in the FE slice 5 modal.
-///   - `receipt_status_received` over `(status, received_at)` powers the
+///   - `receipt_status_received` over `(status, received_at)` is retained
+///     for forensics queries that need bot-clock chronology (e.g. comparing
+///     what the bot claims it observed vs what the server actually stored).
+///   - `receipt_status_ingested` over `(status, ingested_at)` powers the
 ///     admin queue's "filtered by status, oldest first" default sort (FIFO
-///     so the backlog drains in arrival order) without a table scan as
-///     receipt volume grows. `GET /api/receipts` issues
-///     `ORDER BY received_at ASC, id ASC` — keep the index and the handler
+///     so the backlog drains in server-arrival order) without a table scan
+///     as receipt volume grows. `GET /api/receipts` issues
+///     `ORDER BY ingested_at ASC, id ASC` — keep the index and the handler
 ///     in lock-step if the contract ever flips to newest-first.
 ///
 /// The receipt table itself stays SCHEMALESS so existing fixtures and
@@ -213,10 +234,14 @@ async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::E
     db.query(
         "DEFINE FIELD IF NOT EXISTS raw_image_url ON receipt TYPE option<string>;
          DEFINE FIELD IF NOT EXISTS rejection_reason ON receipt TYPE option<string>;
+         DEFINE FIELD IF NOT EXISTS ingested_at ON receipt TYPE option<string>;
+         UPDATE receipt SET ingested_at = received_at WHERE ingested_at IS NONE;
          DEFINE INDEX IF NOT EXISTS receipt_sender_received
              ON receipt FIELDS sender_phone, received_at;
          DEFINE INDEX IF NOT EXISTS receipt_status_received
-             ON receipt FIELDS status, received_at;",
+             ON receipt FIELDS status, received_at;
+         DEFINE INDEX IF NOT EXISTS receipt_status_ingested
+             ON receipt FIELDS status, ingested_at;",
     )
     .await?
     .check()?;
