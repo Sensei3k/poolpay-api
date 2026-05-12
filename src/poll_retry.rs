@@ -183,3 +183,156 @@ impl Default for AttemptTracker {
         Self::with_defaults()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper that asserts the (n-1)th failure for `receipt_id` returns
+    /// `Skip { attempt }` and the boundary failure returns `AckGiveUp`.
+    /// Centralises the canonical retry-progression assertion used by
+    /// several tests below.
+    fn assert_skip_then_give_up(tracker: &mut AttemptTracker, receipt_id: u64) {
+        let max = tracker.max_attempts();
+        for attempt in 1..=max {
+            assert_eq!(
+                tracker.record_failure(receipt_id),
+                RetryDecision::Skip { attempt },
+                "attempt {attempt} should be Skip",
+            );
+        }
+        assert_eq!(
+            tracker.record_failure(receipt_id),
+            RetryDecision::AckGiveUp,
+            "attempt {} should be AckGiveUp",
+            max + 1,
+        );
+    }
+
+    #[test]
+    fn skip_three_times_then_give_up_on_attempt_four() {
+        let mut tracker = AttemptTracker::new(3, Duration::from_secs(60), 16);
+        assert_skip_then_give_up(&mut tracker, 42);
+    }
+
+    #[test]
+    fn give_up_clears_entry_so_subsequent_failures_start_fresh() {
+        let mut tracker = AttemptTracker::new(2, Duration::from_secs(60), 16);
+        // Burn through the budget.
+        assert_eq!(
+            tracker.record_failure(7),
+            RetryDecision::Skip { attempt: 1 }
+        );
+        assert_eq!(
+            tracker.record_failure(7),
+            RetryDecision::Skip { attempt: 2 }
+        );
+        assert_eq!(tracker.record_failure(7), RetryDecision::AckGiveUp);
+        // After give-up the entry is gone, so a new failure starts at attempt 1.
+        assert_eq!(
+            tracker.record_failure(7),
+            RetryDecision::Skip { attempt: 1 }
+        );
+    }
+
+    #[test]
+    fn record_success_resets_attempt_count() {
+        let mut tracker = AttemptTracker::new(3, Duration::from_secs(60), 16);
+        assert_eq!(
+            tracker.record_failure(99),
+            RetryDecision::Skip { attempt: 1 }
+        );
+        assert_eq!(
+            tracker.record_failure(99),
+            RetryDecision::Skip { attempt: 2 }
+        );
+        tracker.record_success(99);
+        assert!(tracker.is_empty(), "success must clear the entry");
+        assert_eq!(
+            tracker.record_failure(99),
+            RetryDecision::Skip { attempt: 1 }
+        );
+    }
+
+    #[test]
+    fn distinct_receipts_track_independently() {
+        let mut tracker = AttemptTracker::new(2, Duration::from_secs(60), 16);
+        assert_eq!(
+            tracker.record_failure(1),
+            RetryDecision::Skip { attempt: 1 }
+        );
+        assert_eq!(
+            tracker.record_failure(2),
+            RetryDecision::Skip { attempt: 1 }
+        );
+        assert_eq!(
+            tracker.record_failure(1),
+            RetryDecision::Skip { attempt: 2 }
+        );
+        assert_eq!(tracker.record_failure(1), RetryDecision::AckGiveUp);
+        // Receipt 2 is unaffected by receipt 1's give-up.
+        assert_eq!(
+            tracker.record_failure(2),
+            RetryDecision::Skip { attempt: 2 }
+        );
+    }
+
+    #[test]
+    fn ttl_eviction_resets_an_entry_that_outlived_its_window() {
+        let ttl = Duration::from_secs(60);
+        let mut tracker = AttemptTracker::new(3, ttl, 16);
+        let t0 = Instant::now();
+
+        assert_eq!(
+            tracker.record_failure_at(11, t0),
+            RetryDecision::Skip { attempt: 1 }
+        );
+        assert_eq!(
+            tracker.record_failure_at(11, t0 + Duration::from_secs(30)),
+            RetryDecision::Skip { attempt: 2 },
+            "still within TTL — counter persists"
+        );
+        // Push past the TTL boundary: the prior entry must be evicted before
+        // the new failure is recorded, so the attempt counter resets to 1.
+        let after_ttl = t0 + ttl + Duration::from_secs(1);
+        assert_eq!(
+            tracker.record_failure_at(11, after_ttl),
+            RetryDecision::Skip { attempt: 1 },
+            "TTL elapsed — entry must be evicted and the counter must reset"
+        );
+    }
+
+    #[test]
+    fn capacity_eviction_drops_the_oldest_entry_when_full() {
+        let mut tracker = AttemptTracker::new(3, Duration::from_secs(3600), 2);
+        let t0 = Instant::now();
+
+        // Fill to capacity with two distinct receipts.
+        tracker.record_failure_at(100, t0);
+        tracker.record_failure_at(200, t0 + Duration::from_millis(1));
+        assert_eq!(tracker.len(), 2);
+
+        // Inserting a third receipt must evict the oldest (100).
+        tracker.record_failure_at(300, t0 + Duration::from_millis(2));
+        assert_eq!(tracker.len(), 2);
+
+        // Receipt 100 was evicted, so its next failure starts at attempt 1.
+        assert_eq!(
+            tracker.record_failure_at(100, t0 + Duration::from_millis(3)),
+            RetryDecision::Skip { attempt: 1 }
+        );
+    }
+
+    #[test]
+    fn new_clamps_zero_max_attempts_to_one() {
+        // A tracker that gives up on the first attempt would be no better
+        // than the old always-ack behaviour. The constructor must clamp.
+        let mut tracker = AttemptTracker::new(0, Duration::from_secs(60), 16);
+        assert_eq!(tracker.max_attempts(), 1);
+        assert_eq!(
+            tracker.record_failure(1),
+            RetryDecision::Skip { attempt: 1 }
+        );
+        assert_eq!(tracker.record_failure(1), RetryDecision::AckGiveUp);
+    }
+}
