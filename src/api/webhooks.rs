@@ -137,12 +137,12 @@ pub async fn whatsapp_webhook(
     // Validate at the boundary and collapse the failure to 401, consistent
     // with the opaque-failure rule above.
     //
-    // We also normalise the timestamp to a canonical UTC RFC3339 string before
-    // persisting. The DB stores `received_at` as a string and `/api/receipts`
-    // orders by it (`ORDER BY received_at ASC`), so a mix of offsets like
-    // `…+01:00` and `…+00:00` would sort lexicographically — breaking
-    // absolute-time ordering of the admin queue. Converting to UTC makes the
-    // lexicographic sort equivalent to a chronological sort.
+    // We still normalise the timestamp to a canonical UTC RFC3339 string
+    // before persisting. The admin queue now orders on the server-stamped
+    // `ingested_at` (see `/api/receipts` in handlers.rs), so this no longer
+    // protects sort order — but consistent UTC storage keeps `received_at`
+    // useful as a forensic field and lets clients compare the bot-supplied
+    // arrival time across receipts without juggling offsets.
     let parsed_received_at =
         chrono::DateTime::parse_from_rfc3339(&payload.received_at)
             .map_err(|_| AppError::Unauthorized)?
