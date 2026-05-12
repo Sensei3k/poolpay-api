@@ -228,6 +228,14 @@ async fn main() {
                                                         if let Some(reply) =
                                                             replies::format_reply(&outcome, &parsed)
                                                         {
+                                                            // The receipt row is already persisted at this point;
+                                                            // failing to send the WhatsApp quoted reply is a UX
+                                                            // hiccup, not an ingest failure. Treat it as non-fatal so
+                                                            // we still ack the Green API notification and do not
+                                                            // burn redelivery attempts on a row that already exists.
+                                                            // The error is logged with `error!` so it is still
+                                                            // visible to operators; a future metric counter can
+                                                            // page on the rate.
                                                             match whatsapp::send_quoted_message(
                                                                 &client,
                                                                 &instance_id,
@@ -239,10 +247,11 @@ async fn main() {
                                                             .await
                                                             {
                                                                 Ok(_) => info!(chat_id = cid, "Reply sent"),
-                                                                Err(e) => {
-                                                                    error!(error = %e, "Failed to send reply");
-                                                                    processing_ok = false;
-                                                                }
+                                                                Err(e) => error!(
+                                                                    error = %e,
+                                                                    chat_id = cid,
+                                                                    "Failed to send reply (non-fatal; receipt already ingested)"
+                                                                ),
                                                             }
                                                         }
                                                     }
