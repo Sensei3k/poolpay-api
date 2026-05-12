@@ -1,5 +1,6 @@
 use poolpay::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use poolpay::auth::rate_limit::RateLimitConfig;
+use poolpay::poll_retry::{AttemptTracker, RetryDecision};
 use poolpay::{api, auth, db, extractor, ingestion, parser, replies, whatsapp};
 use poolpay::api::models::now_iso;
 use std::sync::Arc;
@@ -148,6 +149,14 @@ async fn main() {
     // Kept in the main thread: the error type (Box<dyn Error>) is not Send, so
     // the loop cannot be moved into tokio::spawn.
     let client = reqwest::Client::new();
+
+    // Tracks consecutive ingest failures per `receiptId` so a transient
+    // SurrealDB blip does not silently drop a user receipt: we skip
+    // `deleteNotification` while the budget allows, letting Green API
+    // redeliver, and ack-with-discard once the budget is exhausted. See
+    // `poll_retry` for the memory bounds (TTL + hard capacity).
+    let mut retry_tracker = AttemptTracker::with_defaults();
+
     loop {
         match whatsapp::receive_notification(&client, &instance_id, &api_token).await {
             Ok(Some(notification)) => {
@@ -265,24 +274,46 @@ async fn main() {
                     }
                 }
 
-                // Always acknowledge the notification to prevent infinite reprocessing.
-                // If processing failed, log a clear discard notice so nothing is silent.
-                if !processing_ok {
-                    warn!(
-                        receipt_id = notification.receipt_id,
-                        "Discarding receipt after processing failure — will not retry"
-                    );
-                }
+                // Decide whether to ack the notification. On success we ack
+                // unconditionally. On failure we consult `retry_tracker` so a
+                // transient ingest error lets Green API redeliver the message
+                // (within the retry budget) instead of silently dropping it.
+                let should_ack = if processing_ok {
+                    retry_tracker.record_success(notification.receipt_id);
+                    true
+                } else {
+                    match retry_tracker.record_failure(notification.receipt_id) {
+                        RetryDecision::Skip { attempt } => {
+                            warn!(
+                                receipt_id = notification.receipt_id,
+                                attempt,
+                                max_attempts = retry_tracker.max_attempts(),
+                                "Ingest failed; skipping ack so Green API redelivers"
+                            );
+                            false
+                        }
+                        RetryDecision::AckGiveUp => {
+                            error!(
+                                receipt_id = notification.receipt_id,
+                                max_attempts = retry_tracker.max_attempts(),
+                                "Retry budget exhausted — discarding receipt and acking notification"
+                            );
+                            true
+                        }
+                    }
+                };
 
-                if let Err(e) = whatsapp::delete_notification(
-                    &client,
-                    &instance_id,
-                    &api_token,
-                    notification.receipt_id,
-                )
-                .await
-                {
-                    warn!(error = %e, "Failed to delete notification");
+                if should_ack {
+                    if let Err(e) = whatsapp::delete_notification(
+                        &client,
+                        &instance_id,
+                        &api_token,
+                        notification.receipt_id,
+                    )
+                    .await
+                    {
+                        warn!(error = %e, "Failed to delete notification");
+                    }
                 }
             }
 
