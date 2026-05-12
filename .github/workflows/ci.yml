@@ -17,6 +17,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system libraries
+        # tesseract / leptonica-sys link against system libraries that
+        # aren't preinstalled on ubuntu-latest. clang is needed for the
+        # C++ bindings of librocksdb-sys (transitive via surrealdb).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            libleptonica-dev \
+            libtesseract-dev \
+            libclang-dev
+
       - name: Install Rust toolchain
         # Respects the version + components pinned in rust-toolchain.toml,
         # so the CI compiler always matches local dev.
