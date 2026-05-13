@@ -3151,7 +3151,8 @@ async fn confirm_receipt_sources_payment_date_from_ingested_at_not_received_at()
     let resp = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/confirm")).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let payments: Vec<serde_json::Value> = json_body(call(app, get("/api/payments")).await).await;
+    let payments: Vec<serde_json::Value> =
+        json_body(call(app, get("/api/payments?limit=200")).await).await;
     let new_payment = payments
         .iter()
         .find(|p| p["reference"] == "3EB0C123ABCD4567EF89")
