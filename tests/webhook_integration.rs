@@ -299,6 +299,91 @@ async fn webhook_duplicate_message_id_is_idempotent() {
 }
 
 #[tokio::test]
+async fn webhook_concurrent_duplicate_deliveries_persist_single_row() {
+    // TOCTOU regression guard. The sequential-duplicate test above exercises
+    // the fast-path pre-check (`find_receipt_by_message_id`); this one fires
+    // two identical webhook deliveries in parallel so both reads observe "no
+    // row" before either insert lands. Without the DB-side UNIQUE index on
+    // `receipt.whatsapp_message_id`, both inserts succeed and the admin
+    // queue ends up with two pending rows for the same message. With the
+    // index in place, exactly one insert wins, the other collapses to the
+    // `Duplicate` outcome, and both clients still see a 200.
+    let app = webhook_app().await;
+    let body = payload_matching_member("WAMSG-CONCURRENT");
+    let req1 = signed_request(&body);
+    let req2 = signed_request(&body);
+
+    let (resp1, resp2) = tokio::join!(call(app.clone(), req1), call(app.clone(), req2),);
+
+    assert_eq!(
+        resp1.status(),
+        StatusCode::OK,
+        "first request must return 200"
+    );
+    assert_eq!(
+        resp2.status(),
+        StatusCode::OK,
+        "second request must return 200"
+    );
+
+    let body1: serde_json::Value = json_body(resp1).await;
+    let body2: serde_json::Value = json_body(resp2).await;
+
+    // Exactly one side ingests; the other collapses to the duplicate outcome.
+    // Ordering is non-deterministic under `join!`, so accept either pairing.
+    let outcomes = [
+        body1["outcome"].as_str().unwrap_or(""),
+        body2["outcome"].as_str().unwrap_or(""),
+    ];
+    let ingested = outcomes.iter().filter(|o| **o == "ingested").count();
+    let duplicate = outcomes.iter().filter(|o| **o == "duplicate").count();
+    assert_eq!(
+        ingested, 1,
+        "exactly one concurrent webhook delivery must ingest (outcomes={outcomes:?})"
+    );
+    assert_eq!(
+        duplicate, 1,
+        "the other concurrent delivery must collapse to duplicate (outcomes={outcomes:?})"
+    );
+
+    // The duplicate side must match the existing duplicate response shape —
+    // no echoed receipt id, mirroring `webhook_duplicate_message_id_is_idempotent`.
+    let duplicate_body = if body1["outcome"] == "duplicate" {
+        &body1
+    } else {
+        &body2
+    };
+    assert!(
+        duplicate_body["receiptId"].is_null(),
+        "concurrent duplicate response must not echo a receiptId (body={duplicate_body})"
+    );
+
+    // And exactly one row must persist for the message id — the whole point
+    // of the unique index is that the second insert never lands.
+    let list = call(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/receipts?limit=200")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list.status(), StatusCode::OK);
+    let receipts: Vec<serde_json::Value> = json_body(list).await;
+    let persisted: Vec<_> = receipts
+        .iter()
+        .filter(|r| r["whatsappMessageId"] == "WAMSG-CONCURRENT")
+        .collect();
+    assert_eq!(
+        persisted.len(),
+        1,
+        "exactly one receipt row must persist for the duplicate message id (found {})",
+        persisted.len()
+    );
+}
+
+#[tokio::test]
 async fn webhook_sender_phone_matches_member() {
     let app = webhook_app().await;
     let body = payload_matching_member("WAMSG-MATCH-MEMBER");
