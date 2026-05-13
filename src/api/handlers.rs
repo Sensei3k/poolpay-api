@@ -1243,15 +1243,18 @@ async fn confirm_receipt_inner(
     }
 
     let now = now_iso();
-    // Source payment_date from the server-stamped ingested_at, never the
+    // Source payment_date from a server-owned timestamp only — never the
     // bot-supplied received_at. Otherwise a bot that lies about its clock
-    // controls the financial record's date — the HMAC ±60s envelope
-    // bounds the request, not the body field. Falls back to received_at
-    // only for legacy rows whose ingested_at predates the schema landing
-    // (the migration backfills, so this is belt-and-braces).
+    // controls the financial record's date, and the HMAC ±60s envelope
+    // bounds the request, not the body field. Prefer the server-stamped
+    // ingested_at (set by the application path on insert); fall back to
+    // created_at for legacy rows whose ingested_at predates the schema
+    // landing — created_at is also server-stamped (see `let now = ...`
+    // sites that build ReceiptContent), so the fallback preserves the
+    // bot-clock-independence property.
     let (payment_source, source_field): (&str, &str) = match receipt.ingested_at.as_deref() {
         Some(s) => (s, "ingested_at"),
-        None => (receipt.received_at.as_str(), "received_at"),
+        None => (receipt.created_at.as_str(), "created_at"),
     };
     let payment_date = chrono::DateTime::parse_from_rfc3339(payment_source)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
