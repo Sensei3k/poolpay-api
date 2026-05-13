@@ -5,6 +5,7 @@ pub mod extractor;
 pub mod ingestion;
 pub mod models;
 pub mod parser;
+pub mod poll_retry;
 pub mod replies;
 pub mod routing;
 pub mod whatsapp;

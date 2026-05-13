@@ -1,6 +1,7 @@
 use poolpay::api::models::now_iso;
 use poolpay::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use poolpay::auth::rate_limit::RateLimitConfig;
+use poolpay::poll_retry::{AttemptTracker, RetryDecision};
 use poolpay::{api, auth, db, extractor, ingestion, parser, replies, whatsapp};
 use std::sync::Arc;
 
@@ -150,6 +151,15 @@ async fn main() {
     // Kept in the main thread: the error type (Box<dyn Error>) is not Send, so
     // the loop cannot be moved into tokio::spawn.
     let client = reqwest::Client::new();
+
+    // Tracks consecutive processing failures (download / OCR / ingest)
+    // per `receiptId` so a transient hiccup does not silently drop a user
+    // receipt: we skip `deleteNotification` while the budget allows,
+    // letting Green API redeliver, and ack-with-discard once the budget
+    // is exhausted. See `poll_retry` for the memory bounds (TTL + hard
+    // capacity).
+    let mut retry_tracker = AttemptTracker::with_defaults();
+
     loop {
         match whatsapp::receive_notification(&client, &instance_id, &api_token).await {
             Ok(Some(notification)) => {
@@ -220,6 +230,16 @@ async fn main() {
                                                         if let Some(reply) =
                                                             replies::format_reply(&outcome, &parsed)
                                                         {
+                                                            // The ingestion outcome is already decided at this point
+                                                            // (and the receipt row is persisted when applicable —
+                                                            // e.g. NotLinked still returns a reply without persisting).
+                                                            // Failing to send the WhatsApp quoted reply is a UX
+                                                            // hiccup, not a processing failure. Treat it as non-fatal
+                                                            // so we still ack the Green API notification and do not
+                                                            // burn redelivery attempts on a receipt whose outcome is
+                                                            // already settled. The error is logged with `error!` so
+                                                            // it is still visible to operators; a future metric
+                                                            // counter can page on the rate.
                                                             match whatsapp::send_quoted_message(
                                                                 &client,
                                                                 &instance_id,
@@ -231,10 +251,11 @@ async fn main() {
                                                             .await
                                                             {
                                                                 Ok(_) => info!(chat_id = cid, "Reply sent"),
-                                                                Err(e) => {
-                                                                    error!(error = %e, "Failed to send reply");
-                                                                    processing_ok = false;
-                                                                }
+                                                                Err(e) => error!(
+                                                                    error = %e,
+                                                                    chat_id = cid,
+                                                                    "Failed to send reply (non-fatal; processing already completed — outcome decided, receipt persisted when applicable)"
+                                                                ),
                                                             }
                                                         }
                                                     }
@@ -266,24 +287,72 @@ async fn main() {
                     }
                 }
 
-                // Always acknowledge the notification to prevent infinite reprocessing.
-                // If processing failed, log a clear discard notice so nothing is silent.
-                if !processing_ok {
-                    warn!(
-                        receipt_id = notification.receipt_id,
-                        "Discarding receipt after processing failure — will not retry"
-                    );
-                }
+                // Decide whether to ack the notification. On success we ack
+                // unconditionally. On failure we consult `retry_tracker` so a
+                // transient processing failure (download / OCR / ingest) lets
+                // Green API redeliver the message (within the retry budget)
+                // instead of silently dropping it.
+                let should_ack = if processing_ok {
+                    true
+                } else {
+                    match retry_tracker.record_failure(notification.receipt_id) {
+                        RetryDecision::Skip { attempt } => {
+                            warn!(
+                                receipt_id = notification.receipt_id,
+                                attempt,
+                                max_attempts = retry_tracker.max_attempts(),
+                                "Processing failed (download / OCR / ingest); skipping ack so Green API redelivers"
+                            );
+                            false
+                        }
+                        RetryDecision::AckGiveUp => {
+                            error!(
+                                receipt_id = notification.receipt_id,
+                                max_attempts = retry_tracker.max_attempts(),
+                                "Retry budget exhausted — discarding receipt and acking notification"
+                            );
+                            true
+                        }
+                    }
+                };
 
-                if let Err(e) = whatsapp::delete_notification(
-                    &client,
-                    &instance_id,
-                    &api_token,
-                    notification.receipt_id,
-                )
-                .await
-                {
-                    warn!(error = %e, "Failed to delete notification");
+                if should_ack {
+                    match whatsapp::delete_notification(
+                        &client,
+                        &instance_id,
+                        &api_token,
+                        notification.receipt_id,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            // Only clear the retry state after Green API has
+                            // actually acked the notification. If the ack
+                            // request itself failed we want the tracker entry
+                            // to survive so the next redelivery continues
+                            // counting against the existing budget instead of
+                            // starting fresh at attempt 1. Both the success
+                            // path and the `AckGiveUp` path clear here:
+                            // `record_success` for happy-path processing,
+                            // `record_acked` for the terminal give-up state
+                            // (which `record_failure` deliberately leaves in
+                            // place until the ack is confirmed).
+                            if processing_ok {
+                                retry_tracker.record_success(notification.receipt_id);
+                            } else {
+                                retry_tracker.record_acked(notification.receipt_id);
+                            }
+                        }
+                        Err(e) => {
+                            // Ack failed — leave the tracker entry alone.
+                            // For the `AckGiveUp` branch this means the next
+                            // Green API redelivery keeps returning
+                            // `AckGiveUp` without restarting the budget; for
+                            // the success branch there is no tracker state
+                            // to worry about.
+                            warn!(error = %e, "Failed to delete notification");
+                        }
+                    }
                 }
             }
 
