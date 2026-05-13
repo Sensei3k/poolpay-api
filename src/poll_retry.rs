@@ -176,8 +176,14 @@ impl AttemptTracker {
 
     fn evict_stale_at(&mut self, now: Instant) {
         let ttl = self.ttl;
+        // `saturating_duration_since` rather than `duration_since`: if `now`
+        // is earlier than `entry.last_seen` — e.g. an out-of-order test
+        // instant or a monotonic clock that briefly went backwards on
+        // resume from sleep — `duration_since` would panic. Saturating to
+        // zero elapsed keeps the entry alive, which matches the intent of
+        // the inactivity window.
         self.inner
-            .retain(|_, entry| now.duration_since(entry.last_seen) < ttl);
+            .retain(|_, entry| now.saturating_duration_since(entry.last_seen) < ttl);
     }
 
     fn evict_oldest(&mut self) {
