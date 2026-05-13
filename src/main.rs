@@ -297,7 +297,7 @@ async fn main() {
                                 receipt_id = notification.receipt_id,
                                 attempt,
                                 max_attempts = retry_tracker.max_attempts(),
-                                "Ingest failed; skipping ack so Green API redelivers"
+                                "Processing failed (download / OCR / ingest); skipping ack so Green API redelivers"
                             );
                             false
                         }
