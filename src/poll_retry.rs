@@ -76,13 +76,14 @@ pub struct AttemptTracker {
 
 impl AttemptTracker {
     /// Construct a tracker with explicit bounds. `max_attempts` is clamped
-    /// to at least 1 (a tracker that gives up on the first attempt would
-    /// be no better than the old always-ack behaviour); `capacity` is
-    /// clamped to at least 1 for the same reason.
+    /// to at least 2: with the give-up boundary set to `attempts ==
+    /// max_attempts`, a value of 1 would discard on the first failure
+    /// and revert to the old always-ack behaviour. `capacity` is clamped
+    /// to at least 1 for the same kind of guard.
     pub fn new(max_attempts: u32, ttl: Duration, capacity: usize) -> Self {
         Self {
             inner: HashMap::new(),
-            max_attempts: max_attempts.max(1),
+            max_attempts: max_attempts.max(2),
             ttl,
             capacity: capacity.max(1),
         }
@@ -129,7 +130,7 @@ impl AttemptTracker {
         });
         entry.attempts += 1;
 
-        if entry.attempts <= self.max_attempts {
+        if entry.attempts < self.max_attempts {
             RetryDecision::Skip {
                 attempt: entry.attempts,
             }
@@ -188,13 +189,13 @@ impl Default for AttemptTracker {
 mod tests {
     use super::*;
 
-    /// Helper that asserts the (n-1)th failure for `receipt_id` returns
-    /// `Skip { attempt }` and the boundary failure returns `AckGiveUp`.
-    /// Centralises the canonical retry-progression assertion used by
-    /// several tests below.
+    /// Helper that asserts the first `max - 1` failures for `receipt_id`
+    /// return `Skip { attempt }` and the `max`th failure returns
+    /// `AckGiveUp`. Centralises the canonical retry-progression
+    /// assertion used by several tests below.
     fn assert_skip_then_give_up(tracker: &mut AttemptTracker, receipt_id: u64) {
         let max = tracker.max_attempts();
-        for attempt in 1..=max {
+        for attempt in 1..max {
             assert_eq!(
                 tracker.record_failure(receipt_id),
                 RetryDecision::Skip { attempt },
@@ -204,20 +205,19 @@ mod tests {
         assert_eq!(
             tracker.record_failure(receipt_id),
             RetryDecision::AckGiveUp,
-            "attempt {} should be AckGiveUp",
-            max + 1,
+            "attempt {max} should be AckGiveUp",
         );
     }
 
     #[test]
-    fn skip_three_times_then_give_up_on_attempt_four() {
+    fn skip_twice_then_give_up_on_attempt_three() {
         let mut tracker = AttemptTracker::new(3, Duration::from_secs(60), 16);
         assert_skip_then_give_up(&mut tracker, 42);
     }
 
     #[test]
     fn give_up_clears_entry_so_subsequent_failures_start_fresh() {
-        let mut tracker = AttemptTracker::new(2, Duration::from_secs(60), 16);
+        let mut tracker = AttemptTracker::new(3, Duration::from_secs(60), 16);
         // Burn through the budget.
         assert_eq!(
             tracker.record_failure(7),
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn distinct_receipts_track_independently() {
-        let mut tracker = AttemptTracker::new(2, Duration::from_secs(60), 16);
+        let mut tracker = AttemptTracker::new(3, Duration::from_secs(60), 16);
         assert_eq!(
             tracker.record_failure(1),
             RetryDecision::Skip { attempt: 1 }
@@ -324,11 +324,13 @@ mod tests {
     }
 
     #[test]
-    fn new_clamps_zero_max_attempts_to_one() {
+    fn new_clamps_zero_max_attempts_to_two() {
         // A tracker that gives up on the first attempt would be no better
-        // than the old always-ack behaviour. The constructor must clamp.
+        // than the old always-ack behaviour. With the give-up boundary
+        // at `attempts == max_attempts`, the smallest useful value is 2:
+        // one redelivery, then ack.
         let mut tracker = AttemptTracker::new(0, Duration::from_secs(60), 16);
-        assert_eq!(tracker.max_attempts(), 1);
+        assert_eq!(tracker.max_attempts(), 2);
         assert_eq!(
             tracker.record_failure(1),
             RetryDecision::Skip { attempt: 1 }
