@@ -254,7 +254,7 @@ async fn main() {
                                                                 Err(e) => error!(
                                                                     error = %e,
                                                                     chat_id = cid,
-                                                                    "Failed to send reply (non-fatal; receipt already ingested)"
+                                                                    "Failed to send reply (non-fatal; processing already completed — outcome decided, receipt persisted when applicable)"
                                                                 ),
                                                             }
                                                         }
