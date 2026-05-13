@@ -3,9 +3,9 @@
 //! Exercises `src/ingestion.rs` end-to-end against an in-memory SurrealDB
 //! seeded with fixtures, avoiding the Axum router and Green API entirely.
 
-use poolpay::api::models::{DbGroupLink, DbReceipt, GroupLinkContent, now_iso};
+use poolpay::api::models::{now_iso, DbGroupLink, DbReceipt, GroupLinkContent};
 use poolpay::db::{self, DbConn};
-use poolpay::ingestion::{IngestionInput, IngestionOutcome, ingest_receipt};
+use poolpay::ingestion::{ingest_receipt, IngestionInput, IngestionOutcome};
 use poolpay::models::ParsedReceipt;
 
 const FIXTURE_CHAT_ID: &str = "2349000000001@g.us";

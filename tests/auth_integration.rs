@@ -8,13 +8,13 @@ use axum::{
     response::Response,
     Router,
 };
-use http_body_util::BodyExt;
 use axum::{
     extract::{Path, State},
     http::StatusCode as AxumStatus,
     routing::get,
     Extension as AxumExtension,
 };
+use http_body_util::BodyExt;
 use poolpay::{
     api,
     auth::{
@@ -761,11 +761,7 @@ fn issue_req(user_id: &str) -> Request<Body> {
     hmac_request("/api/auth/issue", &body)
 }
 
-async fn count_auth_events(
-    db: &poolpay::db::DbConn,
-    user_id: &str,
-    event_type: &str,
-) -> i64 {
+async fn count_auth_events(db: &poolpay::db::DbConn, user_id: &str, event_type: &str) -> i64 {
     let mut resp = db
         .query(
             "SELECT count() FROM auth_event \
@@ -920,8 +916,7 @@ async fn issue_disabled_user_returns_401_and_writes_failure_event() {
     let resp = call(app, issue_req(&user_id)).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-    let failures =
-        count_auth_events(&db, &user_id, "token_issue_failure").await;
+    let failures = count_auth_events(&db, &user_id, "token_issue_failure").await;
     assert_eq!(failures, 1);
     // And no success row was written.
     let successes = count_auth_events(&db, &user_id, "token_issued").await;
@@ -945,8 +940,7 @@ async fn issue_soft_deleted_user_returns_401() {
     let resp = call(app, issue_req(&user_id)).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-    let failures =
-        count_auth_events(&db, &user_id, "token_issue_failure").await;
+    let failures = count_auth_events(&db, &user_id, "token_issue_failure").await;
     assert_eq!(failures, 1);
     let successes = count_auth_events(&db, &user_id, "token_issued").await;
     assert_eq!(successes, 0);
@@ -1066,7 +1060,9 @@ async fn bootstrap_admin_id(db: &poolpay::db::DbConn) -> String {
         .check()
         .unwrap();
     let rows: Vec<String> = resp.take(0).unwrap_or_default();
-    rows.into_iter().next().expect("bootstrap admin row must exist")
+    rows.into_iter()
+        .next()
+        .expect("bootstrap admin row must exist")
 }
 
 #[tokio::test]
@@ -1311,7 +1307,11 @@ async fn change_password_rotates_hash_bumps_token_version_and_clears_must_reset(
         "email": BOOTSTRAP_EMAIL,
         "password": "brand-new-secret-passphrase",
     });
-    let verify_resp = call(app, hmac_request("/api/auth/verify-credentials", &verify_body)).await;
+    let verify_resp = call(
+        app,
+        hmac_request("/api/auth/verify-credentials", &verify_body),
+    )
+    .await;
     assert_eq!(verify_resp.status(), StatusCode::OK);
 }
 
@@ -1330,8 +1330,7 @@ async fn change_password_wrong_current_returns_400_bad_current_and_does_not_muta
 
     let hash_before = user_password_hash(&db, &admin_id).await;
     let version_before = user_token_version(&db, &admin_id).await;
-    let failures_before =
-        count_auth_events(&db, &admin_id, "password_change_failure").await;
+    let failures_before = count_auth_events(&db, &admin_id, "password_change_failure").await;
 
     let body = serde_json::json!({
         "currentPassword": "this-is-not-the-real-password",
@@ -1467,7 +1466,11 @@ async fn change_password_sets_hash_for_social_upgrade_without_current_password()
         "email": "social1@example.com",
         "password": "first-time-password-set",
     });
-    let verify_resp = call(app, hmac_request("/api/auth/verify-credentials", &verify_body)).await;
+    let verify_resp = call(
+        app,
+        hmac_request("/api/auth/verify-credentials", &verify_body),
+    )
+    .await;
     assert_eq!(verify_resp.status(), StatusCode::OK);
 }
 
@@ -1542,7 +1545,11 @@ async fn change_password_writes_password_changed_auth_event() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     let after = count_auth_events(&db, &admin_id, "password_changed").await;
-    assert_eq!(after, before + 1, "expected exactly one password_changed event");
+    assert_eq!(
+        after,
+        before + 1,
+        "expected exactly one password_changed event"
+    );
 }
 
 /// `user.email_normalised` is intentionally non-unique, so two social users
@@ -1559,7 +1566,10 @@ async fn change_password_set_path_refuses_when_another_user_owns_credentials_ide
     let shared_email = "shared-credentials@example.com";
     let user_a = seed_member(&app, "sub-shared-a", shared_email).await;
     let user_b = seed_member(&app, "sub-shared-b", shared_email).await;
-    assert_ne!(user_a, user_b, "distinct providerSubjects must produce distinct users");
+    assert_ne!(
+        user_a, user_b,
+        "distinct providerSubjects must produce distinct users"
+    );
 
     // User A sets a password first — this inserts the single credentials
     // identity row for `shared_email`.
@@ -1589,7 +1599,11 @@ async fn change_password_set_path_refuses_when_another_user_owns_credentials_ide
         "email": shared_email,
         "password": "owner-password",
     });
-    let verify_resp = call(app, hmac_request("/api/auth/verify-credentials", &verify_body)).await;
+    let verify_resp = call(
+        app,
+        hmac_request("/api/auth/verify-credentials", &verify_body),
+    )
+    .await;
     assert_eq!(verify_resp.status(), StatusCode::OK);
 }
 
@@ -1682,7 +1696,9 @@ async fn user_deleted_at(db: &poolpay::db::DbConn, user_id: &str) -> Option<Stri
 async fn create_admin_user_happy_path_returns_201_and_allows_signin() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({
         "email": "new-admin@example.com",
@@ -1715,7 +1731,11 @@ async fn create_admin_user_happy_path_returns_201_and_allows_signin() {
         "email": "new-admin@example.com",
         "password": "initial-secret-passphrase",
     });
-    let verify_resp = call(app, hmac_request("/api/auth/verify-credentials", &verify_body)).await;
+    let verify_resp = call(
+        app,
+        hmac_request("/api/auth/verify-credentials", &verify_body),
+    )
+    .await;
     assert_eq!(verify_resp.status(), StatusCode::OK);
     let vv: serde_json::Value = json_body(verify_resp).await;
     assert_eq!(vv["mustResetPassword"], true);
@@ -1726,7 +1746,9 @@ async fn create_admin_user_happy_path_returns_201_and_allows_signin() {
 async fn create_admin_user_allows_second_super_admin() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({
         "email": "second-super@example.com",
@@ -1743,7 +1765,9 @@ async fn create_admin_user_allows_second_super_admin() {
 async fn create_admin_user_rejects_member_role() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({
         "email": "not-an-admin@example.com",
@@ -1758,7 +1782,9 @@ async fn create_admin_user_rejects_member_role() {
 async fn create_admin_user_rejects_empty_email() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({
         "email": "   ",
@@ -1773,7 +1799,9 @@ async fn create_admin_user_rejects_empty_email() {
 async fn create_admin_user_rejects_oversized_email() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({
         "email": format!("{}@example.com", "a".repeat(400)),
@@ -1788,7 +1816,9 @@ async fn create_admin_user_rejects_oversized_email() {
 async fn create_admin_user_rejects_empty_password() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({
         "email": "blank-pwd@example.com",
@@ -1803,7 +1833,9 @@ async fn create_admin_user_rejects_empty_password() {
 async fn create_admin_user_rejects_whitespace_only_password() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({
         "email": "ws-pwd@example.com",
@@ -1818,7 +1850,9 @@ async fn create_admin_user_rejects_whitespace_only_password() {
 async fn create_admin_user_rejects_oversized_password() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({
         "email": "huge-pwd@example.com",
@@ -1833,7 +1867,9 @@ async fn create_admin_user_rejects_oversized_password() {
 async fn create_admin_user_duplicate_email_returns_409() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({
         "email": "dupe@example.com",
@@ -1860,7 +1896,9 @@ async fn create_admin_user_collides_on_existing_bootstrap_email() {
     // request is the operator's first CRUD call.
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({
         "email": BOOTSTRAP_EMAIL,
@@ -1942,7 +1980,9 @@ async fn seed_admin_user(
 async fn update_admin_user_role_change_bumps_token_version_and_writes_audit() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, version) =
         seed_admin_user(&app, &super_token, "patch-role@example.com", "admin").await;
@@ -1974,7 +2014,9 @@ async fn update_admin_user_role_change_bumps_token_version_and_writes_audit() {
 async fn update_admin_user_role_change_rejects_in_flight_access_token() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, version) =
         seed_admin_user(&app, &super_token, "stale-token@example.com", "admin").await;
@@ -1986,7 +2028,11 @@ async fn update_admin_user_role_change_rejects_in_flight_access_token() {
 
     // Promote target to super_admin — bumps token_version.
     let body = serde_json::json!({ "role": "super_admin", "version": version });
-    let resp = call(app.clone(), admin_users_patch_req(&target_id, &super_token, &body)).await;
+    let resp = call(
+        app.clone(),
+        admin_users_patch_req(&target_id, &super_token, &body),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     // The target's pre-promotion access token must now fail the version
@@ -2004,7 +2050,9 @@ async fn update_admin_user_role_change_rejects_in_flight_access_token() {
 async fn update_admin_user_status_disable_revokes_refresh_tokens_and_audits() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, version) =
         seed_admin_user(&app, &super_token, "disable@example.com", "admin").await;
@@ -2014,7 +2062,11 @@ async fn update_admin_user_status_disable_revokes_refresh_tokens_and_audits() {
     let tv_before = user_token_version(&db, &target_id).await;
 
     let body = serde_json::json!({ "status": "disabled", "version": version });
-    let resp = call(app.clone(), admin_users_patch_req(&target_id, &super_token, &body)).await;
+    let resp = call(
+        app.clone(),
+        admin_users_patch_req(&target_id, &super_token, &body),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     assert_eq!(user_status(&db, &target_id).await, "disabled");
@@ -2034,20 +2086,30 @@ async fn update_admin_user_status_disable_revokes_refresh_tokens_and_audits() {
 async fn update_admin_user_reenable_emits_user_enabled_audit_event() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, version) =
         seed_admin_user(&app, &super_token, "reenable@example.com", "admin").await;
 
     // Disable first — produces a user_disabled event and bumps version to version+1.
     let disable = serde_json::json!({ "status": "disabled", "version": version });
-    let resp = call(app.clone(), admin_users_patch_req(&target_id, &super_token, &disable)).await;
+    let resp = call(
+        app.clone(),
+        admin_users_patch_req(&target_id, &super_token, &disable),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(user_status(&db, &target_id).await, "disabled");
 
     // Re-enable with the bumped version.
     let reenable = serde_json::json!({ "status": "active", "version": version + 1 });
-    let resp = call(app, admin_users_patch_req(&target_id, &super_token, &reenable)).await;
+    let resp = call(
+        app,
+        admin_users_patch_req(&target_id, &super_token, &reenable),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(user_status(&db, &target_id).await, "active");
 
@@ -2062,7 +2124,9 @@ async fn update_admin_user_reenable_emits_user_enabled_audit_event() {
 async fn update_admin_user_noop_patch_bumps_version_but_not_token_version() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, version) =
         seed_admin_user(&app, &super_token, "noop@example.com", "admin").await;
@@ -2087,7 +2151,9 @@ async fn update_admin_user_noop_patch_bumps_version_but_not_token_version() {
 async fn update_admin_user_version_mismatch_returns_409() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, version) =
         seed_admin_user(&app, &super_token, "stale-version@example.com", "admin").await;
@@ -2101,10 +2167,16 @@ async fn update_admin_user_version_mismatch_returns_409() {
 async fn update_admin_user_unknown_id_returns_404() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let body = serde_json::json!({ "role": "admin", "version": 1 });
-    let resp = call(app, admin_users_patch_req("nonexistent-id", &super_token, &body)).await;
+    let resp = call(
+        app,
+        admin_users_patch_req("nonexistent-id", &super_token, &body),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -2112,17 +2184,27 @@ async fn update_admin_user_unknown_id_returns_404() {
 async fn update_admin_user_rejects_unsupported_role_and_status() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, version) =
         seed_admin_user(&app, &super_token, "badvals@example.com", "admin").await;
 
     let bad_role = serde_json::json!({ "role": "owner", "version": version });
-    let r1 = call(app.clone(), admin_users_patch_req(&target_id, &super_token, &bad_role)).await;
+    let r1 = call(
+        app.clone(),
+        admin_users_patch_req(&target_id, &super_token, &bad_role),
+    )
+    .await;
     assert_eq!(r1.status(), StatusCode::BAD_REQUEST);
 
     let bad_status = serde_json::json!({ "status": "pending", "version": version });
-    let r2 = call(app, admin_users_patch_req(&target_id, &super_token, &bad_status)).await;
+    let r2 = call(
+        app,
+        admin_users_patch_req(&target_id, &super_token, &bad_status),
+    )
+    .await;
     assert_eq!(r2.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -2130,7 +2212,9 @@ async fn update_admin_user_rejects_unsupported_role_and_status() {
 async fn update_admin_user_self_mutation_returns_403() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let version = user_version(&db, &super_id).await;
     let body = serde_json::json!({ "role": "admin", "version": version });
@@ -2142,7 +2226,9 @@ async fn update_admin_user_self_mutation_returns_403() {
 async fn update_admin_user_rejects_non_super_admin_with_403() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, version) =
         seed_admin_user(&app, &super_token, "patch-forbid@example.com", "admin").await;
@@ -2157,7 +2243,9 @@ async fn update_admin_user_rejects_non_super_admin_with_403() {
 async fn update_admin_user_allows_demotion_to_member() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, version) =
         seed_admin_user(&app, &super_token, "demote@example.com", "admin").await;
@@ -2174,15 +2262,20 @@ async fn update_admin_user_allows_demotion_to_member() {
 async fn delete_admin_user_soft_deletes_and_bumps_token_version() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
-    let (target_id, _) =
-        seed_admin_user(&app, &super_token, "soft-del@example.com", "admin").await;
+    let (target_id, _) = seed_admin_user(&app, &super_token, "soft-del@example.com", "admin").await;
 
     let issued = refresh::issue(&db, &target_id).await.expect("issue");
     let tv_before = user_token_version(&db, &target_id).await;
 
-    let resp = call(app.clone(), admin_users_delete_req(&target_id, &super_token)).await;
+    let resp = call(
+        app.clone(),
+        admin_users_delete_req(&target_id, &super_token),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     assert!(
@@ -2216,7 +2309,9 @@ async fn delete_admin_user_soft_deletes_and_bumps_token_version() {
 async fn delete_admin_user_self_delete_returns_403() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let resp = call(app, admin_users_delete_req(&super_id, &super_token)).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -2233,7 +2328,9 @@ async fn delete_admin_user_self_delete_returns_403() {
 async fn delete_admin_user_unknown_id_returns_404() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let resp = call(app, admin_users_delete_req("nonexistent-id", &super_token)).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -2243,12 +2340,18 @@ async fn delete_admin_user_unknown_id_returns_404() {
 async fn delete_admin_user_already_deleted_returns_404() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "double-del@example.com", "admin").await;
 
-    let first = call(app.clone(), admin_users_delete_req(&target_id, &super_token)).await;
+    let first = call(
+        app.clone(),
+        admin_users_delete_req(&target_id, &super_token),
+    )
+    .await;
     assert_eq!(first.status(), StatusCode::NO_CONTENT);
 
     let second = call(app, admin_users_delete_req(&target_id, &super_token)).await;
@@ -2259,7 +2362,9 @@ async fn delete_admin_user_already_deleted_returns_404() {
 async fn delete_admin_user_rejects_non_super_admin_with_403() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "del-forbid@example.com", "admin").await;
@@ -2297,11 +2402,7 @@ async fn seed_test_group(db: &poolpay::db::DbConn, id: &str) {
         .expect("group row returned");
 }
 
-async fn count_group_admin_rows(
-    db: &poolpay::db::DbConn,
-    user_id: &str,
-    group_id: &str,
-) -> i64 {
+async fn count_group_admin_rows(db: &poolpay::db::DbConn, user_id: &str, group_id: &str) -> i64 {
     let mut resp = db
         .query(
             "SELECT count() FROM group_admin \
@@ -2321,10 +2422,11 @@ async fn count_group_admin_rows(
 async fn grant_group_admin_happy_path_returns_201_and_inserts_row() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
-    let (target_id, _) =
-        seed_admin_user(&app, &super_token, "grant-hp@example.com", "admin").await;
+    let (target_id, _) = seed_admin_user(&app, &super_token, "grant-hp@example.com", "admin").await;
     seed_test_group(&db, "grant-hp-group").await;
 
     let resp = call(
@@ -2371,7 +2473,9 @@ async fn grant_group_admin_without_bearer_returns_401() {
 async fn grant_group_admin_rejects_non_super_admin_with_403() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "grant-forbid@example.com", "admin").await;
@@ -2390,7 +2494,9 @@ async fn grant_group_admin_rejects_non_super_admin_with_403() {
 async fn grant_group_admin_on_unknown_user_returns_404() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
     seed_test_group(&db, "grant-unknown-user-group").await;
 
     let resp = call(
@@ -2405,7 +2511,9 @@ async fn grant_group_admin_on_unknown_user_returns_404() {
 async fn grant_group_admin_on_disabled_user_returns_409() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "grant-disabled@example.com", "admin").await;
@@ -2428,15 +2536,12 @@ async fn grant_group_admin_on_disabled_user_returns_409() {
 async fn grant_group_admin_on_super_admin_target_returns_409() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
-    let (target_id, _) = seed_admin_user(
-        &app,
-        &super_token,
-        "grant-super@example.com",
-        "super_admin",
-    )
-    .await;
+    let (target_id, _) =
+        seed_admin_user(&app, &super_token, "grant-super@example.com", "super_admin").await;
     seed_test_group(&db, "grant-super-group").await;
 
     let resp = call(
@@ -2451,7 +2556,9 @@ async fn grant_group_admin_on_super_admin_target_returns_409() {
 async fn grant_group_admin_on_member_target_returns_409() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let member_id = seed_member(&app, "sub-grant-member", "grant-member@example.com").await;
     seed_test_group(&db, "grant-member-group").await;
@@ -2468,7 +2575,9 @@ async fn grant_group_admin_on_member_target_returns_409() {
 async fn grant_group_admin_on_unknown_group_returns_404() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "grant-ghost-group@example.com", "admin").await;
@@ -2485,7 +2594,9 @@ async fn grant_group_admin_on_unknown_group_returns_404() {
 async fn grant_group_admin_duplicate_returns_409() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "grant-dup@example.com", "admin").await;
@@ -2524,7 +2635,9 @@ fn group_admin_delete_req(user_id: &str, group_id: &str, token: &str) -> Request
 async fn revoke_group_admin_happy_path_returns_204_and_removes_row() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "revoke-hp@example.com", "admin").await;
@@ -2558,7 +2671,9 @@ async fn revoke_group_admin_happy_path_returns_204_and_removes_row() {
 async fn revoke_group_admin_bumps_target_token_version() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "revoke-tv@example.com", "admin").await;
@@ -2598,7 +2713,9 @@ async fn revoke_group_admin_bumps_target_token_version() {
 async fn revoke_group_admin_invalidates_pre_revoke_access_token() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "kick-after-revoke@example.com", "admin").await;
@@ -2618,7 +2735,11 @@ async fn revoke_group_admin_invalidates_pre_revoke_access_token() {
     // through the AuthenticatedUser + require_group_scope pipeline
     // on a router that only mounts the extractor route.
     let test_app = extractor_app(db.clone(), verifier);
-    let before = call(test_app.clone(), bearer_get("/scope/kick-group", &target_token)).await;
+    let before = call(
+        test_app.clone(),
+        bearer_get("/scope/kick-group", &target_token),
+    )
+    .await;
     assert_eq!(before.status(), StatusCode::NO_CONTENT);
 
     let revoke = call(
@@ -2660,7 +2781,9 @@ async fn revoke_group_admin_without_bearer_returns_401() {
 async fn revoke_group_admin_rejects_non_super_admin_with_403() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "revoke-forbid@example.com", "admin").await;
@@ -2691,7 +2814,9 @@ async fn revoke_group_admin_rejects_non_super_admin_with_403() {
 async fn revoke_group_admin_unknown_grant_returns_404() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "revoke-unknown@example.com", "admin").await;
@@ -2708,7 +2833,9 @@ async fn revoke_group_admin_unknown_grant_returns_404() {
 async fn revoke_group_admin_replay_after_success_returns_404() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;
-    let super_token = verifier.mint_access(&super_id, "super_admin", 0).expect("mint");
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
 
     let (target_id, _) =
         seed_admin_user(&app, &super_token, "revoke-replay@example.com", "admin").await;
@@ -2797,9 +2924,16 @@ async fn seed_dummy_admins_creates_all_fixtures_with_expected_roles_and_grants()
          ) GROUP ALL",
     )
     .await;
-    assert_eq!(admin1_grants, 1, "admin1 must receive exactly one fixture grant on group 1");
+    assert_eq!(
+        admin1_grants, 1,
+        "admin1 must receive exactly one fixture grant on group 1"
+    );
 
-    for email in ["admin2@poolpay.test", "admin3@poolpay.test", "admin4@poolpay.test"] {
+    for email in [
+        "admin2@poolpay.test",
+        "admin3@poolpay.test",
+        "admin4@poolpay.test",
+    ] {
         let grants = count_rows(
             &db,
             &format!(
@@ -2863,7 +2997,10 @@ async fn seed_dummy_admins_is_noop_without_flag() {
          GROUP ALL",
     )
     .await;
-    assert_eq!(admins, 0, "fixture admins must not be seeded without SEED_ON_EMPTY=true");
+    assert_eq!(
+        admins, 0,
+        "fixture admins must not be seeded without SEED_ON_EMPTY=true"
+    );
 }
 
 #[tokio::test]

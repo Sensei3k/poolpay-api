@@ -4,9 +4,7 @@ use tracing::{error, info};
 
 /// Runs Tesseract OCR on the image file at the given path and returns the extracted text.
 pub fn ocr_image(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let path_str = path
-        .to_str()
-        .ok_or("file path contains invalid UTF-8")?;
+    let path_str = path.to_str().ok_or("file path contains invalid UTF-8")?;
     let text = tesseract::ocr(path_str, "eng")?;
     Ok(text)
 }
@@ -29,9 +27,7 @@ pub fn ocr_pdf(pdf_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
         .to_str()
         .ok_or("prefix path contains invalid UTF-8")?;
 
-    let pdf_path_str = pdf_path
-        .to_str()
-        .ok_or("PDF path contains invalid UTF-8")?;
+    let pdf_path_str = pdf_path.to_str().ok_or("PDF path contains invalid UTF-8")?;
 
     // Convert all PDF pages to JPEG: produces <prefix>-1.jpg, <prefix>-2.jpg, etc.
     let status = Command::new("pdftoppm")

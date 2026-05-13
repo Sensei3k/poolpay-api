@@ -16,7 +16,6 @@ use crate::api::pagination::{HEADER_LIMIT, HEADER_OFFSET, HEADER_TOTAL_COUNT};
 use crate::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use crate::auth::rate_limit::{self, CredentialFailureLimiter, RateLimitConfig};
 use crate::db::DbConn;
-use std::sync::{Arc, OnceLock};
 use handlers::{
     confirm_receipt, create_cycle, create_group, create_member, create_payment,
     create_whatsapp_link, delete_cycle, delete_group, delete_member, delete_payment,
@@ -24,6 +23,7 @@ use handlers::{
     get_whatsapp_links, patch_receipt, reject_receipt, reset_db, update_cycle, update_group,
     update_member,
 };
+use std::sync::{Arc, OnceLock};
 
 /// Build the Axum router with all API routes and CORS middleware.
 ///
@@ -44,9 +44,8 @@ pub fn shared_verifier() -> SharedVerifier {
     VERIFIER
         .get_or_init(|| {
             Arc::new(
-                StaticKeyVerifier::from_env(JwtConfig::from_env()).unwrap_or_else(|err| {
-                    panic!("Failed to initialise JWT verifier: {err}")
-                }),
+                StaticKeyVerifier::from_env(JwtConfig::from_env())
+                    .unwrap_or_else(|err| panic!("Failed to initialise JWT verifier: {err}")),
             )
         })
         .clone()
@@ -74,8 +73,14 @@ pub fn router_with_config(
             post(auth_endpoints::verify_credentials),
         )
         .route("/api/auth/ensure-user", post(auth_endpoints::ensure_user))
-        .route("/api/auth/issue", post(auth_endpoints::issue_token_endpoint))
-        .route("/api/auth/refresh", post(auth_endpoints::refresh_token_endpoint))
+        .route(
+            "/api/auth/issue",
+            post(auth_endpoints::issue_token_endpoint),
+        )
+        .route(
+            "/api/auth/refresh",
+            post(auth_endpoints::refresh_token_endpoint),
+        )
         .route("/api/auth/logout", post(auth_endpoints::logout_endpoint))
         .layer(rate_limit::build_per_ip_layer(&rate_cfg))
         .layer(Extension(credential_failure_limiter))
@@ -151,7 +156,10 @@ pub fn router_with_config(
     // APP_ENV is explicitly "development" or "test". If the env var is
     // misconfigured or missing on a staging/prod deploy, the endpoint stays
     // unreachable — previously an unset APP_ENV exposed it by default.
-    if matches!(std::env::var("APP_ENV").as_deref(), Ok("development" | "test")) {
+    if matches!(
+        std::env::var("APP_ENV").as_deref(),
+        Ok("development" | "test")
+    ) {
         router = router.route("/api/test/reset", post(reset_db));
     }
 
@@ -187,11 +195,7 @@ fn build_cors() -> CorsLayer {
             .allow_origin(parsed)
             .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
-            .expose_headers([
-                HEADER_TOTAL_COUNT,
-                HEADER_LIMIT,
-                HEADER_OFFSET,
-            ])
+            .expose_headers([HEADER_TOTAL_COUNT, HEADER_LIMIT, HEADER_OFFSET])
     } else {
         CorsLayer::permissive()
     }

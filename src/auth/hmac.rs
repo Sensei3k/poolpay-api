@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 use axum::{
-    body::{Bytes, to_bytes},
+    body::{to_bytes, Bytes},
     extract::{FromRequest, Request},
     http::HeaderMap,
 };

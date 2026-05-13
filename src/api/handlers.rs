@@ -7,20 +7,20 @@ use serde::Deserialize;
 use surrealdb_types::SurrealValue;
 use tracing::error;
 
-use crate::auth::audit::record_auth_event;
-use crate::auth::extractors::{AuthenticatedUser, GroupScopedAdmin, OptionalAuth, SuperAdminUser};
 use crate::api::models::{
-    AppError, CreateCycleRequest, CreateGroupRequest, CreateMemberRequest, CreatePaymentRequest,
-    CreateWhatsappLinkRequest, Cycle, CycleContent, DbCycle, DbGroup, DbGroupLink, DbInboxItem,
-    DbMember, DbPayment, DbReceipt, EntityId, Group, GroupContent, GroupLink, GroupLinkContent,
-    InboxItemContent, InboxItemKind, Member, MemberContent, Payment, PaymentContent, Receipt,
-    ReceiptContent, ReceiptStatus, UpdateCycleRequest, UpdateGroupRequest, UpdateMemberRequest,
-    now_iso, record_id_to_string,
+    now_iso, record_id_to_string, AppError, CreateCycleRequest, CreateGroupRequest,
+    CreateMemberRequest, CreatePaymentRequest, CreateWhatsappLinkRequest, Cycle, CycleContent,
+    DbCycle, DbGroup, DbGroupLink, DbInboxItem, DbMember, DbPayment, DbReceipt, EntityId, Group,
+    GroupContent, GroupLink, GroupLinkContent, InboxItemContent, InboxItemKind, Member,
+    MemberContent, Payment, PaymentContent, Receipt, ReceiptContent, ReceiptStatus,
+    UpdateCycleRequest, UpdateGroupRequest, UpdateMemberRequest,
 };
 use crate::api::pagination::{
     header_u32, Pagination, PaginationParams, HEADER_LIMIT, HEADER_OFFSET, HEADER_TOTAL_COUNT,
 };
-use crate::db::{DbConn, reseed};
+use crate::auth::audit::record_auth_event;
+use crate::auth::extractors::{AuthenticatedUser, GroupScopedAdmin, OptionalAuth, SuperAdminUser};
+use crate::db::{reseed, DbConn};
 
 // ── Query params ─────────────────────────────────────────────────────────────
 
@@ -333,7 +333,8 @@ pub async fn update_group(
     body.validate()?;
 
     let existing: Option<DbGroup> = db.select(("group", id.as_str())).await?;
-    let existing = existing.ok_or_else(|| AppError::NotFound(format!("group {id} does not exist")))?;
+    let existing =
+        existing.ok_or_else(|| AppError::NotFound(format!("group {id} does not exist")))?;
 
     if existing.version != body.version {
         return Err(AppError::Conflict(
@@ -342,7 +343,10 @@ pub async fn update_group(
     }
 
     let content = GroupContent {
-        name: body.name.map(|n| n.trim().to_string()).unwrap_or(existing.name),
+        name: body
+            .name
+            .map(|n| n.trim().to_string())
+            .unwrap_or(existing.name),
         status: body.status.unwrap_or(existing.status),
         description: body.description.or(existing.description),
         created_at: existing.created_at,
@@ -363,7 +367,8 @@ pub async fn delete_group(
     Path(id): Path<EntityId>,
 ) -> Result<StatusCode, AppError> {
     let existing: Option<DbGroup> = db.select(("group", id.as_str())).await?;
-    let existing = existing.ok_or_else(|| AppError::NotFound(format!("group {id} does not exist")))?;
+    let existing =
+        existing.ok_or_else(|| AppError::NotFound(format!("group {id} does not exist")))?;
 
     // Check for members in this group.
     let members: Vec<DbMember> = db
@@ -421,9 +426,15 @@ pub async fn create_member(
     // Verify group exists and is not soft-deleted.
     let group: Option<DbGroup> = db.select(("group", group_id.as_str())).await?;
     match &group {
-        None => return Err(AppError::NotFound(format!("group {group_id} does not exist"))),
+        None => {
+            return Err(AppError::NotFound(format!(
+                "group {group_id} does not exist"
+            )))
+        }
         Some(g) if g.deleted_at.is_some() => {
-            return Err(AppError::NotFound(format!("group {group_id} does not exist")));
+            return Err(AppError::NotFound(format!(
+                "group {group_id} does not exist"
+            )));
         }
         _ => {}
     }
@@ -432,7 +443,9 @@ pub async fn create_member(
     // matches the canonicalized value that will be stored.
     let phone_trimmed = body.phone.trim().to_string();
     let dupes: Vec<DbMember> = db
-        .query("SELECT * FROM member WHERE group_id = $gid AND phone = $phone AND deleted_at IS NONE")
+        .query(
+            "SELECT * FROM member WHERE group_id = $gid AND phone = $phone AND deleted_at IS NONE",
+        )
         .bind(("gid", group_id.clone()))
         .bind(("phone", phone_trimmed))
         .await?
@@ -507,8 +520,14 @@ pub async fn update_member(
     }
 
     let content = MemberContent {
-        name: body.name.map(|n| n.trim().to_string()).unwrap_or(existing.name),
-        phone: body.phone.map(|p| p.trim().to_string()).unwrap_or(existing.phone),
+        name: body
+            .name
+            .map(|n| n.trim().to_string())
+            .unwrap_or(existing.name),
+        phone: body
+            .phone
+            .map(|p| p.trim().to_string())
+            .unwrap_or(existing.phone),
         position: body.position.unwrap_or(existing.position),
         status: body.status.unwrap_or(existing.status),
         group_id: existing.group_id,
@@ -588,15 +607,23 @@ pub async fn create_cycle(
     // Verify group exists and is not soft-deleted.
     let group: Option<DbGroup> = db.select(("group", group_id.as_str())).await?;
     match &group {
-        None => return Err(AppError::NotFound(format!("group {group_id} does not exist"))),
+        None => {
+            return Err(AppError::NotFound(format!(
+                "group {group_id} does not exist"
+            )))
+        }
         Some(g) if g.deleted_at.is_some() => {
-            return Err(AppError::NotFound(format!("group {group_id} does not exist")));
+            return Err(AppError::NotFound(format!(
+                "group {group_id} does not exist"
+            )));
         }
         _ => {}
     }
 
     // Verify recipient is in the same group and is not soft-deleted.
-    let recipient: Option<DbMember> = db.select(("member", body.recipient_member_id.as_str())).await?;
+    let recipient: Option<DbMember> = db
+        .select(("member", body.recipient_member_id.as_str()))
+        .await?;
     match recipient {
         None => {
             return Err(AppError::NotFound(format!(
@@ -695,7 +722,9 @@ pub async fn update_cycle(
         }
     }
 
-    let contribution = body.contribution_per_member.unwrap_or(existing.contribution_per_member);
+    let contribution = body
+        .contribution_per_member
+        .unwrap_or(existing.contribution_per_member);
 
     // Recompute total_amount if contribution changed.
     let total_amount = if body.contribution_per_member.is_some() {
@@ -715,7 +744,10 @@ pub async fn update_cycle(
         end_date: body.end_date.unwrap_or(existing.end_date),
         contribution_per_member: contribution,
         total_amount,
-        recipient_member_id: body.recipient_member_id.clone().unwrap_or(existing.recipient_member_id),
+        recipient_member_id: body
+            .recipient_member_id
+            .clone()
+            .unwrap_or(existing.recipient_member_id),
         status: body.status.unwrap_or(existing.status),
         group_id: existing.group_id,
         notes: body.notes.or(existing.notes),
@@ -793,9 +825,8 @@ pub async fn create_payment(
         )));
     }
     let cycle: Option<DbCycle> = db.select(("cycle", body.cycle_id.as_str())).await?;
-    let cycle = cycle.ok_or_else(|| {
-        AppError::NotFound(format!("cycle {} does not exist", body.cycle_id))
-    })?;
+    let cycle = cycle
+        .ok_or_else(|| AppError::NotFound(format!("cycle {} does not exist", body.cycle_id)))?;
 
     if member.group_id != cycle.group_id {
         return Err(AppError::BadRequest(
@@ -926,7 +957,9 @@ fn receipt_content_from(
         bank_label: row.bank_label.clone(),
         raw_image_url: row.raw_image_url.clone(),
         // `None` on the patch means "keep prior value"; a `Some` overrides it.
-        rejection_reason: patch.rejection_reason.or_else(|| row.rejection_reason.clone()),
+        rejection_reason: patch
+            .rejection_reason
+            .or_else(|| row.rejection_reason.clone()),
         received_at: row.received_at.clone(),
         created_at: row.created_at.clone(),
         updated_at,
@@ -1205,9 +1238,7 @@ async fn confirm_receipt_inner(
     let payment_date = chrono::DateTime::parse_from_rfc3339(&receipt.received_at)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .map_err(|_| {
-            AppError::Conflict(format!(
-                "receipt {id} has an invalid received_at timestamp"
-            ))
+            AppError::Conflict(format!("receipt {id} has an invalid received_at timestamp"))
         })?;
 
     let payment_content = PaymentContent {
@@ -1476,9 +1507,15 @@ pub async fn create_whatsapp_link(
     // Verify group exists and is not soft-deleted.
     let group: Option<DbGroup> = db.select(("group", group_id.as_str())).await?;
     match &group {
-        None => return Err(AppError::NotFound(format!("group {group_id} does not exist"))),
+        None => {
+            return Err(AppError::NotFound(format!(
+                "group {group_id} does not exist"
+            )))
+        }
         Some(g) if g.deleted_at.is_some() => {
-            return Err(AppError::NotFound(format!("group {group_id} does not exist")));
+            return Err(AppError::NotFound(format!(
+                "group {group_id} does not exist"
+            )));
         }
         _ => {}
     }
@@ -1505,7 +1542,8 @@ pub async fn create_whatsapp_link(
     };
 
     let created: Option<DbGroupLink> = db.create("group_link").content(content).await?;
-    let created = created.ok_or_else(|| AppError::Internal("whatsapp link was not created".into()))?;
+    let created =
+        created.ok_or_else(|| AppError::Internal("whatsapp link was not created".into()))?;
 
     Ok((StatusCode::CREATED, Json(GroupLink::from(created))))
 }
@@ -1533,7 +1571,10 @@ pub async fn delete_whatsapp_link(
         updated_at: now.clone(),
         deleted_at: Some(now),
     };
-    let _: Option<DbGroupLink> = db.upsert(("group_link", id.as_str())).content(content).await?;
+    let _: Option<DbGroupLink> = db
+        .upsert(("group_link", id.as_str()))
+        .content(content)
+        .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

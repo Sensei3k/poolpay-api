@@ -19,10 +19,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
+    decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
 };
 use rand::RngCore;
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
@@ -135,10 +135,8 @@ pub struct JwtConfig {
 impl JwtConfig {
     pub fn from_env() -> Self {
         Self {
-            audience: std::env::var("JWT_AUDIENCE")
-                .unwrap_or_else(|_| "poolpay-api".to_string()),
-            issuer: std::env::var("JWT_ISSUER")
-                .unwrap_or_else(|_| "poolpay-nextauth".to_string()),
+            audience: std::env::var("JWT_AUDIENCE").unwrap_or_else(|_| "poolpay-api".to_string()),
+            issuer: std::env::var("JWT_ISSUER").unwrap_or_else(|_| "poolpay-nextauth".to_string()),
             // FE-side silent-refresh window is 360s (poolpay-app `auth.ts`
             // REFRESH_SKEW_SECS) — the FE proactively rotates when a token has
             // ≤360s of life left. Values at or below 360 cause the FE to refresh
@@ -240,7 +238,12 @@ impl StaticKeyVerifier {
             }
             keys.insert(
                 entry.kid.clone(),
-                KeyEntry { kid: entry.kid, encoding, decoding, active: entry.active },
+                KeyEntry {
+                    kid: entry.kid,
+                    encoding,
+                    decoding,
+                    active: entry.active,
+                },
             );
         }
 
@@ -282,7 +285,12 @@ impl StaticKeyVerifier {
         let mut keys = HashMap::new();
         keys.insert(
             kid.clone(),
-            KeyEntry { kid: kid.clone(), encoding: Some(encoding), decoding, active: true },
+            KeyEntry {
+                kid: kid.clone(),
+                encoding: Some(encoding),
+                decoding,
+                active: true,
+            },
         );
         Ok(Self {
             keys,
@@ -321,7 +329,6 @@ impl StaticKeyVerifier {
 
         encode(&header, &claims, encoding).map_err(|_| JwtError::Invalid)
     }
-
 }
 
 impl TokenVerifier for StaticKeyVerifier {
@@ -379,15 +386,19 @@ fn ephemeral_kid() -> String {
 // commits (active/kid are exercised by tests and the rotation path).
 impl KeyEntry {
     #[allow(dead_code)]
-    fn is_active(&self) -> bool { self.active }
+    fn is_active(&self) -> bool {
+        self.active
+    }
     #[allow(dead_code)]
-    fn kid(&self) -> &str { &self.kid }
+    fn kid(&self) -> &str {
+        &self.kid
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonwebtoken::{Algorithm, Header, encode};
+    use jsonwebtoken::{encode, Algorithm, Header};
 
     fn test_config() -> JwtConfig {
         JwtConfig {
@@ -561,7 +572,9 @@ mod tests {
             .to_pkcs8_pem(LineEnding::LF)
             .expect("priv encode")
             .to_string();
-        let pub_pem = public.to_public_key_pem(LineEnding::LF).expect("pub encode");
+        let pub_pem = public
+            .to_public_key_pem(LineEnding::LF)
+            .expect("pub encode");
         (priv_pem, pub_pem)
     }
 }
