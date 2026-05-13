@@ -233,9 +233,7 @@ fn is_http_or_https_url(url: &str) -> bool {
     // mean `http:///path` — no host). The authority slice runs from the end
     // of `://` to the first of `/`, `?`, or `#` so query- or fragment-only
     // inputs like `https://?x=1` and `https://#frag` are also rejected.
-    let host_end = rest
-        .find(|c: char| c == '/' || c == '?' || c == '#')
-        .unwrap_or(rest.len());
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..host_end];
     if authority.is_empty() {
         return false;
