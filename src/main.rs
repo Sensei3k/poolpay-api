@@ -229,14 +229,16 @@ async fn main() {
                                                         if let Some(reply) =
                                                             replies::format_reply(&outcome, &parsed)
                                                         {
-                                                            // The receipt row is already persisted at this point;
-                                                            // failing to send the WhatsApp quoted reply is a UX
-                                                            // hiccup, not an ingest failure. Treat it as non-fatal so
-                                                            // we still ack the Green API notification and do not
-                                                            // burn redelivery attempts on a row that already exists.
-                                                            // The error is logged with `error!` so it is still
-                                                            // visible to operators; a future metric counter can
-                                                            // page on the rate.
+                                                            // The ingestion outcome is already decided at this point
+                                                            // (and the receipt row is persisted when applicable —
+                                                            // e.g. NotLinked still returns a reply without persisting).
+                                                            // Failing to send the WhatsApp quoted reply is a UX
+                                                            // hiccup, not a processing failure. Treat it as non-fatal
+                                                            // so we still ack the Green API notification and do not
+                                                            // burn redelivery attempts on a receipt whose outcome is
+                                                            // already settled. The error is logged with `error!` so
+                                                            // it is still visible to operators; a future metric
+                                                            // counter can page on the rate.
                                                             match whatsapp::send_quoted_message(
                                                                 &client,
                                                                 &instance_id,
