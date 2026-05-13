@@ -13,9 +13,10 @@ jobs:
     name: build / test / lint
     runs-on: ubuntu-latest
     # Cold-cache builds compile surrealdb, tesseract and reqwest from
-    # source and need ~25-30 min. Warm-cache runs finish well under 10
-    # min — 45 keeps headroom for both.
-    timeout-minutes: 45
+    # source. Real-world cold runs land in 40-50 min depending on
+    # runner luck; 60 keeps headroom for slow runners without being
+    # unbounded. Warm-cache runs still finish well under 10 min.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +32,12 @@ jobs:
             libtesseract-dev \
             libclang-dev
 
+      - name: Install mold linker
+        # Replaces the default linker with mold for the whole job. Drops
+        # link time on cold builds (~3 min) and roughly halves the cost
+        # of warm rebuilds.
+        uses: rui314/setup-mold@v1
+
       - name: Install Rust toolchain
         # Respects the version + components pinned in rust-toolchain.toml,
         # so the CI compiler always matches local dev.
@@ -42,6 +49,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
+          # Default only saves on the repo's default branch, which means
+          # PR branches always restore but never save — so every push to
+          # a PR pays the full cold-cache cost. Saving on every branch
+          # lets a PR's own subsequent pushes restore in ~5-10 min.
+          save-if: 'true'
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -49,8 +61,7 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: cargo build
-        run: cargo build --all-targets --locked
-
       - name: cargo test
-        run: cargo test --locked
+        # --all-targets builds binaries, tests, examples and benches in
+        # one pass, replacing the previous separate `cargo build` step.
+        run: cargo test --locked --all-targets
