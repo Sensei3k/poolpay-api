@@ -48,6 +48,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
+          # Default only saves on the repo's default branch, which means
+          # PR branches always restore but never save — so every push to
+          # a PR pays the full cold-cache cost. Saving on every branch
+          # lets a PR's own subsequent pushes restore in ~5-10 min.
+          save-if: 'true'
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
