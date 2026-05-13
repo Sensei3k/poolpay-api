@@ -208,12 +208,12 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 /// Existing-row backfill: any row pre-dating this migration gets
 /// `ingested_at` filled in once via a three-step fallback chain, each
 /// step parsed (RFC 3339) and re-emitted in the canonical `server_now()`
-/// shape — UTC, second precision, trailing `Z` — that the application
+/// shape — UTC, millisecond precision, trailing `Z` — that the application
 /// path writes. Done in Rust rather than inline SurrealQL so the
 /// reformat is possible; copying a timestamp verbatim would reintroduce
 /// the mixed-format problem `server_now` was added to solve (`+00:00`
-/// vs `Z`, sub-second precision), which breaks the lex-sort invariant
-/// `ORDER BY ingested_at` relies on. The chain is:
+/// vs `Z`, mixed sub-second precision), which breaks the lex-sort
+/// invariant `ORDER BY ingested_at` relies on. The chain is:
 ///   1. Prefer `received_at` (bot-supplied, closest proxy for true
 ///      arrival time and therefore best for preserving FIFO order).
 ///   2. If `received_at` is missing or unparseable, fall back to the
@@ -280,7 +280,8 @@ async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::E
 /// Rust-side companion to [`define_receipt_extensions`]: for every legacy
 /// `receipt` row that still has `ingested_at = NONE`, derive a
 /// monotonic-with-arrival timestamp and re-emit it via [`server_now`]-style
-/// formatting (UTC, second precision, `Z` suffix) before writing it back.
+/// formatting (UTC, millisecond precision, `Z` suffix) before writing it
+/// back.
 ///
 /// The fallback chain is deliberately ordered so the stamped value still
 /// reflects the row's true arrival position in the FIFO queue:
@@ -308,7 +309,7 @@ async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb
     fn normalise_rfc3339(s: &str) -> Option<String> {
         chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| {
             dt.with_timezone(&chrono::Utc)
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         })
     }
 

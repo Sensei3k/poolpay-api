@@ -146,7 +146,7 @@ pub async fn whatsapp_webhook(
     let parsed_received_at = chrono::DateTime::parse_from_rfc3339(&payload.received_at)
         .map_err(|_| AppError::Unauthorized)?
         .with_timezone(&chrono::Utc)
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
     // `raw_image_url` is persisted verbatim and surfaced to admins in the FE
     // review modal. Reject anything that is not an absolute http(s) URL so a

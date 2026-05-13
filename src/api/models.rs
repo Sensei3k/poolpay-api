@@ -1189,20 +1189,25 @@ pub fn now_iso() -> String {
 /// Server-stamped wall-clock timestamp for fields the API itself owns
 /// (e.g. `receipt.ingested_at`).
 ///
-/// Normalised to UTC with second precision and a literal `Z` suffix so a
-/// string-typed column lex-sorts chronologically — every value is the same
-/// width with the same trailing token, which `ORDER BY ingested_at` then
-/// relies on. Don't reach for [`now_iso`] for ordering-critical columns:
-/// `to_rfc3339()` emits `+00:00` rather than `Z` and may shift precision
-/// with the underlying chrono build, both of which break lex-sort if a
-/// mix of formats ever lands in the same column.
+/// Normalised to UTC with **millisecond** precision (fixed three-digit
+/// fractional seconds) and a literal `Z` suffix so a string-typed column
+/// lex-sorts chronologically — every value is the same width with the same
+/// trailing token, which `ORDER BY ingested_at` then relies on. Whole-second
+/// precision was previously used here, but a receipt ingested in the same
+/// wall-clock second as another would tie on `ingested_at` and fall back to
+/// `id` ordering, which is not chronological. Three-digit millis are enough
+/// to disambiguate any realistic webhook burst while keeping a fixed-width
+/// string for lex-sort. Don't reach for [`now_iso`] for ordering-critical
+/// columns: `to_rfc3339()` emits `+00:00` rather than `Z` and may shift
+/// precision with the underlying chrono build, both of which break lex-sort
+/// if a mix of formats ever lands in the same column.
 ///
 /// Use this for any field that drives ordering or financial dates. The
 /// webhook handler still parses and normalises the bot-supplied
 /// `received_at` independently — we don't want the server clock to
 /// silently overwrite forensic evidence of what the bot observed.
 pub fn server_now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 // ── Auth models ───────────────────────────────────────────────────────────────
