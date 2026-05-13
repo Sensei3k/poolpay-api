@@ -97,8 +97,7 @@ fn parse_u32(raw: &str, field: &str) -> Result<u32, AppError> {
 /// header bytes, so the `from_str` call cannot fail in practice — the
 /// `expect` documents the invariant rather than papering over it.
 pub fn header_u32(value: u32) -> HeaderValue {
-    HeaderValue::from_str(&value.to_string())
-        .expect("decimal u32 is always a valid header value")
+    HeaderValue::from_str(&value.to_string()).expect("decimal u32 is always a valid header value")
 }
 
 #[cfg(test)]

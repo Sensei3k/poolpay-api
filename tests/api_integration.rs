@@ -107,7 +107,7 @@ const TEST_SCOPED_ADMIN_GROUP: &str = "1";
 ///   canonical 403 fixture for both `SuperAdminUser` and
 ///   `GroupScopedAdmin` handlers.
 async fn seed_test_admin_users(db: &poolpay::db::DbConn) {
-    use poolpay::api::models::{DbUser, UserContent, now_iso};
+    use poolpay::api::models::{now_iso, DbUser, UserContent};
 
     for (sub, role) in [
         (TEST_SUPER_ADMIN_SUB, "super_admin"),
@@ -215,7 +215,10 @@ fn mint_user_jwt(sub: &str, role: &str) -> String {
 }
 
 fn super_admin_bearer() -> String {
-    format!("Bearer {}", mint_user_jwt(TEST_SUPER_ADMIN_SUB, "super_admin"))
+    format!(
+        "Bearer {}",
+        mint_user_jwt(TEST_SUPER_ADMIN_SUB, "super_admin")
+    )
 }
 
 fn admin_bearer() -> String {
@@ -354,7 +357,10 @@ async fn create_group_super_admin_jwt_proceeds() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "New Group"})),
+        post_json_jwt(
+            "/api/admin/groups",
+            serde_json::json!({"name": "New Group"}),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -370,7 +376,11 @@ async fn create_group_admin_role_jwt_returns_403() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_jwt_with("/api/admin/groups", serde_json::json!({"name": "x"}), &admin_bearer()),
+        post_json_jwt_with(
+            "/api/admin/groups",
+            serde_json::json!({"name": "x"}),
+            &admin_bearer(),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -412,7 +422,10 @@ async fn create_group_returns_201_with_body() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "Beta Circle"})),
+        post_json_jwt(
+            "/api/admin/groups",
+            serde_json::json!({"name": "Beta Circle"}),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -597,7 +610,10 @@ async fn create_member_same_phone_different_group_allowed() {
     // Create a second group first.
     let resp = call(
         app.clone(),
-        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "Second Group"})),
+        post_json_jwt(
+            "/api/admin/groups",
+            serde_json::json!({"name": "Second Group"}),
+        ),
     )
     .await;
     let new_group: serde_json::Value = json_body(resp).await;
@@ -713,8 +729,7 @@ async fn delete_member_not_recipient_returns_204() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // Verify soft delete — member no longer in default list.
-    let members: Vec<serde_json::Value> =
-        json_body(call(app, get("/api/members")).await).await;
+    let members: Vec<serde_json::Value> = json_body(call(app, get("/api/members")).await).await;
     assert_eq!(members.len(), 5);
 }
 
@@ -758,9 +773,15 @@ async fn get_cycles_response_shape() {
     assert!(c.get("cycleNumber").is_some(), "missing cycleNumber");
     assert!(c.get("startDate").is_some(), "missing startDate");
     assert!(c.get("endDate").is_some(), "missing endDate");
-    assert!(c.get("contributionPerMember").is_some(), "missing contributionPerMember");
+    assert!(
+        c.get("contributionPerMember").is_some(),
+        "missing contributionPerMember"
+    );
     assert!(c.get("totalAmount").is_some(), "missing totalAmount");
-    assert!(c.get("recipientMemberId").is_some(), "missing recipientMemberId");
+    assert!(
+        c.get("recipientMemberId").is_some(),
+        "missing recipientMemberId"
+    );
     assert!(c.get("status").is_some(), "missing status");
     assert!(c.get("groupId").is_some(), "missing groupId");
     assert!(c.get("createdAt").is_some(), "missing createdAt");
@@ -838,7 +859,10 @@ async fn create_cycle_recipient_wrong_group_returns_400() {
     // Create a second group.
     let resp = call(
         app.clone(),
-        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "Other Group"})),
+        post_json_jwt(
+            "/api/admin/groups",
+            serde_json::json!({"name": "Other Group"}),
+        ),
     )
     .await;
     let other_group: serde_json::Value = json_body(resp).await;
@@ -1001,7 +1025,10 @@ async fn get_payments_filter_by_cycle_id_returns_subset() {
     let payments: Vec<serde_json::Value> = json_body(resp).await;
     assert_eq!(payments.len(), 3, "cycle 3 should have 3 fixture payments");
     for p in &payments {
-        assert_eq!(p["cycleId"], "3", "all returned payments must belong to cycle 3");
+        assert_eq!(
+            p["cycleId"], "3",
+            "all returned payments must belong to cycle 3"
+        );
     }
 }
 
@@ -1017,7 +1044,10 @@ async fn get_payments_filter_unknown_cycle_returns_empty() {
     let resp = call(test_app().await, get("/api/payments?cycleId=999")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let payments: Vec<serde_json::Value> = json_body(resp).await;
-    assert!(payments.is_empty(), "unknown cycle should return empty array");
+    assert!(
+        payments.is_empty(),
+        "unknown cycle should return empty array"
+    );
 }
 
 // ── POST /api/payments ──────────────────────────────────────────────────────
@@ -1374,17 +1404,19 @@ async fn reset_restores_payments_to_fixture_count() {
 
     call(app.clone(), post_empty("/api/test/reset")).await;
 
-    let payments: Vec<serde_json::Value> =
-        json_body(call(app, get("/api/payments")).await).await;
-    assert_eq!(payments.len(), 49, "reset should restore 49 fixture payments");
+    let payments: Vec<serde_json::Value> = json_body(call(app, get("/api/payments")).await).await;
+    assert_eq!(
+        payments.len(),
+        49,
+        "reset should restore 49 fixture payments"
+    );
 }
 
 #[tokio::test]
 async fn reset_restores_members() {
     let app = test_app().await;
     call(app.clone(), post_empty("/api/test/reset")).await;
-    let members: Vec<serde_json::Value> =
-        json_body(call(app, get("/api/members")).await).await;
+    let members: Vec<serde_json::Value> = json_body(call(app, get("/api/members")).await).await;
     assert_eq!(members.len(), 6);
 }
 
@@ -1392,8 +1424,7 @@ async fn reset_restores_members() {
 async fn reset_restores_cycles() {
     let app = test_app().await;
     call(app.clone(), post_empty("/api/test/reset")).await;
-    let cycles: Vec<serde_json::Value> =
-        json_body(call(app, get("/api/cycles")).await).await;
+    let cycles: Vec<serde_json::Value> = json_body(call(app, get("/api/cycles")).await).await;
     assert_eq!(cycles.len(), 12);
 }
 
@@ -1401,8 +1432,7 @@ async fn reset_restores_cycles() {
 async fn reset_restores_groups() {
     let app = test_app().await;
     call(app.clone(), post_empty("/api/test/reset")).await;
-    let groups: Vec<serde_json::Value> =
-        json_body(call(app, get("/api/groups")).await).await;
+    let groups: Vec<serde_json::Value> = json_body(call(app, get("/api/groups")).await).await;
     assert_eq!(groups.len(), 1);
 }
 
@@ -1424,7 +1454,10 @@ async fn bad_request_error_has_json_error_field() {
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = json_body(resp).await;
-    assert!(body.get("error").is_some(), "400 must have an 'error' field");
+    assert!(
+        body.get("error").is_some(),
+        "400 must have an 'error' field"
+    );
     assert!(body["error"].is_string(), "'error' must be a string");
 }
 
@@ -1434,7 +1467,10 @@ async fn not_found_error_has_json_error_field() {
     let resp = call(app, delete_req_jwt("/api/payments/999/999")).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body: serde_json::Value = json_body(resp).await;
-    assert!(body.get("error").is_some(), "404 must have an 'error' field");
+    assert!(
+        body.get("error").is_some(),
+        "404 must have an 'error' field"
+    );
 }
 
 #[tokio::test]
@@ -1447,7 +1483,10 @@ async fn unauthorized_error_has_json_error_field() {
     .await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let body: serde_json::Value = json_body(resp).await;
-    assert!(body.get("error").is_some(), "401 must have an 'error' field");
+    assert!(
+        body.get("error").is_some(),
+        "401 must have an 'error' field"
+    );
 }
 
 #[tokio::test]
@@ -1456,7 +1495,10 @@ async fn conflict_error_has_json_error_field() {
     let resp = call(app, delete_req_jwt("/api/admin/groups/1")).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: serde_json::Value = json_body(resp).await;
-    assert!(body.get("error").is_some(), "409 must have an 'error' field");
+    assert!(
+        body.get("error").is_some(),
+        "409 must have an 'error' field"
+    );
 }
 
 // ── WhatsApp links (admin CRUD) ─────────────────────────────────────────────
@@ -1576,7 +1618,11 @@ async fn create_whatsapp_link_duplicate_chat_id_returns_409() {
     let app = test_app_with_auth().await;
     let body = serde_json::json!({"chatId": "2349000000003@g.us", "groupId": "1"});
 
-    let first = call(app.clone(), post_json_jwt("/api/admin/whatsapp-links", body.clone())).await;
+    let first = call(
+        app.clone(),
+        post_json_jwt("/api/admin/whatsapp-links", body.clone()),
+    )
+    .await;
     assert_eq!(first.status(), StatusCode::CREATED);
 
     let second = call(app, post_json_jwt("/api/admin/whatsapp-links", body)).await;
@@ -1791,8 +1837,9 @@ async fn get_receipts_excludes_soft_deleted() {
     let resp = call(app, get("/api/receipts")).await;
     let receipts: Vec<serde_json::Value> = json_body(resp).await;
     assert!(
-        receipts.iter().all(|r| r.get("deletedAt").is_none()
-            || r["deletedAt"].is_null()),
+        receipts
+            .iter()
+            .all(|r| r.get("deletedAt").is_none() || r["deletedAt"].is_null()),
         "soft-deleted receipts must not be returned"
     );
 }
@@ -1804,8 +1851,7 @@ async fn reset_restores_receipts_to_fixture_count() {
         json_body(call(app.clone(), get("/api/receipts")).await).await;
     let baseline = before.len();
     call(app.clone(), post_empty("/api/test/reset")).await;
-    let after: Vec<serde_json::Value> =
-        json_body(call(app, get("/api/receipts")).await).await;
+    let after: Vec<serde_json::Value> = json_body(call(app, get("/api/receipts")).await).await;
     assert_eq!(after.len(), baseline);
 }
 
@@ -1930,7 +1976,11 @@ async fn confirm_receipt_requires_auth() {
 #[tokio::test]
 async fn confirm_receipt_unknown_id_returns_404() {
     let app = test_app_with_auth().await;
-    let resp = call(app, post_empty_jwt("/api/admin/receipts/does-not-exist/confirm")).await;
+    let resp = call(
+        app,
+        post_empty_jwt("/api/admin/receipts/does-not-exist/confirm"),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -2359,7 +2409,10 @@ async fn confirm_receipt_unknown_id_denies_non_scoped_admin_opaquely() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        post_empty_jwt_with("/api/admin/receipts/does-not-exist/confirm", &admin_bearer()),
+        post_empty_jwt_with(
+            "/api/admin/receipts/does-not-exist/confirm",
+            &admin_bearer(),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -2558,10 +2611,7 @@ async fn pagination_excludes_soft_deleted_receipts_from_total_count() {
 /// suites to assert side-effect rows landed where they should. The query
 /// flows through the same SurrealDB handle the API uses, so an index
 /// regression would fail the read here too.
-async fn fetch_inbox_for_user(
-    db: &poolpay::db::DbConn,
-    user_id: &str,
-) -> Vec<serde_json::Value> {
+async fn fetch_inbox_for_user(db: &poolpay::db::DbConn, user_id: &str) -> Vec<serde_json::Value> {
     use surrealdb_types::SurrealValue;
     #[derive(Debug, serde::Deserialize, SurrealValue)]
     struct Row {
@@ -2662,10 +2712,7 @@ async fn patch_receipt_invalid_action_returns_400() {
     let app = test_app_with_auth().await;
     let resp = call(
         app,
-        patch_json_jwt(
-            "/api/receipts/1",
-            serde_json::json!({"action": "destroy"}),
-        ),
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "destroy"})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -2683,7 +2730,10 @@ async fn patch_receipt_scoped_admin_denied_cross_group_returns_403() {
     // Create group 2 via the admin API (super-admin path).
     let g = call(
         app.clone(),
-        post_json_jwt("/api/admin/groups", serde_json::json!({"name": "Off-limits"})),
+        post_json_jwt(
+            "/api/admin/groups",
+            serde_json::json!({"name": "Off-limits"}),
+        ),
     )
     .await;
     assert_eq!(g.status(), StatusCode::CREATED);
@@ -2908,7 +2958,11 @@ async fn inbox_item_created_on_confirm() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let inbox = fetch_inbox_for_user(&db, "4").await;
-    assert_eq!(inbox.len(), 1, "exactly one inbox row should land on confirm");
+    assert_eq!(
+        inbox.len(),
+        1,
+        "exactly one inbox row should land on confirm"
+    );
     assert_eq!(inbox[0]["kind"], "receipt_confirmed");
 }
 

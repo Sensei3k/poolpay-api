@@ -176,13 +176,15 @@ pub fn print_notification(n: &Notification) {
     let body = &n.body;
     let webhook_type = &body.type_webhook;
 
-    let (sender_name, sender) = body.sender_data.as_ref().map_or(
-        ("unknown", "unknown"),
-        |s| (
-            s.sender_name.as_deref().unwrap_or("unknown"),
-            s.sender.as_deref().unwrap_or("unknown"),
-        ),
-    );
+    let (sender_name, sender) = body
+        .sender_data
+        .as_ref()
+        .map_or(("unknown", "unknown"), |s| {
+            (
+                s.sender_name.as_deref().unwrap_or("unknown"),
+                s.sender.as_deref().unwrap_or("unknown"),
+            )
+        });
 
     let msg_type = body
         .message_data
@@ -192,10 +194,7 @@ pub fn print_notification(n: &Notification) {
 
     info!(
         webhook_type,
-        sender_name,
-        sender,
-        msg_type,
-        "Notification received"
+        sender_name, sender, msg_type, "Notification received"
     );
 
     if let Some(msg) = &body.message_data {

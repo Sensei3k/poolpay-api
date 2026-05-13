@@ -85,3 +85,23 @@ rand = "0.8"
 tower = { version = "0.5", features = ["util"] }
 # Read axum response bodies in integration tests
 http-body-util = "0.1"
+
+# ── Build profile tweaks ──────────────────────────────────────────────────────
+#
+# Dev / test builds optimise for cycle time, not for pristine debuginfo.
+# `line-tables-only` keeps backtraces and panic locations useful while
+# dropping the heavier DWARF data — roughly 20–30% off a typical incremental
+# rebuild and noticeably less I/O on the `target/` directory.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
+# Compile third-party dependencies with mild optimisation. The first cold
+# build is slightly slower; every subsequent dev cycle runs proc-macros
+# (serde / tracing / surrealdb derives) faster, and `cargo test` benefits
+# the most. Our own code stays at the default `opt-level = 0` so the inner
+# edit-compile loop is untouched.
+[profile.dev.package."*"]
+opt-level = 1

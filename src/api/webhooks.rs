@@ -143,11 +143,10 @@ pub async fn whatsapp_webhook(
     // `…+01:00` and `…+00:00` would sort lexicographically — breaking
     // absolute-time ordering of the admin queue. Converting to UTC makes the
     // lexicographic sort equivalent to a chronological sort.
-    let parsed_received_at =
-        chrono::DateTime::parse_from_rfc3339(&payload.received_at)
-            .map_err(|_| AppError::Unauthorized)?
-            .with_timezone(&chrono::Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let parsed_received_at = chrono::DateTime::parse_from_rfc3339(&payload.received_at)
+        .map_err(|_| AppError::Unauthorized)?
+        .with_timezone(&chrono::Utc)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     // `raw_image_url` is persisted verbatim and surfaced to admins in the FE
     // review modal. Reject anything that is not an absolute http(s) URL so a
@@ -234,9 +233,7 @@ fn is_http_or_https_url(url: &str) -> bool {
     // mean `http:///path` — no host). The authority slice runs from the end
     // of `://` to the first of `/`, `?`, or `#` so query- or fragment-only
     // inputs like `https://?x=1` and `https://#frag` are also rejected.
-    let host_end = rest
-        .find(|c: char| c == '/' || c == '?' || c == '#')
-        .unwrap_or(rest.len());
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..host_end];
     if authority.is_empty() {
         return false;

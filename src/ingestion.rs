@@ -8,8 +8,8 @@
 
 use tracing::info;
 
-use crate::api::models::{AppError, EntityId, ReceiptContent, now_iso};
-use crate::db::{DbConn, is_unique_constraint_error};
+use crate::api::models::{now_iso, AppError, EntityId, ReceiptContent};
+use crate::db::{is_unique_constraint_error, DbConn};
 use crate::models::ParsedReceipt;
 use crate::parser;
 use crate::routing;
@@ -67,7 +67,10 @@ pub async fn ingest_receipt(
     input: IngestionInput<'_>,
 ) -> Result<IngestionOutcome, AppError> {
     let Some(group) = routing::find_group_by_chat_id(db, input.chat_id).await? else {
-        info!(chat_id = input.chat_id, "Ingestion skipped: chat not linked to a group");
+        info!(
+            chat_id = input.chat_id,
+            "Ingestion skipped: chat not linked to a group"
+        );
         return Ok(IngestionOutcome::NotLinked);
     };
     let group_id = crate::api::models::record_id_to_string(group.id);
@@ -76,7 +79,10 @@ pub async fn ingest_receipt(
         .await?
         .is_some()
     {
-        info!(message_id = input.message_id, "Ingestion skipped: duplicate message id");
+        info!(
+            message_id = input.message_id,
+            "Ingestion skipped: duplicate message id"
+        );
         return Ok(IngestionOutcome::DuplicateMessage);
     }
 
@@ -136,18 +142,21 @@ pub async fn ingest_receipt(
     // constraint violation here to the same `DuplicateMessage` outcome the
     // pre-check returns. Callers (and the WhatsApp reply layer) then see a
     // single, consistent dedup signal regardless of which path caught it.
-    let created: Option<crate::api::models::DbReceipt> =
-        match db.create("receipt").content(content).await {
-            Ok(row) => row,
-            Err(e) if is_unique_constraint_error(&e.to_string()) => {
-                info!(
+    let created: Option<crate::api::models::DbReceipt> = match db
+        .create("receipt")
+        .content(content)
+        .await
+    {
+        Ok(row) => row,
+        Err(e) if is_unique_constraint_error(&e.to_string()) => {
+            info!(
                     message_id = input.message_id,
                     "Ingestion skipped: unique-constraint violation on whatsapp_message_id (concurrent duplicate)"
                 );
-                return Ok(IngestionOutcome::DuplicateMessage);
-            }
-            Err(e) => return Err(e.into()),
-        };
+            return Ok(IngestionOutcome::DuplicateMessage);
+        }
+        Err(e) => return Err(e.into()),
+    };
     let receipt_id = created
         .map(|r| crate::api::models::record_id_to_string(r.id))
         .ok_or_else(|| AppError::Internal("Failed to persist receipt".to_string()))?;

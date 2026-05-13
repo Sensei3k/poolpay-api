@@ -5,7 +5,7 @@
 //! go through the Axum router, so they isolate query behaviour from
 //! handler/auth concerns.
 
-use poolpay::api::models::{DbGroupLink, EntityId, GroupLinkContent, now_iso};
+use poolpay::api::models::{now_iso, DbGroupLink, EntityId, GroupLinkContent};
 use poolpay::db::{self, DbConn};
 use poolpay::routing::{
     find_active_cycle, find_group_by_chat_id, find_member_by_phone, find_receipt_by_message_id,
@@ -97,9 +97,7 @@ async fn member_by_phone_returns_match_in_group() {
 async fn member_by_phone_returns_none_for_unknown_phone() {
     let db = fresh_db().await;
     let group_id: EntityId = FIXTURE_GROUP_ID.into();
-    let m = find_member_by_phone(&db, &group_id, "999")
-        .await
-        .unwrap();
+    let m = find_member_by_phone(&db, &group_id, "999").await.unwrap();
     assert!(m.is_none());
 }
 

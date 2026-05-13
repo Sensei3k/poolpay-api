@@ -5,7 +5,7 @@
 //! distinguish "no such user" from "wrong password" by response latency.
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng};
+use password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use std::sync::OnceLock;
 
 use crate::api::models::AppError;
@@ -133,7 +133,7 @@ mod tests {
     /// speed. One hash + one verify; ~500 ms in debug mode.
     #[test]
     fn prod_params_round_trip() {
-        use password_hash::{PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng};
+        use password_hash::{rand_core::OsRng, PasswordHasher, PasswordVerifier, SaltString};
 
         let params = Params::new(
             ARGON2_PROD_M_COST_KIB,
@@ -149,6 +149,8 @@ mod tests {
             .expect("hash with prod params")
             .to_string();
         let parsed = PasswordHash::new(&hash).expect("parse PHC");
-        assert!(argon2.verify_password(b"prod-params-smoke", &parsed).is_ok());
+        assert!(argon2
+            .verify_password(b"prod-params-smoke", &parsed)
+            .is_ok());
     }
 }
