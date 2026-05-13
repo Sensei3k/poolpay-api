@@ -33,10 +33,8 @@ static FALLBACK_SENDER_RE: LazyLock<Regex> = LazyLock::new(|| {
     // of letters and spaces (e.g. a garbled paragraph), the match stops at 41 chars
     // and the excess is silently dropped. This is a known limitation — it protects
     // against runaway captures at the cost of truncating unusually long names.
-    Regex::new(
-        r"(?i)(?:sender(?:\s+name)?|from|originator)\s*[:\-]?\s*([A-Za-z][A-Za-z ]{2,40})",
-    )
-    .unwrap()
+    Regex::new(r"(?i)(?:sender(?:\s+name)?|from|originator)\s*[:\-]?\s*([A-Za-z][A-Za-z ]{2,40})")
+        .unwrap()
 });
 
 static KNOWN_BANKS_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -105,7 +103,11 @@ pub fn parse_receipt(text: &str) -> ParsedReceipt {
             .map(|m| m.as_str().trim().to_string());
     }
 
-    ParsedReceipt { sender, bank, amount }
+    ParsedReceipt {
+        sender,
+        bank,
+        amount,
+    }
 }
 
 /// Converts a normalised amount string (as produced by `parse_receipt`) into

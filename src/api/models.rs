@@ -73,7 +73,10 @@ impl IntoResponse for AppError {
             AppError::Forbidden(msg) => simple(StatusCode::FORBIDDEN, msg),
             AppError::Conflict(msg) => simple(StatusCode::CONFLICT, msg),
             AppError::TooManyRequests { retry_after_secs } => {
-                let mut resp = simple(StatusCode::TOO_MANY_REQUESTS, "too many requests".to_string());
+                let mut resp = simple(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "too many requests".to_string(),
+                );
                 if let Some(secs) = retry_after_secs {
                     if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
                         resp.headers_mut().insert(header::RETRY_AFTER, v);
@@ -547,7 +550,10 @@ impl TryFrom<DbGroup> for Group {
         Ok(Self {
             id: record_id_to_string(db.id),
             name: db.name,
-            status: db.status.parse().map_err(|e: String| AppError::Internal(e))?,
+            status: db
+                .status
+                .parse()
+                .map_err(|e: String| AppError::Internal(e))?,
             description: db.description,
             created_at: db.created_at,
             updated_at: db.updated_at,
@@ -565,7 +571,10 @@ impl TryFrom<DbMember> for Member {
             name: db.name,
             phone: db.phone,
             position: db.position,
-            status: db.status.parse().map_err(|e: String| AppError::Internal(e))?,
+            status: db
+                .status
+                .parse()
+                .map_err(|e: String| AppError::Internal(e))?,
             group_id: db.group_id,
             notes: db.notes,
             joined_at: db.joined_at,
@@ -588,7 +597,10 @@ impl TryFrom<DbCycle> for Cycle {
             contribution_per_member: db.contribution_per_member,
             total_amount: db.total_amount,
             recipient_member_id: db.recipient_member_id,
-            status: db.status.parse().map_err(|e: String| AppError::Internal(e))?,
+            status: db
+                .status
+                .parse()
+                .map_err(|e: String| AppError::Internal(e))?,
             group_id: db.group_id,
             notes: db.notes,
             created_at: db.created_at,
@@ -606,7 +618,10 @@ impl TryFrom<DbPayment> for Payment {
             member_id: db.member_id,
             cycle_id: db.cycle_id,
             amount: db.amount,
-            currency: db.currency.parse().map_err(|e: String| AppError::Internal(e))?,
+            currency: db
+                .currency
+                .parse()
+                .map_err(|e: String| AppError::Internal(e))?,
             payment_date: db.payment_date,
             payment_method: db.payment_method,
             reference: db.reference,
@@ -635,7 +650,10 @@ impl TryFrom<DbReceipt> for Receipt {
             extracted_amount: db.extracted_amount,
             expected_amount: db.expected_amount,
             amount_matches: db.amount_matches,
-            status: db.status.parse().map_err(|e: String| AppError::Internal(e))?,
+            status: db
+                .status
+                .parse()
+                .map_err(|e: String| AppError::Internal(e))?,
             ocr_text: db.ocr_text,
             sender_label: db.sender_label,
             bank_label: db.bank_label,
@@ -872,7 +890,9 @@ impl UpdateGroupRequest {
             }
         }
         if let Some(status) = &self.status {
-            status.parse::<GroupStatus>().map_err(AppError::BadRequest)?;
+            status
+                .parse::<GroupStatus>()
+                .map_err(AppError::BadRequest)?;
         }
         Ok(())
     }
@@ -946,7 +966,9 @@ impl UpdateMemberRequest {
             }
         }
         if let Some(status) = &self.status {
-            status.parse::<MemberStatus>().map_err(AppError::BadRequest)?;
+            status
+                .parse::<MemberStatus>()
+                .map_err(AppError::BadRequest)?;
         }
         if let Some(joined_at) = &self.joined_at {
             if !is_valid_date(joined_at) {
@@ -1054,7 +1076,9 @@ impl UpdateCycleRequest {
             }
         }
         if let Some(status) = &self.status {
-            status.parse::<CycleStatus>().map_err(AppError::BadRequest)?;
+            status
+                .parse::<CycleStatus>()
+                .map_err(AppError::BadRequest)?;
         }
         if let Some(recipient_id) = &self.recipient_member_id {
             if recipient_id.trim().is_empty() {
@@ -1093,14 +1117,10 @@ pub struct CreatePaymentRequest {
 impl CreatePaymentRequest {
     pub fn validate(&self) -> Result<(), AppError> {
         if self.member_id.trim().is_empty() {
-            return Err(AppError::BadRequest(
-                "memberId must not be empty".into(),
-            ));
+            return Err(AppError::BadRequest("memberId must not be empty".into()));
         }
         if self.cycle_id.trim().is_empty() {
-            return Err(AppError::BadRequest(
-                "cycleId must not be empty".into(),
-            ));
+            return Err(AppError::BadRequest("cycleId must not be empty".into()));
         }
         if self.amount <= 0 {
             return Err(AppError::BadRequest(
@@ -1272,4 +1292,3 @@ pub struct DbGroupAdmin {
     pub created_at: String,
     pub created_by: String,
 }
-
