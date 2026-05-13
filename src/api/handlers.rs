@@ -1216,14 +1216,14 @@ async fn confirm_receipt_inner(
     // bounds the request, not the body field. Falls back to received_at
     // only for legacy rows whose ingested_at predates the schema landing
     // (the migration backfills, so this is belt-and-braces).
-    let payment_source = receipt
-        .ingested_at
-        .as_deref()
-        .unwrap_or(&receipt.received_at);
+    let (payment_source, source_field): (&str, &str) = match receipt.ingested_at.as_deref() {
+        Some(s) => (s, "ingested_at"),
+        None => (receipt.received_at.as_str(), "received_at"),
+    };
     let payment_date = chrono::DateTime::parse_from_rfc3339(payment_source)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .map_err(|_| {
-            AppError::Conflict(format!("receipt {id} has an invalid ingested_at timestamp"))
+            AppError::Conflict(format!("receipt {id} has an invalid {source_field} timestamp"))
         })?;
 
     let payment_content = PaymentContent {
