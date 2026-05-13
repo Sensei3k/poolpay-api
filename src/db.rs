@@ -271,11 +271,22 @@ async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::E
 }
 
 /// Rust-side companion to [`define_receipt_extensions`]: for every legacy
-/// `receipt` row that still has `ingested_at = NONE`, parse `received_at`
-/// as RFC 3339 and re-emit it via [`server_now`]-style formatting (UTC,
-/// second precision, `Z` suffix) before writing it back. Rows whose
-/// `received_at` is missing or unparseable fall back to a fresh
-/// `server_now()` so we never persist a value that breaks lex-sort.
+/// `receipt` row that still has `ingested_at = NONE`, derive a
+/// monotonic-with-arrival timestamp and re-emit it via [`server_now`]-style
+/// formatting (UTC, second precision, `Z` suffix) before writing it back.
+///
+/// The fallback chain is deliberately ordered so the stamped value still
+/// reflects the row's true arrival position in the FIFO queue:
+///   1. Prefer the row's `received_at` (bot-supplied, but the closest
+///      available proxy for when the receipt actually arrived).
+///   2. If that is missing or unparseable, fall back to `created_at` —
+///      also server-stamped at insert, so it sorts deterministically
+///      against rows that already have `ingested_at` set.
+///   3. Only if `created_at` is itself unparseable (should never happen
+///      in practice; the column is required) do we stamp a fresh
+///      `server_now()`. That last branch makes legacy rows look "just
+///      ingested" and breaks FIFO, so it is reserved for genuinely
+///      corrupt rows where there is no better signal.
 async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     use surrealdb::types::RecordId;
     use surrealdb_types::SurrealValue;
@@ -284,6 +295,14 @@ async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb
     struct LegacyReceipt {
         id: RecordId,
         received_at: Option<String>,
+        created_at: String,
+    }
+
+    fn normalise_rfc3339(s: &str) -> Option<String> {
+        chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| {
+            dt.with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        })
     }
 
     // Page the scan so a multi-million-row receipt table doesn't pull the
@@ -295,7 +314,10 @@ async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb
     let mut total_backfilled: u64 = 0;
     loop {
         let mut result = db
-            .query("SELECT id, received_at FROM receipt WHERE ingested_at IS NONE LIMIT $limit")
+            .query(
+                "SELECT id, received_at, created_at FROM receipt \
+                 WHERE ingested_at IS NONE LIMIT $limit",
+            )
             .bind(("limit", BATCH_SIZE))
             .await?;
         let rows: Vec<LegacyReceipt> = result.take(0)?;
@@ -307,11 +329,8 @@ async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb
             let normalised = row
                 .received_at
                 .as_deref()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Utc)
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                })
+                .and_then(normalise_rfc3339)
+                .or_else(|| normalise_rfc3339(&row.created_at))
                 .unwrap_or_else(crate::api::models::server_now);
             // `.check()?` surfaces SurrealDB statement errors instead of
             // silently leaving `ingested_at` as NONE — without it a
