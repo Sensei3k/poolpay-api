@@ -222,6 +222,7 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 ///   3. Only if `created_at` is also unparseable do we stamp a fresh
 ///      `server_now()`. That last branch makes legacy rows look "just
 ///      ingested" and is reserved for genuinely corrupt rows.
+///
 /// The backfill is idempotent — the `WHERE ingested_at IS NONE` guard
 /// skips rows already populated on every subsequent boot.
 ///
