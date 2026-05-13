@@ -88,12 +88,15 @@ impl AttemptTracker {
     /// to at least 2: with the give-up boundary set to `attempts ==
     /// max_attempts`, a value of 1 would discard on the first failure
     /// and revert to the old always-ack behaviour. `capacity` is clamped
-    /// to at least 1 for the same kind of guard.
+    /// to at least 1 for the same kind of guard. `ttl` is clamped to at
+    /// least 1 second: a zero `Duration` would make `evict_stale_at`
+    /// drop every entry on every interaction, silently resetting the
+    /// retry budget on each failure.
     pub fn new(max_attempts: u32, ttl: Duration, capacity: usize) -> Self {
         Self {
             inner: HashMap::new(),
             max_attempts: max_attempts.max(2),
-            ttl,
+            ttl: ttl.max(Duration::from_secs(1)),
             capacity: capacity.max(1),
         }
     }
