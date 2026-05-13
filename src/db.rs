@@ -214,14 +214,16 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 /// the mixed-format problem `server_now` was added to solve (`+00:00`
 /// vs `Z`, mixed sub-second precision), which breaks the lex-sort
 /// invariant `ORDER BY ingested_at` relies on. The chain is:
-///   1. Prefer `received_at` (bot-supplied, closest proxy for true
-///      arrival time and therefore best for preserving FIFO order).
-///   2. If `received_at` is missing or unparseable, fall back to the
-///      row's own `created_at` (server-stamped at insert, so it still
-///      sorts deterministically against rows with `ingested_at` set).
-///   3. Only if `created_at` is also unparseable do we stamp a fresh
-///      `server_now()`. That last branch makes legacy rows look "just
-///      ingested" and is reserved for genuinely corrupt rows.
+///   1. Prefer the row's server-stamped `created_at` (sorts
+///      deterministically against rows that already have `ingested_at`
+///      set, since both are written via `server_now()`-style formatting,
+///      and cannot be steered by a misclocked or hostile bot).
+///   2. If `created_at` is unparseable (the column is required, so this
+///      should never fire in practice), fall back to the bot-supplied
+///      `received_at` as a forensic last-resort proxy for arrival time.
+///   3. Only if neither parses do we stamp a fresh `server_now()`. That
+///      last branch makes legacy rows look "just ingested" and is
+///      reserved for genuinely corrupt rows.
 ///
 /// The backfill is idempotent — the `WHERE ingested_at IS NONE` guard
 /// skips rows already populated on every subsequent boot.
@@ -283,18 +285,24 @@ async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::E
 /// formatting (UTC, millisecond precision, `Z` suffix) before writing it
 /// back.
 ///
-/// The fallback chain is deliberately ordered so the stamped value still
-/// reflects the row's true arrival position in the FIFO queue:
-///   1. Prefer the row's `received_at` (bot-supplied, but the closest
-///      available proxy for when the receipt actually arrived).
-///   2. If that is missing or unparseable, fall back to `created_at` —
-///      also server-stamped at insert, so it sorts deterministically
-///      against rows that already have `ingested_at` set.
-///   3. Only if `created_at` is itself unparseable (should never happen
-///      in practice; the column is required) do we stamp a fresh
-///      `server_now()`. That last branch makes legacy rows look "just
-///      ingested" and breaks FIFO, so it is reserved for genuinely
-///      corrupt rows where there is no better signal.
+/// The fallback chain is deliberately ordered so the stamped value cannot
+/// be steered by a misclocked or hostile bot — only server-owned fields
+/// are trusted to position the row in the FIFO queue:
+///   1. Prefer the row's server-stamped `created_at` (set by the
+///      application path at insert; sorts deterministically against rows
+///      that already have `ingested_at` set, since both are written via
+///      `server_now()`-style formatting).
+///   2. If `created_at` is somehow unparseable (should never happen in
+///      practice; the column is required), fall back to the bot-supplied
+///      `received_at` as a forensic last-resort proxy for arrival time.
+///   3. Only if neither parses do we stamp a fresh `server_now()`. That
+///      branch makes legacy rows look "just ingested" and breaks FIFO,
+///      so it is reserved for genuinely corrupt rows where there is no
+///      better signal.
+///
+/// This matches the same reasoning that drove `confirm_receipt_inner`'s
+/// switch to `created_at`: bot-clock-independence for any field that
+/// downstream code (admin queue, payment_date) treats as load-bearing.
 async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     use surrealdb::types::RecordId;
     use surrealdb_types::SurrealValue;
@@ -334,11 +342,8 @@ async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb
         }
         let batch_len = rows.len();
         for row in rows {
-            let normalised = row
-                .received_at
-                .as_deref()
-                .and_then(normalise_rfc3339)
-                .or_else(|| normalise_rfc3339(&row.created_at))
+            let normalised = normalise_rfc3339(&row.created_at)
+                .or_else(|| row.received_at.as_deref().and_then(normalise_rfc3339))
                 .unwrap_or_else(crate::api::models::server_now);
             // `.check()?` surfaces SurrealDB statement errors instead of
             // silently leaving `ingested_at` as NONE — without it a
