@@ -206,18 +206,22 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 ///     (`ingestion::ingest_receipt`) always stamps it on insert.
 ///
 /// Existing-row backfill: any row pre-dating this migration gets
-/// `ingested_at` filled in once via a three-step fallback chain, each
-/// step parsed (RFC 3339) and re-emitted in the canonical `server_now()`
-/// shape — UTC, millisecond precision, trailing `Z` — that the application
-/// path writes. Done in Rust rather than inline SurrealQL so the
-/// reformat is possible; copying a timestamp verbatim would reintroduce
-/// the mixed-format problem `server_now` was added to solve (`+00:00`
-/// vs `Z`, mixed sub-second precision), which breaks the lex-sort
-/// invariant `ORDER BY ingested_at` relies on. The chain is:
-///   1. Prefer the row's server-stamped `created_at` (sorts
-///      deterministically against rows that already have `ingested_at`
-///      set, since both are written via `server_now()`-style formatting,
-///      and cannot be steered by a misclocked or hostile bot).
+/// `ingested_at` filled in once via a three-step fallback chain. Each
+/// candidate is parsed as RFC 3339 and re-emitted in the canonical
+/// `server_now()` shape — UTC, fixed-width millisecond precision,
+/// trailing `Z` — that the application path writes. The reparse is the
+/// point of doing this in Rust rather than inline SurrealQL: the stored
+/// `created_at` is generally written via `now_iso()` (e.g. receipt
+/// ingestion), which emits `+00:00` and may vary fractional precision,
+/// so copying a timestamp verbatim would reintroduce the mixed-format
+/// problem `server_now` was added to solve and break the lex-sort
+/// invariant `ORDER BY ingested_at` relies on. What matters about
+/// `created_at` here is that it is server-owned (bot-clock-independent),
+/// not that it is already in canonical shape — we normalise it before
+/// writing. The chain is:
+///   1. Prefer the row's server-stamped `created_at`, parsed and
+///      normalised to canonical `server_now()` shape — server-owned, so
+///      it cannot be steered by a misclocked or hostile bot.
 ///   2. If `created_at` is unparseable (the column is required, so this
 ///      should never fire in practice), fall back to the bot-supplied
 ///      `received_at` as a forensic last-resort proxy for arrival time.
@@ -290,11 +294,16 @@ async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::E
 ///
 /// The fallback chain is deliberately ordered so the stamped value cannot
 /// be steered by a misclocked or hostile bot — only server-owned fields
-/// are trusted to position the row in the FIFO queue:
-///   1. Prefer the row's server-stamped `created_at` (set by the
-///      application path at insert; sorts deterministically against rows
-///      that already have `ingested_at` set, since both are written via
-///      `server_now()`-style formatting).
+/// are trusted to position the row in the FIFO queue. Every candidate is
+/// parsed (RFC 3339) and re-emitted in canonical `server_now()` shape
+/// before being written, since the stored `created_at` is generally
+/// produced by `now_iso()` (which emits `+00:00` and may vary fractional
+/// precision) rather than `server_now()` itself — what we trust about it
+/// is that it is server-owned, not that it is already canonical.
+///   1. Prefer the row's server-stamped `created_at`, parsed and
+///      normalised to the canonical `server_now()` shape so it sorts
+///      deterministically against rows already populated via
+///      `server_now()`.
 ///   2. If `created_at` is somehow unparseable (should never happen in
 ///      practice; the column is required), fall back to the bot-supplied
 ///      `received_at` as a forensic last-resort proxy for arrival time.

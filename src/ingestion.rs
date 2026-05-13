@@ -111,11 +111,13 @@ pub async fn ingest_receipt(
     // `ingested_at` is the single server-controlled timestamp on the row.
     // Both webhook and Green API polling reach the DB through this function,
     // so stamping here once means every receipt — regardless of which path
-    // produced it — agrees on format (UTC, second precision, `Z` suffix per
-    // `server_now`). Downstream `payment_date` derivation and admin-queue
-    // `ORDER BY ingested_at` rely on that uniformity for chronological
-    // lex-sort. `received_at` is left untouched so the bot's claimed
-    // observation time stays available for forensics.
+    // produced it — agrees on format (UTC, fixed-width millisecond precision,
+    // `Z` suffix per `server_now`). Downstream `payment_date` derivation and
+    // admin-queue `ORDER BY ingested_at` rely on that uniformity for
+    // chronological lex-sort — whole-second precision would tie rows ingested
+    // in the same second and fall back to id-ordering. `received_at` is left
+    // untouched so the bot's claimed observation time stays available for
+    // forensics.
     let ingested_at = server_now();
     let content = ReceiptContent {
         whatsapp_message_id: input.message_id.to_string(),
