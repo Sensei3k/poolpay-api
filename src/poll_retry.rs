@@ -156,6 +156,7 @@ impl AttemptTracker {
     /// failure for the same id starts from attempt 1 rather than
     /// inheriting a stale counter.
     pub fn record_success(&mut self, receipt_id: u64) {
+        self.evict_stale_at(Instant::now());
         self.inner.remove(&receipt_id);
     }
 
