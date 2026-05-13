@@ -331,14 +331,25 @@ async fn main() {
                             // request itself failed we want the tracker entry
                             // to survive so the next redelivery continues
                             // counting against the existing budget instead of
-                            // starting fresh at attempt 1. `record_failure`
-                            // already cleared the entry on the AckGiveUp path,
-                            // so this is a no-op there.
+                            // starting fresh at attempt 1. Both the success
+                            // path and the `AckGiveUp` path clear here:
+                            // `record_success` for happy-path processing,
+                            // `record_acked` for the terminal give-up state
+                            // (which `record_failure` deliberately leaves in
+                            // place until the ack is confirmed).
                             if processing_ok {
                                 retry_tracker.record_success(notification.receipt_id);
+                            } else {
+                                retry_tracker.record_acked(notification.receipt_id);
                             }
                         }
                         Err(e) => {
+                            // Ack failed — leave the tracker entry alone.
+                            // For the `AckGiveUp` branch this means the next
+                            // Green API redelivery keeps returning
+                            // `AckGiveUp` without restarting the budget; for
+                            // the success branch there is no tracker state
+                            // to worry about.
                             warn!(error = %e, "Failed to delete notification");
                         }
                     }
