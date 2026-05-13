@@ -152,11 +152,12 @@ async fn main() {
     // the loop cannot be moved into tokio::spawn.
     let client = reqwest::Client::new();
 
-    // Tracks consecutive ingest failures per `receiptId` so a transient
-    // SurrealDB blip does not silently drop a user receipt: we skip
-    // `deleteNotification` while the budget allows, letting Green API
-    // redeliver, and ack-with-discard once the budget is exhausted. See
-    // `poll_retry` for the memory bounds (TTL + hard capacity).
+    // Tracks consecutive processing failures (download / OCR / ingest)
+    // per `receiptId` so a transient hiccup does not silently drop a user
+    // receipt: we skip `deleteNotification` while the budget allows,
+    // letting Green API redeliver, and ack-with-discard once the budget
+    // is exhausted. See `poll_retry` for the memory bounds (TTL + hard
+    // capacity).
     let mut retry_tracker = AttemptTracker::with_defaults();
 
     loop {
@@ -288,8 +289,9 @@ async fn main() {
 
                 // Decide whether to ack the notification. On success we ack
                 // unconditionally. On failure we consult `retry_tracker` so a
-                // transient ingest error lets Green API redeliver the message
-                // (within the retry budget) instead of silently dropping it.
+                // transient processing failure (download / OCR / ingest) lets
+                // Green API redeliver the message (within the retry budget)
+                // instead of silently dropping it.
                 let should_ack = if processing_ok {
                     retry_tracker.record_success(notification.receipt_id);
                     true
