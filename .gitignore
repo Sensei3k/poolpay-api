@@ -1,5 +1,8 @@
 # Rust build artifacts
 /target
+# macOS Spotlight workaround: target/ renamed to target.noindex keeps
+# the indexer out of build outputs but is still local build state.
+/target.noindex
 
 # Environment — secrets and local config
 .env

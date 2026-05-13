@@ -8,7 +8,7 @@
 
 use tracing::info;
 
-use crate::api::models::{AppError, EntityId, ReceiptContent, now_iso, server_now};
+use crate::api::models::{now_iso, server_now, AppError, EntityId, ReceiptContent};
 use crate::db::DbConn;
 use crate::models::ParsedReceipt;
 use crate::parser;
@@ -67,7 +67,10 @@ pub async fn ingest_receipt(
     input: IngestionInput<'_>,
 ) -> Result<IngestionOutcome, AppError> {
     let Some(group) = routing::find_group_by_chat_id(db, input.chat_id).await? else {
-        info!(chat_id = input.chat_id, "Ingestion skipped: chat not linked to a group");
+        info!(
+            chat_id = input.chat_id,
+            "Ingestion skipped: chat not linked to a group"
+        );
         return Ok(IngestionOutcome::NotLinked);
     };
     let group_id = crate::api::models::record_id_to_string(group.id);
@@ -76,7 +79,10 @@ pub async fn ingest_receipt(
         .await?
         .is_some()
     {
-        info!(message_id = input.message_id, "Ingestion skipped: duplicate message id");
+        info!(
+            message_id = input.message_id,
+            "Ingestion skipped: duplicate message id"
+        );
         return Ok(IngestionOutcome::DuplicateMessage);
     }
 

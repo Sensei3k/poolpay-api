@@ -19,14 +19,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{ConnectInfo, FromRequestParts};
-use axum::http::{Extensions, HeaderMap, Request, request::Parts};
+use axum::http::{request::Parts, Extensions, HeaderMap, Request};
 use governor::clock::{Clock, DefaultClock};
 use governor::state::keyed::DashMapStateStore;
 use governor::{NotUntil, Quota, RateLimiter};
-use tower_governor::GovernorLayer;
 use tower_governor::errors::GovernorError;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::KeyExtractor;
+use tower_governor::GovernorLayer;
 
 // ── env keys & defaults ───────────────────────────────────────────────────────
 
@@ -70,10 +70,7 @@ impl RateLimitConfig {
         Self {
             per_ip_per_minute: parse_u32(ENV_PER_IP_PER_MINUTE, DEFAULT_PER_IP_PER_MINUTE),
             per_ip_burst: parse_u32(ENV_PER_IP_BURST, DEFAULT_PER_IP_BURST),
-            credential_failure_limit: parse_u32(
-                ENV_CRED_FAILURE_LIMIT,
-                DEFAULT_CRED_FAILURE_LIMIT,
-            ),
+            credential_failure_limit: parse_u32(ENV_CRED_FAILURE_LIMIT, DEFAULT_CRED_FAILURE_LIMIT),
             credential_failure_window_secs: parse_u64(
                 ENV_CRED_FAILURE_WINDOW_SECS,
                 DEFAULT_CRED_FAILURE_WINDOW_SECS,
@@ -237,8 +234,8 @@ pub type AuthGovernorConfig =
 /// auth surface.
 pub fn build_per_ip_config(cfg: &RateLimitConfig) -> Arc<AuthGovernorConfig> {
     let burst = NonZeroU32::new(cfg.per_ip_burst).expect("AUTH_RATE_LIMIT_BURST must be > 0");
-    let per_min = NonZeroU32::new(cfg.per_ip_per_minute)
-        .expect("AUTH_RATE_LIMIT_PER_MINUTE must be > 0");
+    let per_min =
+        NonZeroU32::new(cfg.per_ip_per_minute).expect("AUTH_RATE_LIMIT_PER_MINUTE must be > 0");
 
     // `tower_governor`'s builder takes a replenish-period + burst-size. Convert
     // "N requests per minute, burst B" into "replenish one cell every 60/N
@@ -268,11 +265,8 @@ pub fn build_per_ip_layer(
 /// the caller to match the identity-lookup path used in `verify_credentials`.
 pub type CredentialFailureKey = (IpAddr, String);
 
-type CredentialFailureRateLimiter = RateLimiter<
-    CredentialFailureKey,
-    DashMapStateStore<CredentialFailureKey>,
-    DefaultClock,
->;
+type CredentialFailureRateLimiter =
+    RateLimiter<CredentialFailureKey, DashMapStateStore<CredentialFailureKey>, DefaultClock>;
 
 /// Charges one quota slot per failed credential attempt per `(ip, email)` pair.
 /// Successful logins never call `charge_failure`, so they never consume quota.

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use surrealdb::Surreal;
-use surrealdb::engine::any::{Any, connect};
+use surrealdb::engine::any::{connect, Any};
 use surrealdb::opt::auth::Root;
+use surrealdb::Surreal;
 use tracing::info;
 
 use crate::api::models::{
@@ -522,8 +522,9 @@ pub(crate) fn is_unique_constraint_error(message: &str) -> bool {
 pub(crate) const FIXTURE_GROUP_ID: &str = "1";
 
 fn fixture_groups() -> Vec<(&'static str, GroupContent)> {
-    vec![
-        (FIXTURE_GROUP_ID, GroupContent {
+    vec![(
+        FIXTURE_GROUP_ID,
+        GroupContent {
             name: "PoolPay Group Alpha".into(),
             status: "active".into(),
             description: Some("First PoolPay savings group — 6 members, ₦10k monthly".into()),
@@ -531,20 +532,110 @@ fn fixture_groups() -> Vec<(&'static str, GroupContent)> {
             updated_at: "2025-06-15T00:00:00+00:00".into(),
             deleted_at: None,
             version: 1,
-        }),
-    ]
+        },
+    )]
 }
 
 fn fixture_members() -> Vec<(&'static str, MemberContent)> {
     let group_id = FIXTURE_GROUP_ID.to_string();
     let created_at = "2025-06-15T00:00:00+00:00";
     vec![
-        ("1", MemberContent { name: "Adaeze Okonkwo".into(),  phone: "2348101234567".into(), position: 1, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
-        ("2", MemberContent { name: "Chukwuemeka Eze".into(), phone: "2347031234567".into(), position: 2, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
-        ("3", MemberContent { name: "Ngozi Adeyemi".into(),   phone: "2349061234567".into(), position: 3, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
-        ("4", MemberContent { name: "Tunde Bakare".into(),    phone: "2348031234567".into(), position: 4, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
-        ("5", MemberContent { name: "Amaka Nwosu".into(),     phone: "2348161234567".into(), position: 5, status: "active".into(), group_id: group_id.clone(), notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
-        ("6", MemberContent { name: "Seun Okafor".into(),     phone: "2347061234567".into(), position: 6, status: "active".into(), group_id, notes: None, joined_at: Some("2025-06-15".into()), created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None, version: 1 }),
+        (
+            "1",
+            MemberContent {
+                name: "Adaeze Okonkwo".into(),
+                phone: "2348101234567".into(),
+                position: 1,
+                status: "active".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                joined_at: Some("2025-06-15".into()),
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                deleted_at: None,
+                version: 1,
+            },
+        ),
+        (
+            "2",
+            MemberContent {
+                name: "Chukwuemeka Eze".into(),
+                phone: "2347031234567".into(),
+                position: 2,
+                status: "active".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                joined_at: Some("2025-06-15".into()),
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                deleted_at: None,
+                version: 1,
+            },
+        ),
+        (
+            "3",
+            MemberContent {
+                name: "Ngozi Adeyemi".into(),
+                phone: "2349061234567".into(),
+                position: 3,
+                status: "active".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                joined_at: Some("2025-06-15".into()),
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                deleted_at: None,
+                version: 1,
+            },
+        ),
+        (
+            "4",
+            MemberContent {
+                name: "Tunde Bakare".into(),
+                phone: "2348031234567".into(),
+                position: 4,
+                status: "active".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                joined_at: Some("2025-06-15".into()),
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                deleted_at: None,
+                version: 1,
+            },
+        ),
+        (
+            "5",
+            MemberContent {
+                name: "Amaka Nwosu".into(),
+                phone: "2348161234567".into(),
+                position: 5,
+                status: "active".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                joined_at: Some("2025-06-15".into()),
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                deleted_at: None,
+                version: 1,
+            },
+        ),
+        (
+            "6",
+            MemberContent {
+                name: "Seun Okafor".into(),
+                phone: "2347061234567".into(),
+                position: 6,
+                status: "active".into(),
+                group_id,
+                notes: None,
+                joined_at: Some("2025-06-15".into()),
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                deleted_at: None,
+                version: 1,
+            },
+        ),
     ]
 }
 
@@ -553,107 +644,247 @@ fn fixture_cycles() -> Vec<(&'static str, CycleContent)> {
     let created_at = "2025-06-15T00:00:00+00:00";
     vec![
         // Round 1: Jul–Dec 2025 (cycles 1–6, full rotation of all 6 members)
-        ("4", CycleContent {
-            cycle_number: 1, start_date: "2025-07-01".into(), end_date: "2025-07-31".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "1".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
-        ("5", CycleContent {
-            cycle_number: 2, start_date: "2025-08-01".into(), end_date: "2025-08-31".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "2".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
-        ("6", CycleContent {
-            cycle_number: 3, start_date: "2025-09-01".into(), end_date: "2025-09-30".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "3".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
-        ("7", CycleContent {
-            cycle_number: 4, start_date: "2025-10-01".into(), end_date: "2025-10-31".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "4".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
-        ("8", CycleContent {
-            cycle_number: 5, start_date: "2025-11-01".into(), end_date: "2025-11-30".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "5".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
-        ("9", CycleContent {
-            cycle_number: 6, start_date: "2025-12-01".into(), end_date: "2025-12-31".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "6".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
+        (
+            "4",
+            CycleContent {
+                cycle_number: 1,
+                start_date: "2025-07-01".into(),
+                end_date: "2025-07-31".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "1".into(),
+                status: "closed".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
+        (
+            "5",
+            CycleContent {
+                cycle_number: 2,
+                start_date: "2025-08-01".into(),
+                end_date: "2025-08-31".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "2".into(),
+                status: "closed".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
+        (
+            "6",
+            CycleContent {
+                cycle_number: 3,
+                start_date: "2025-09-01".into(),
+                end_date: "2025-09-30".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "3".into(),
+                status: "closed".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
+        (
+            "7",
+            CycleContent {
+                cycle_number: 4,
+                start_date: "2025-10-01".into(),
+                end_date: "2025-10-31".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "4".into(),
+                status: "closed".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
+        (
+            "8",
+            CycleContent {
+                cycle_number: 5,
+                start_date: "2025-11-01".into(),
+                end_date: "2025-11-30".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "5".into(),
+                status: "closed".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
+        (
+            "9",
+            CycleContent {
+                cycle_number: 6,
+                start_date: "2025-12-01".into(),
+                end_date: "2025-12-31".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "6".into(),
+                status: "closed".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
         // Round 2: Jan–Mar 2026 (cycles 7–9, second rotation begins)
-        ("1", CycleContent {
-            cycle_number: 7, start_date: "2026-01-01".into(), end_date: "2026-01-31".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "1".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
-        ("2", CycleContent {
-            cycle_number: 8, start_date: "2026-02-01".into(), end_date: "2026-02-28".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "2".into(), status: "closed".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
-        ("3", CycleContent {
-            cycle_number: 9, start_date: "2026-03-01".into(), end_date: "2026-03-31".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "3".into(), status: "active".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
+        (
+            "1",
+            CycleContent {
+                cycle_number: 7,
+                start_date: "2026-01-01".into(),
+                end_date: "2026-01-31".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "1".into(),
+                status: "closed".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
+        (
+            "2",
+            CycleContent {
+                cycle_number: 8,
+                start_date: "2026-02-01".into(),
+                end_date: "2026-02-28".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "2".into(),
+                status: "closed".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
+        (
+            "3",
+            CycleContent {
+                cycle_number: 9,
+                start_date: "2026-03-01".into(),
+                end_date: "2026-03-31".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "3".into(),
+                status: "active".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
         // Round 2 upcoming: Apr–Jun 2026 (cycles 10–12, pending). Scheduled
         // but not yet started — gives the dashboard a `pending` cycle state
         // to render alongside closed/active, and extends the rotation preview
         // through end-of-round without disturbing the active-cycle id (3).
-        ("10", CycleContent {
-            cycle_number: 10, start_date: "2026-04-01".into(), end_date: "2026-04-30".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "4".into(), status: "pending".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
-        ("11", CycleContent {
-            cycle_number: 11, start_date: "2026-05-01".into(), end_date: "2026-05-31".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "5".into(), status: "pending".into(), group_id: group_id.clone(), notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
-        ("12", CycleContent {
-            cycle_number: 12, start_date: "2026-06-01".into(), end_date: "2026-06-30".into(),
-            contribution_per_member: 1_000_000, total_amount: 6_000_000,
-            recipient_member_id: "6".into(), status: "pending".into(), group_id, notes: None,
-            created_at: created_at.into(), updated_at: created_at.into(), version: 1,
-        }),
+        (
+            "10",
+            CycleContent {
+                cycle_number: 10,
+                start_date: "2026-04-01".into(),
+                end_date: "2026-04-30".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "4".into(),
+                status: "pending".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
+        (
+            "11",
+            CycleContent {
+                cycle_number: 11,
+                start_date: "2026-05-01".into(),
+                end_date: "2026-05-31".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "5".into(),
+                status: "pending".into(),
+                group_id: group_id.clone(),
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
+        (
+            "12",
+            CycleContent {
+                cycle_number: 12,
+                start_date: "2026-06-01".into(),
+                end_date: "2026-06-30".into(),
+                contribution_per_member: 1_000_000,
+                total_amount: 6_000_000,
+                recipient_member_id: "6".into(),
+                status: "pending".into(),
+                group_id,
+                notes: None,
+                created_at: created_at.into(),
+                updated_at: created_at.into(),
+                version: 1,
+            },
+        ),
     ]
 }
 
 fn fixture_payments() -> Vec<(&'static str, PaymentContent)> {
     let created_at = "2025-06-15T00:00:00+00:00";
     let payment = |member_id: &str, cycle_id: &str, date: &str| PaymentContent {
-        member_id: member_id.into(), cycle_id: cycle_id.into(), amount: 1_000_000,
-        currency: "NGN".into(), payment_date: date.into(),
-        payment_method: None, reference: None,
-        confirmed_at: None, confirmed_by: None,
-        created_at: created_at.into(), updated_at: created_at.into(), deleted_at: None,
-        rejected_by: None, deleted_by: None,
+        member_id: member_id.into(),
+        cycle_id: cycle_id.into(),
+        amount: 1_000_000,
+        currency: "NGN".into(),
+        payment_date: date.into(),
+        payment_method: None,
+        reference: None,
+        confirmed_at: None,
+        confirmed_by: None,
+        created_at: created_at.into(),
+        updated_at: created_at.into(),
+        deleted_at: None,
+        rejected_by: None,
+        deleted_by: None,
     };
     vec![
         // Cycle 3 — March 2026 (Ngozi excluded as recipient; 3 of 5 contributing paid)
-        ("1",  payment("1", "3", "2026-03-02")),
-        ("2",  payment("2", "3", "2026-03-03")),
-        ("4",  payment("5", "3", "2026-03-07")),
+        ("1", payment("1", "3", "2026-03-02")),
+        ("2", payment("2", "3", "2026-03-03")),
+        ("4", payment("5", "3", "2026-03-07")),
         // Cycle 1 — January 2026 (all 6 members paid)
-        ("5",  payment("1", "1", "2026-01-02")),
-        ("6",  payment("2", "1", "2026-01-03")),
-        ("7",  payment("3", "1", "2026-01-04")),
-        ("8",  payment("4", "1", "2026-01-05")),
-        ("9",  payment("5", "1", "2026-01-06")),
+        ("5", payment("1", "1", "2026-01-02")),
+        ("6", payment("2", "1", "2026-01-03")),
+        ("7", payment("3", "1", "2026-01-04")),
+        ("8", payment("4", "1", "2026-01-05")),
+        ("9", payment("5", "1", "2026-01-06")),
         ("10", payment("6", "1", "2026-01-08")),
         // Cycle 2 — February 2026 (all 6 members paid)
         ("11", payment("1", "2", "2026-02-02")),
@@ -821,8 +1052,7 @@ mod tests {
     /// for the full mutate → run → cleanup window makes that precondition hold
     /// across parallel tests in this binary.
     fn env_lock() -> &'static std::sync::Mutex<()> {
-        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
-            std::sync::OnceLock::new();
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 

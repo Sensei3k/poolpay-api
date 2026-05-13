@@ -1,7 +1,7 @@
+use poolpay::api::models::now_iso;
 use poolpay::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use poolpay::auth::rate_limit::RateLimitConfig;
 use poolpay::{api, auth, db, extractor, ingestion, parser, replies, whatsapp};
-use poolpay::api::models::now_iso;
 use std::sync::Arc;
 
 use dotenv::dotenv;
@@ -23,11 +23,10 @@ async fn main() {
         )
         .init();
 
-    let instance_id = env::var("GREEN_API_INSTANCE_ID")
-        .expect("GREEN_API_INSTANCE_ID must be set in .env");
+    let instance_id =
+        env::var("GREEN_API_INSTANCE_ID").expect("GREEN_API_INSTANCE_ID must be set in .env");
 
-    let api_token = env::var("GREEN_API_TOKEN")
-        .expect("GREEN_API_TOKEN must be set in .env");
+    let api_token = env::var("GREEN_API_TOKEN").expect("GREEN_API_TOKEN must be set in .env");
 
     // HMAC strength depends on key entropy. hmac.rs only rejects an empty
     // secret, so a 6-char value would silently pass. Fail fast on anything
@@ -52,7 +51,9 @@ async fn main() {
             if env::var("APP_ENV").as_deref() == Ok("production") {
                 panic!("NEXTAUTH_BACKEND_SECRET must be set in production");
             } else {
-                warn!("NEXTAUTH_BACKEND_SECRET is not set — HMAC endpoints will reject all requests");
+                warn!(
+                    "NEXTAUTH_BACKEND_SECRET is not set — HMAC endpoints will reject all requests"
+                );
             }
         }
     }
@@ -92,9 +93,7 @@ async fn main() {
     auth::password::prewarm();
 
     // Initialise embedded SurrealDB and, if SEED_ON_EMPTY=true and the DB is empty, seed fixture data.
-    let surreal_db = db::init()
-        .await
-        .expect("Failed to initialise SurrealDB");
+    let surreal_db = db::init().await.expect("Failed to initialise SurrealDB");
 
     if let Err(e) = auth::bootstrap::ensure_admin_user(&surreal_db).await {
         error!(error = %e, "Bootstrap admin seeding failed");
@@ -133,7 +132,10 @@ async fn main() {
         }
     });
 
-    info!(receipt_poll_secs = RECEIPT_POLL_SECS, "Receipt engine started");
+    info!(
+        receipt_poll_secs = RECEIPT_POLL_SECS,
+        "Receipt engine started"
+    );
 
     // Watchdog: if the API server task dies, exit rather than silently
     // continuing with a broken API.
@@ -157,8 +159,7 @@ async fn main() {
 
                 if let Some(msg) = &notification.body.message_data {
                     if let Some(file_data) = &msg.file_message_data {
-                        let is_pdf =
-                            file_data.mime_type.as_deref() == Some("application/pdf");
+                        let is_pdf = file_data.mime_type.as_deref() == Some("application/pdf");
 
                         info!(
                             file_type = if is_pdf { "PDF" } else { "Image" },

@@ -62,7 +62,7 @@ async fn webhook_app() -> Router {
 /// `LINKED_CHAT_ID` → group `1` (and therefore can find the seeded members).
 /// Without this, every ingest path would short-circuit on `NotLinked`.
 async fn seed_link(db: &poolpay::db::DbConn) {
-    use poolpay::api::models::{GroupLinkContent, now_iso};
+    use poolpay::api::models::{now_iso, GroupLinkContent};
     let now = now_iso();
     let content = GroupLinkContent {
         chat_id: LINKED_CHAT_ID.into(),
@@ -71,8 +71,11 @@ async fn seed_link(db: &poolpay::db::DbConn) {
         updated_at: now,
         deleted_at: None,
     };
-    let _: Option<poolpay::api::models::DbGroupLink> =
-        db.create("group_link").content(content).await.expect("seed group_link");
+    let _: Option<poolpay::api::models::DbGroupLink> = db
+        .create("group_link")
+        .content(content)
+        .await
+        .expect("seed group_link");
 }
 
 fn now_ts() -> i64 {
@@ -130,7 +133,11 @@ fn payload_matching_member(message_id: &str) -> serde_json::Value {
 #[tokio::test]
 async fn webhook_valid_hmac_ingests_returns_200() {
     let app = webhook_app().await;
-    let resp = call(app, signed_request(&payload_matching_member("WAMSG-VALID-1"))).await;
+    let resp = call(
+        app,
+        signed_request(&payload_matching_member("WAMSG-VALID-1")),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value = json_body(resp).await;
     assert_eq!(body["outcome"], "ingested");
@@ -285,7 +292,10 @@ async fn webhook_duplicate_message_id_is_idempotent() {
     assert_eq!(second.status(), StatusCode::OK);
     let s: serde_json::Value = json_body(second).await;
     assert_eq!(s["outcome"], "duplicate");
-    assert!(s["receiptId"].is_null(), "duplicate must not echo a receipt id");
+    assert!(
+        s["receiptId"].is_null(),
+        "duplicate must not echo a receipt id"
+    );
 }
 
 #[tokio::test]
