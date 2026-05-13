@@ -109,11 +109,7 @@ impl AttemptTracker {
     /// Test-friendly variant of [`record_failure`] that takes the current
     /// instant explicitly. Crate-visible only; production callers should
     /// use [`record_failure`].
-    pub(crate) fn record_failure_at(
-        &mut self,
-        receipt_id: u64,
-        now: Instant,
-    ) -> RetryDecision {
+    pub(crate) fn record_failure_at(&mut self, receipt_id: u64, now: Instant) -> RetryDecision {
         self.evict_stale_at(now);
 
         // If we are about to insert a brand-new entry and the map is full,
