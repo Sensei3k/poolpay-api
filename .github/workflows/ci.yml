@@ -12,7 +12,10 @@ jobs:
   check:
     name: build / test / lint
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Cold-cache builds compile surrealdb, tesseract and reqwest from
+    # source and need ~25-30 min. Warm-cache runs finish well under 10
+    # min — 45 keeps headroom for both.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
