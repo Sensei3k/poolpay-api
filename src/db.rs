@@ -3,7 +3,7 @@ use std::sync::Arc;
 use surrealdb::engine::any::{connect, Any};
 use surrealdb::opt::auth::Root;
 use surrealdb::Surreal;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::api::models::{
     CycleContent, DbCycle, DbGroup, DbGroupLink, DbMember, DbPayment, DbReceipt, GroupContent,
@@ -226,7 +226,10 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 ///      reserved for genuinely corrupt rows.
 ///
 /// The backfill is idempotent — the `WHERE ingested_at IS NONE` guard
-/// skips rows already populated on every subsequent boot.
+/// skips rows already populated on every subsequent boot. The loop is
+/// also bounded (see `MAX_BATCHES` in `backfill_receipt_ingested_at`) so
+/// a rolling deploy that still has older binaries writing legacy rows
+/// can't keep startup blocked indefinitely.
 ///
 /// Four indexes:
 ///   - `receipt_whatsapp_message_id_unique` over `(whatsapp_message_id)` is
@@ -326,9 +329,27 @@ async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb
     // its batch, which removes those rows from the next SELECT's
     // `ingested_at IS NONE` predicate — so we keep looping until a batch
     // returns empty rather than tracking an offset.
+    //
+    // Cap the total number of batches so a steady stream of `ingested_at
+    // IS NONE` rows (e.g. an older binary still writing legacy rows
+    // mid-rolling-deploy) cannot keep startup blocked indefinitely. At
+    // `MAX_BATCHES * BATCH_SIZE` rows the loop bails with a warn log;
+    // a subsequent restart will resume from where this one stopped, so
+    // the bulk of rows still get backfilled — just not in one boot.
     const BATCH_SIZE: i64 = 500;
+    const MAX_BATCHES: u32 = 200;
     let mut total_backfilled: u64 = 0;
+    let mut batches_run: u32 = 0;
     loop {
+        if batches_run >= MAX_BATCHES {
+            warn!(
+                max_batches = MAX_BATCHES,
+                batch_size = BATCH_SIZE,
+                rows_backfilled = total_backfilled,
+                "Hit ingested_at backfill cap; remaining legacy rows will be picked up on next startup"
+            );
+            break;
+        }
         let mut result = db
             .query(
                 "SELECT id, received_at, created_at FROM receipt \
@@ -355,6 +376,7 @@ async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb
                 .check()?;
         }
         total_backfilled = total_backfilled.saturating_add(batch_len as u64);
+        batches_run = batches_run.saturating_add(1);
     }
     if total_backfilled > 0 {
         info!(
