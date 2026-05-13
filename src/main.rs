@@ -293,7 +293,6 @@ async fn main() {
                 // Green API redeliver the message (within the retry budget)
                 // instead of silently dropping it.
                 let should_ack = if processing_ok {
-                    retry_tracker.record_success(notification.receipt_id);
                     true
                 } else {
                     match retry_tracker.record_failure(notification.receipt_id) {
@@ -318,7 +317,7 @@ async fn main() {
                 };
 
                 if should_ack {
-                    if let Err(e) = whatsapp::delete_notification(
+                    match whatsapp::delete_notification(
                         &client,
                         &instance_id,
                         &api_token,
@@ -326,7 +325,22 @@ async fn main() {
                     )
                     .await
                     {
-                        warn!(error = %e, "Failed to delete notification");
+                        Ok(_) => {
+                            // Only clear the retry state after Green API has
+                            // actually acked the notification. If the ack
+                            // request itself failed we want the tracker entry
+                            // to survive so the next redelivery continues
+                            // counting against the existing budget instead of
+                            // starting fresh at attempt 1. `record_failure`
+                            // already cleared the entry on the AckGiveUp path,
+                            // so this is a no-op there.
+                            if processing_ok {
+                                retry_tracker.record_success(notification.receipt_id);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to delete notification");
+                        }
                     }
                 }
             }
