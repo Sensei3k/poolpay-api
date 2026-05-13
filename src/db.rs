@@ -277,25 +277,49 @@ async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb
         received_at: Option<String>,
     }
 
-    let mut result = db
-        .query("SELECT id, received_at FROM receipt WHERE ingested_at IS NONE")
-        .await?;
-    let rows: Vec<LegacyReceipt> = result.take(0)?;
-
-    for row in rows {
-        let normalised = row
-            .received_at
-            .as_deref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| {
-                dt.with_timezone(&chrono::Utc)
-                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-            })
-            .unwrap_or_else(crate::api::models::server_now);
-        db.query("UPDATE $id SET ingested_at = $val")
-            .bind(("id", row.id))
-            .bind(("val", normalised))
+    // Page the scan so a multi-million-row receipt table doesn't pull the
+    // whole legacy backlog into memory at startup. Each iteration UPDATEs
+    // its batch, which removes those rows from the next SELECT's
+    // `ingested_at IS NONE` predicate — so we keep looping until a batch
+    // returns empty rather than tracking an offset.
+    const BATCH_SIZE: i64 = 500;
+    let mut total_backfilled: u64 = 0;
+    loop {
+        let mut result = db
+            .query("SELECT id, received_at FROM receipt WHERE ingested_at IS NONE LIMIT $limit")
+            .bind(("limit", BATCH_SIZE))
             .await?;
+        let rows: Vec<LegacyReceipt> = result.take(0)?;
+        if rows.is_empty() {
+            break;
+        }
+        let batch_len = rows.len();
+        for row in rows {
+            let normalised = row
+                .received_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Utc)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                })
+                .unwrap_or_else(crate::api::models::server_now);
+            // `.check()?` surfaces SurrealDB statement errors instead of
+            // silently leaving `ingested_at` as NONE — without it a
+            // typo'd query or constraint clash would skip the row.
+            db.query("UPDATE $id SET ingested_at = $val")
+                .bind(("id", row.id))
+                .bind(("val", normalised))
+                .await?
+                .check()?;
+        }
+        total_backfilled = total_backfilled.saturating_add(batch_len as u64);
+    }
+    if total_backfilled > 0 {
+        info!(
+            rows = total_backfilled,
+            "Backfilled receipt.ingested_at for legacy rows"
+        );
     }
     Ok(())
 }
