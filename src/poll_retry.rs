@@ -57,7 +57,12 @@ pub enum RetryDecision {
     Skip { attempt: u32 },
     /// Retry budget is exhausted. Caller should ack (delete) the
     /// notification, drop the receipt, and emit a discard log so the
-    /// failure is not silent. The tracker has already cleared the entry.
+    /// failure is not silent. The tracker keeps the entry in place until
+    /// the caller confirms the ack via [`AttemptTracker::record_acked`];
+    /// repeat `record_failure` calls on the same id continue to return
+    /// `AckGiveUp` without restarting the budget, so a Green API
+    /// redelivery caused by a failed ack does not silently reset the
+    /// retry counter.
     AckGiveUp,
 }
 
@@ -123,6 +128,15 @@ impl AttemptTracker {
     /// instant explicitly. Records a processing failure (download / OCR /
     /// ingest). Crate-visible only; production callers should use
     /// [`record_failure`].
+    ///
+    /// Once a receipt's attempt count reaches `max_attempts` this returns
+    /// [`RetryDecision::AckGiveUp`] and **leaves the entry in place**.
+    /// Subsequent `record_failure` calls for the same id keep returning
+    /// `AckGiveUp` without incrementing the counter or restarting the
+    /// budget. The entry is only cleared when the caller confirms the
+    /// downstream ack via [`AttemptTracker::record_acked`]; this prevents
+    /// a failed `deleteNotification` (which triggers a Green API
+    /// redelivery) from silently resetting the retry budget to attempt 1.
     pub(crate) fn record_failure_at(&mut self, receipt_id: u64, now: Instant) -> RetryDecision {
         self.evict_stale_at(now);
 
@@ -138,20 +152,37 @@ impl AttemptTracker {
             attempts: 0,
             last_seen: now,
         });
-        entry.attempts += 1;
         entry.last_seen = now;
+
+        // Once we have hit the give-up boundary, stop bumping the counter
+        // and just keep reporting `AckGiveUp`. The entry survives until
+        // the caller calls `record_acked` after a successful ack; until
+        // then any Green API redelivery (caused by a previous ack failure)
+        // produces the same terminal decision instead of restarting the
+        // budget at attempt 1.
+        if entry.attempts >= self.max_attempts {
+            return RetryDecision::AckGiveUp;
+        }
+
+        entry.attempts += 1;
 
         if entry.attempts < self.max_attempts {
             RetryDecision::Skip {
                 attempt: entry.attempts,
             }
         } else {
-            // Budget exhausted — drop the entry so a future receipt with
-            // the same id (e.g. after a process restart aligning to a
-            // Green API redelivery) starts fresh.
-            self.inner.remove(&receipt_id);
             RetryDecision::AckGiveUp
         }
+    }
+
+    /// Clear retry state for `receipt_id` after the caller has confirmed
+    /// that Green API actually acked the notification (i.e.
+    /// `deleteNotification` returned `Ok`). This is the terminal cleanup
+    /// for the `AckGiveUp` branch: until it is called the tracker keeps
+    /// the entry pinned at `max_attempts` so an ack failure followed by a
+    /// Green API redelivery does not restart the retry budget.
+    pub(crate) fn record_acked(&mut self, receipt_id: u64) {
+        self.inner.remove(&receipt_id);
     }
 
     /// Clear any retry state for `receipt_id`. Called by the poll loop
@@ -232,10 +263,15 @@ mod tests {
     fn skip_twice_then_give_up_on_attempt_three() {
         let mut tracker = AttemptTracker::new(3, Duration::from_secs(60), 16);
         assert_skip_then_give_up(&mut tracker, 42);
+        // The entry survives `AckGiveUp` until `record_acked` is called,
+        // so a subsequent failure (e.g. Green API redelivering because the
+        // ack itself failed) keeps returning `AckGiveUp` without resetting
+        // the budget.
+        assert_eq!(tracker.record_failure(42), RetryDecision::AckGiveUp);
     }
 
     #[test]
-    fn give_up_clears_entry_so_subsequent_failures_start_fresh() {
+    fn give_up_persists_until_record_acked_then_starts_fresh() {
         let mut tracker = AttemptTracker::new(3, Duration::from_secs(60), 16);
         // Burn through the budget.
         assert_eq!(
@@ -247,7 +283,15 @@ mod tests {
             RetryDecision::Skip { attempt: 2 }
         );
         assert_eq!(tracker.record_failure(7), RetryDecision::AckGiveUp);
-        // After give-up the entry is gone, so a new failure starts at attempt 1.
+        // Repeat failures (e.g. a Green API redelivery after a failed
+        // `deleteNotification`) must keep returning `AckGiveUp` with the
+        // entry still in place — the budget is NOT restarted.
+        assert_eq!(tracker.record_failure(7), RetryDecision::AckGiveUp);
+        assert_eq!(tracker.len(), 1, "entry survives until record_acked");
+        // Confirming the ack clears the terminal state.
+        tracker.record_acked(7);
+        assert!(tracker.is_empty(), "record_acked must clear the entry");
+        // A fresh failure for the same id now starts at attempt 1.
         assert_eq!(
             tracker.record_failure(7),
             RetryDecision::Skip { attempt: 1 }
