@@ -16,7 +16,7 @@
 //! The tracker is intentionally a plain in-process `HashMap`:
 //!
 //! * Memory is bounded by both an inactivity TTL (entries whose most
-//!   recent failure is older than `ttl` are evicted on every interaction)
+//!   recent failure is at least `ttl` old are evicted on every interaction)
 //!   and a hard capacity (least-recently-failed eviction when the cap is
 //!   hit). Either bound alone would be enough in practice; both together
 //!   make the worst-case footprint obvious.
@@ -29,10 +29,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Maximum number of times a single receipt may be redelivered before the
-/// poll loop gives up and acks the notification anyway. The first attempt
-/// counts towards this budget, so a value of 3 yields up to two
-/// redeliveries before we discard the receipt.
+/// Maximum number of processing attempts (including the first delivery)
+/// before the poll loop gives up and acks the notification anyway. A value
+/// of 3 therefore yields two redeliveries and discards the receipt on the
+/// 3rd failure.
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 
 /// How long a tracker entry may live before it is considered stale and
@@ -208,6 +208,10 @@ impl AttemptTracker {
         self.inner.is_empty()
     }
 
+    /// Drop entries whose inactivity has reached the TTL boundary. The
+    /// `retain` predicate keeps entries while `elapsed < ttl`, so any entry
+    /// with `elapsed >= ttl` (including exactly `ttl`) is treated as stale
+    /// and evicted.
     fn evict_stale_at(&mut self, now: Instant) {
         let ttl = self.ttl;
         // `saturating_duration_since` rather than `duration_since`: if `now`
