@@ -53,7 +53,9 @@ pub const DEFAULT_CAPACITY: usize = 1024;
 pub enum RetryDecision {
     /// Failure is within the retry budget. Caller must NOT delete the
     /// notification from Green API so it is redelivered. `attempt` is the
-    /// 1-based attempt number that just failed (1..=`max_attempts`).
+    /// 1-based attempt number that just failed and is always strictly less
+    /// than `max_attempts` (i.e. `1..max_attempts`); the `max_attempts`-th
+    /// failure returns [`RetryDecision::AckGiveUp`] instead.
     Skip { attempt: u32 },
     /// Retry budget is exhausted. Caller should ack (delete) the
     /// notification, drop the receipt, and emit a discard log so the
@@ -182,6 +184,7 @@ impl AttemptTracker {
     /// the entry pinned at `max_attempts` so an ack failure followed by a
     /// Green API redelivery does not restart the retry budget.
     pub fn record_acked(&mut self, receipt_id: u64) {
+        self.evict_stale_at(Instant::now());
         self.inner.remove(&receipt_id);
     }
 
