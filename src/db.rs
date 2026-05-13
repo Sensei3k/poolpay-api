@@ -206,18 +206,24 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 ///     (`ingestion::ingest_receipt`) always stamps it on insert.
 ///
 /// Existing-row backfill: any row pre-dating this migration gets
-/// `ingested_at` filled in once from a canonicalised copy of
-/// `received_at`. Done in Rust rather than inline SurrealQL so the
-/// timestamp can be parsed (RFC 3339) and reformatted into the same
-/// `server_now()` shape — UTC, second precision, trailing `Z` — that the
-/// application path writes. Copying `received_at` verbatim would
-/// reintroduce the mixed-format problem `server_now` was added to solve
-/// (`+00:00` vs `Z`, sub-second precision), which breaks the lex-sort
-/// invariant `ORDER BY ingested_at` relies on. Rows whose `received_at`
-/// can't be parsed fall back to a fresh `server_now()` so we never
-/// persist a value that won't sort. The backfill is idempotent — the
-/// `WHERE ingested_at IS NONE` guard skips rows already populated on
-/// every subsequent boot.
+/// `ingested_at` filled in once via a three-step fallback chain, each
+/// step parsed (RFC 3339) and re-emitted in the canonical `server_now()`
+/// shape — UTC, second precision, trailing `Z` — that the application
+/// path writes. Done in Rust rather than inline SurrealQL so the
+/// reformat is possible; copying a timestamp verbatim would reintroduce
+/// the mixed-format problem `server_now` was added to solve (`+00:00`
+/// vs `Z`, sub-second precision), which breaks the lex-sort invariant
+/// `ORDER BY ingested_at` relies on. The chain is:
+///   1. Prefer `received_at` (bot-supplied, closest proxy for true
+///      arrival time and therefore best for preserving FIFO order).
+///   2. If `received_at` is missing or unparseable, fall back to the
+///      row's own `created_at` (server-stamped at insert, so it still
+///      sorts deterministically against rows with `ingested_at` set).
+///   3. Only if `created_at` is also unparseable do we stamp a fresh
+///      `server_now()`. That last branch makes legacy rows look "just
+///      ingested" and is reserved for genuinely corrupt rows.
+/// The backfill is idempotent — the `WHERE ingested_at IS NONE` guard
+/// skips rows already populated on every subsequent boot.
 ///
 /// Four indexes:
 ///   - `receipt_whatsapp_message_id_unique` over `(whatsapp_message_id)` is
