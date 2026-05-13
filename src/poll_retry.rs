@@ -1,16 +1,17 @@
 //! Bounded retry tracking for the Green API poll loop.
 //!
 //! The poll loop (see `main.rs`) used to ack every notification it pulled
-//! off the queue, even when downstream ingest had failed. That worked while
-//! ingest was effectively infallible, but a transient SurrealDB blip would
+//! off the queue, even when downstream processing (download / OCR / ingest)
+//! had failed. That worked while processing was effectively infallible, but
+//! a transient SurrealDB blip — or an OCR / download hiccup — would
 //! silently drop a user receipt: Green API removes the notification on
 //! `deleteNotification`, so there is no second chance.
 //!
 //! [`AttemptTracker`] addresses that by gating the ack on a small retry
 //! budget. The poll loop calls [`AttemptTracker::record_failure`] when a
-//! receipt fails to ingest and skips the ack while the budget allows;
-//! after the budget is exhausted the notification is acked anyway so a
-//! permanently broken receipt cannot wedge the queue.
+//! receipt fails to process (download / OCR / ingest) and skips the ack
+//! while the budget allows; after the budget is exhausted the notification
+//! is acked anyway so a permanently broken receipt cannot wedge the queue.
 //!
 //! The tracker is intentionally a plain in-process `HashMap`:
 //!
@@ -71,8 +72,9 @@ struct AttemptEntry {
     last_seen: Instant,
 }
 
-/// In-process counter of consecutive ingest failures keyed by Green API
-/// `receiptId`. See module docs for the rationale and bounds.
+/// In-process counter of consecutive processing failures (download / OCR /
+/// ingest) keyed by Green API `receiptId`. See module docs for the
+/// rationale and bounds.
 #[derive(Debug)]
 pub struct AttemptTracker {
     inner: HashMap<u64, AttemptEntry>,
@@ -107,15 +109,17 @@ impl AttemptTracker {
         self.max_attempts
     }
 
-    /// Record an ingest failure for `receipt_id` and decide whether the
-    /// caller should skip the ack or ack-and-give-up.
+    /// Record a processing failure (download / OCR / ingest) for
+    /// `receipt_id` and decide whether the caller should skip the ack or
+    /// ack-and-give-up.
     pub fn record_failure(&mut self, receipt_id: u64) -> RetryDecision {
         self.record_failure_at(receipt_id, Instant::now())
     }
 
     /// Test-friendly variant of [`record_failure`] that takes the current
-    /// instant explicitly. Crate-visible only; production callers should
-    /// use [`record_failure`].
+    /// instant explicitly. Records a processing failure (download / OCR /
+    /// ingest). Crate-visible only; production callers should use
+    /// [`record_failure`].
     pub(crate) fn record_failure_at(&mut self, receipt_id: u64, now: Instant) -> RetryDecision {
         self.evict_stale_at(now);
 
@@ -148,8 +152,9 @@ impl AttemptTracker {
     }
 
     /// Clear any retry state for `receipt_id`. Called by the poll loop
-    /// after a successful ingest so a future failure for the same id
-    /// starts from attempt 1 rather than inheriting a stale counter.
+    /// after successful processing (download / OCR / ingest) so a future
+    /// failure for the same id starts from attempt 1 rather than
+    /// inheriting a stale counter.
     pub fn record_success(&mut self, receipt_id: u64) {
         self.inner.remove(&receipt_id);
     }
