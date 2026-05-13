@@ -14,10 +14,11 @@
 //!
 //! The tracker is intentionally a plain in-process `HashMap`:
 //!
-//! * Memory is bounded by both a time-to-live (stale entries are evicted
-//!   on every interaction) and a hard capacity (oldest-first eviction
-//!   when the cap is hit). Either bound alone would be enough in practice;
-//!   both together make the worst-case footprint obvious.
+//! * Memory is bounded by both an inactivity TTL (entries whose most
+//!   recent failure is older than `ttl` are evicted on every interaction)
+//!   and a hard capacity (least-recently-failed eviction when the cap is
+//!   hit). Either bound alone would be enough in practice; both together
+//!   make the worst-case footprint obvious.
 //! * The poll loop is single-threaded (the surrounding error type is
 //!   `!Send`), so `&mut self` access is sufficient. No locking required.
 //! * No persistence: a process restart resets the retry budget. That is
@@ -40,9 +41,10 @@ pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_TTL: Duration = Duration::from_secs(600);
 
 /// Hard cap on the number of tracked receipts. When the cap is hit we
-/// evict the oldest entry to make room for the new one; the eviction
-/// resets that receipt's budget on its next failure, which is acceptable
-/// because hitting this cap already implies a systemic backlog.
+/// evict the least-recently-failed entry to make room for the new one;
+/// the eviction resets that receipt's budget on its next failure, which
+/// is acceptable because hitting this cap already implies a systemic
+/// backlog.
 pub const DEFAULT_CAPACITY: usize = 1024;
 
 /// Decision returned by [`AttemptTracker::record_failure`].
@@ -61,7 +63,12 @@ pub enum RetryDecision {
 #[derive(Debug, Clone, Copy)]
 struct AttemptEntry {
     attempts: u32,
-    first_seen: Instant,
+    // Updated on every `record_failure_at` so the TTL behaves as an
+    // inactivity window rather than an absolute lifetime: a receipt that
+    // keeps failing within `ttl` of its previous failure stays tracked,
+    // and capacity eviction drops the entry that has been quiet the
+    // longest.
+    last_seen: Instant,
 }
 
 /// In-process counter of consecutive ingest failures keyed by Green API
@@ -122,9 +129,10 @@ impl AttemptTracker {
 
         let entry = self.inner.entry(receipt_id).or_insert(AttemptEntry {
             attempts: 0,
-            first_seen: now,
+            last_seen: now,
         });
         entry.attempts += 1;
+        entry.last_seen = now;
 
         if entry.attempts < self.max_attempts {
             RetryDecision::Skip {
@@ -160,14 +168,14 @@ impl AttemptTracker {
     fn evict_stale_at(&mut self, now: Instant) {
         let ttl = self.ttl;
         self.inner
-            .retain(|_, entry| now.duration_since(entry.first_seen) < ttl);
+            .retain(|_, entry| now.duration_since(entry.last_seen) < ttl);
     }
 
     fn evict_oldest(&mut self) {
         if let Some(oldest) = self
             .inner
             .iter()
-            .min_by_key(|(_, entry)| entry.first_seen)
+            .min_by_key(|(_, entry)| entry.last_seen)
             .map(|(id, _)| *id)
         {
             self.inner.remove(&oldest);
@@ -283,18 +291,90 @@ mod tests {
             tracker.record_failure_at(11, t0),
             RetryDecision::Skip { attempt: 1 }
         );
+        let t1 = t0 + Duration::from_secs(30);
         assert_eq!(
-            tracker.record_failure_at(11, t0 + Duration::from_secs(30)),
+            tracker.record_failure_at(11, t1),
             RetryDecision::Skip { attempt: 2 },
             "still within TTL — counter persists"
         );
-        // Push past the TTL boundary: the prior entry must be evicted before
-        // the new failure is recorded, so the attempt counter resets to 1.
-        let after_ttl = t0 + ttl + Duration::from_secs(1);
+        // Push the next failure past `ttl` from the MOST RECENT failure
+        // (t1), not from t0: with inactivity-window semantics every failure
+        // refreshes the TTL, so the gap that matters is `now - last_seen`.
+        let after_ttl = t1 + ttl + Duration::from_secs(1);
         assert_eq!(
             tracker.record_failure_at(11, after_ttl),
             RetryDecision::Skip { attempt: 1 },
-            "TTL elapsed — entry must be evicted and the counter must reset"
+            "inactivity exceeded TTL — entry must be evicted and the counter must reset"
+        );
+    }
+
+    #[test]
+    fn ttl_is_an_inactivity_window_not_an_absolute_lifetime() {
+        // A receipt that keeps failing within `ttl` of its previous failure
+        // must remain tracked even when total elapsed time exceeds `ttl`.
+        // Without this, hot entries silently reset mid-budget and the
+        // skip-then-ack contract degrades to skip-forever for any receipt
+        // whose redelivery cadence happens to align with the TTL.
+        let ttl = Duration::from_secs(60);
+        let mut tracker = AttemptTracker::new(5, ttl, 16);
+        let step = ttl / 2;
+        let mut now = Instant::now();
+
+        // First failure starts the counter.
+        assert_eq!(
+            tracker.record_failure_at(21, now),
+            RetryDecision::Skip { attempt: 1 }
+        );
+
+        // Three more failures, each a half-ttl after the previous one.
+        // Total elapsed: 1.5 * ttl — well past the absolute-lifetime
+        // boundary that the old `first_seen`-based TTL would have used.
+        for expected_attempt in 2..=4 {
+            now += step;
+            assert_eq!(
+                tracker.record_failure_at(21, now),
+                RetryDecision::Skip {
+                    attempt: expected_attempt
+                },
+                "failure at +{:?} must keep the entry alive",
+                step * (expected_attempt - 1),
+            );
+        }
+    }
+
+    #[test]
+    fn capacity_eviction_drops_least_recently_failed_not_first_inserted() {
+        // With inactivity-window semantics the eviction key is `last_seen`,
+        // so refreshing an older entry promotes it past a younger but
+        // untouched one. Guard against a regression to `first_seen`-based
+        // eviction that would drop the hot entry.
+        let mut tracker = AttemptTracker::new(3, Duration::from_secs(3600), 2);
+        let t0 = Instant::now();
+
+        // Receipt 100 inserted first, then 200.
+        tracker.record_failure_at(100, t0);
+        tracker.record_failure_at(200, t0 + Duration::from_millis(1));
+        assert_eq!(tracker.len(), 2);
+
+        // Refresh 100 — its last_seen now exceeds 200's. 100's counter is
+        // now at 2 under max_attempts=3.
+        tracker.record_failure_at(100, t0 + Duration::from_millis(10));
+
+        // Inserting 300 must evict the entry with the smallest last_seen,
+        // which is now 200 (t0+1ms), not 100 (t0+10ms).
+        tracker.record_failure_at(300, t0 + Duration::from_millis(20));
+        assert_eq!(tracker.len(), 2);
+
+        // Strong signal that 100 survived the eviction: its counter
+        // persisted across the capacity-induced eviction of 200, so the
+        // next failure exhausts the budget (attempt 3 of max 3).
+        //
+        // We check 100 BEFORE re-inserting 200 because re-inserting at
+        // capacity would itself trigger another eviction and confuse the
+        // signal.
+        assert_eq!(
+            tracker.record_failure_at(100, t0 + Duration::from_millis(30)),
+            RetryDecision::AckGiveUp,
         );
     }
 
