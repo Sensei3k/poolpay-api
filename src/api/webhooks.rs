@@ -130,23 +130,26 @@ pub async fn whatsapp_webhook(
         return Err(AppError::Unauthorized);
     }
 
-    // `received_at` is parsed downstream during confirm (`confirm_receipt_inner`
-    // derives `payment_date` via `DateTime::parse_from_rfc3339`). A non-RFC3339
-    // value would ingest as `pending` then become impossible to confirm (409),
-    // poisoning the queue with rows the admin can neither act on nor purge.
-    // Validate at the boundary and collapse the failure to 401, consistent
+    // `received_at` is forensic-only now — the admin queue orders on
+    // the server-stamped `ingested_at` (see `/api/receipts` in
+    // handlers.rs) and `confirm_receipt_inner` derives `payment_date`
+    // from `ingested_at` with a fallback to `created_at`, so this field
+    // no longer drives ordering or confirmation. We still validate
+    // RFC3339 at the boundary so the stored forensic value is always
+    // parseable — admin tooling, the legacy backfill helper (last-resort
+    // fallback for ingested_at on pre-schema rows), and any downstream
+    // reader can rely on a uniform shape rather than carrying a "may be
+    // garbage" caveat. Collapse the parse failure to 401, consistent
     // with the opaque-failure rule above.
     //
-    // We also normalise the timestamp to a canonical UTC RFC3339 string before
-    // persisting. The DB stores `received_at` as a string and `/api/receipts`
-    // orders by it (`ORDER BY received_at ASC`), so a mix of offsets like
-    // `…+01:00` and `…+00:00` would sort lexicographically — breaking
-    // absolute-time ordering of the admin queue. Converting to UTC makes the
-    // lexicographic sort equivalent to a chronological sort.
+    // We also normalise to a canonical UTC RFC3339 string before
+    // persisting. Consistent UTC storage keeps `received_at` useful as
+    // a forensic field and lets clients compare the bot-supplied
+    // arrival time across receipts without juggling offsets.
     let parsed_received_at = chrono::DateTime::parse_from_rfc3339(&payload.received_at)
         .map_err(|_| AppError::Unauthorized)?
         .with_timezone(&chrono::Utc)
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
     // `raw_image_url` is persisted verbatim and surfaced to admins in the FE
     // review modal. Reject anything that is not an absolute http(s) URL so a

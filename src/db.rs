@@ -3,7 +3,7 @@ use std::sync::Arc;
 use surrealdb::engine::any::{connect, Any};
 use surrealdb::opt::auth::Root;
 use surrealdb::Surreal;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::api::models::{
     CycleContent, DbCycle, DbGroup, DbGroupLink, DbMember, DbPayment, DbReceipt, GroupContent,
@@ -183,9 +183,9 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
     Ok(())
 }
 
-/// Slice 5 additions to the receipt table.
+/// Slice 5 + server-stamped-timestamp additions to the receipt table.
 ///
-/// Two new optional fields:
+/// Three optional fields:
 ///   - `raw_image_url`: direct URL to the WhatsApp screenshot, captured by
 ///     the bot and persisted so admins can review the original artefact
 ///     during confirm/reject.
@@ -193,8 +193,49 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 ///     or flags a receipt. Must NOT contain PII (sender phone, OCR text,
 ///     member name). That is a handler-side invariant; the schema stays
 ///     open-ended so legacy rows remain readable.
+///   - `ingested_at`: server-stamped wall-clock timestamp recorded at the
+///     moment the API persists the row. Treated as the source of truth for
+///     financial dates and admin-queue ordering — `received_at` is supplied
+///     by the bot and therefore controllable by an attacker who can spoof
+///     a webhook payload. `received_at` stays for forensics; financial and
+///     ordering paths must read `ingested_at` instead. Stored as
+///     `option<string>` rather than `string` so the schema migration is
+///     compatible with rows written by older binaries during a rolling
+///     deploy and with the fixture/test paths that hadn't yet been
+///     updated when this column landed. The application-layer contract
+///     (`ingestion::ingest_receipt`) always stamps it on insert.
 ///
-/// Three indexes:
+/// Existing-row backfill: any row pre-dating this migration gets
+/// `ingested_at` filled in once via a three-step fallback chain. Each
+/// candidate is parsed as RFC 3339 and re-emitted in the canonical
+/// `server_now()` shape — UTC, fixed-width millisecond precision,
+/// trailing `Z` — that the application path writes. The reparse is the
+/// point of doing this in Rust rather than inline SurrealQL: the stored
+/// `created_at` is generally written via `now_iso()` (e.g. receipt
+/// ingestion), which emits `+00:00` and may vary fractional precision,
+/// so copying a timestamp verbatim would reintroduce the mixed-format
+/// problem `server_now` was added to solve and break the lex-sort
+/// invariant `ORDER BY ingested_at` relies on. What matters about
+/// `created_at` here is that it is server-owned (bot-clock-independent),
+/// not that it is already in canonical shape — we normalise it before
+/// writing. The chain is:
+///   1. Prefer the row's server-stamped `created_at`, parsed and
+///      normalised to canonical `server_now()` shape — server-owned, so
+///      it cannot be steered by a misclocked or hostile bot.
+///   2. If `created_at` is unparseable (the column is required, so this
+///      should never fire in practice), fall back to the bot-supplied
+///      `received_at` as a forensic last-resort proxy for arrival time.
+///   3. Only if neither parses do we stamp a fresh `server_now()`. That
+///      last branch makes legacy rows look "just ingested" and is
+///      reserved for genuinely corrupt rows.
+///
+/// The backfill is idempotent — the `WHERE ingested_at IS NONE` guard
+/// skips rows already populated on every subsequent boot. The loop is
+/// also bounded (see `MAX_BATCHES` in `backfill_receipt_ingested_at`) so
+/// a rolling deploy that still has older binaries writing legacy rows
+/// can't keep startup blocked indefinitely.
+///
+/// Four indexes:
 ///   - `receipt_whatsapp_message_id_unique` over `(whatsapp_message_id)` is
 ///     the DB-side dedup gate. The ingest pipeline reads the existing row
 ///     first as a fast path, but the read-then-write window leaves a TOCTOU
@@ -205,11 +246,14 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 ///   - `receipt_sender_received` over `(sender_phone, received_at)` powers
 ///     the "show every receipt this phone has ever sent" admin-side history
 ///     lookups landing in the FE slice 5 modal.
-///   - `receipt_status_received` over `(status, received_at)` powers the
+///   - `receipt_status_received` over `(status, received_at)` is retained
+///     for forensics queries that need bot-clock chronology (e.g. comparing
+///     what the bot claims it observed vs what the server actually stored).
+///   - `receipt_status_ingested` over `(status, ingested_at)` powers the
 ///     admin queue's "filtered by status, oldest first" default sort (FIFO
-///     so the backlog drains in arrival order) without a table scan as
-///     receipt volume grows. `GET /api/receipts` issues
-///     `ORDER BY received_at ASC, id ASC` — keep the index and the handler
+///     so the backlog drains in server-arrival order) without a table scan
+///     as receipt volume grows. `GET /api/receipts` issues
+///     `ORDER BY ingested_at ASC, id ASC` — keep the index and the handler
 ///     in lock-step if the contract ever flips to newest-first.
 ///
 /// The receipt table itself stays SCHEMALESS so existing fixtures and
@@ -220,15 +264,135 @@ async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::E
     db.query(
         "DEFINE FIELD IF NOT EXISTS raw_image_url ON receipt TYPE option<string>;
          DEFINE FIELD IF NOT EXISTS rejection_reason ON receipt TYPE option<string>;
-         DEFINE INDEX IF NOT EXISTS receipt_whatsapp_message_id_unique
+         DEFINE FIELD IF NOT EXISTS ingested_at ON receipt TYPE option<string>;",
+    )
+    .await?
+    .check()?;
+
+    backfill_receipt_ingested_at(db).await?;
+
+    db.query(
+        "DEFINE INDEX IF NOT EXISTS receipt_whatsapp_message_id_unique
              ON receipt FIELDS whatsapp_message_id UNIQUE;
          DEFINE INDEX IF NOT EXISTS receipt_sender_received
              ON receipt FIELDS sender_phone, received_at;
          DEFINE INDEX IF NOT EXISTS receipt_status_received
-             ON receipt FIELDS status, received_at;",
+             ON receipt FIELDS status, received_at;
+         DEFINE INDEX IF NOT EXISTS receipt_status_ingested
+             ON receipt FIELDS status, ingested_at;",
     )
     .await?
     .check()?;
+    Ok(())
+}
+
+/// Rust-side companion to [`define_receipt_extensions`]: for every legacy
+/// `receipt` row that still has `ingested_at = NONE`, derive a
+/// monotonic-with-arrival timestamp and re-emit it via [`server_now`]-style
+/// formatting (UTC, millisecond precision, `Z` suffix) before writing it
+/// back.
+///
+/// The fallback chain is deliberately ordered so the stamped value cannot
+/// be steered by a misclocked or hostile bot — only server-owned fields
+/// are trusted to position the row in the FIFO queue. Every candidate is
+/// parsed (RFC 3339) and re-emitted in canonical `server_now()` shape
+/// before being written, since the stored `created_at` is generally
+/// produced by `now_iso()` (which emits `+00:00` and may vary fractional
+/// precision) rather than `server_now()` itself — what we trust about it
+/// is that it is server-owned, not that it is already canonical.
+///   1. Prefer the row's server-stamped `created_at`, parsed and
+///      normalised to the canonical `server_now()` shape so it sorts
+///      deterministically against rows already populated via
+///      `server_now()`.
+///   2. If `created_at` is somehow unparseable (should never happen in
+///      practice; the column is required), fall back to the bot-supplied
+///      `received_at` as a forensic last-resort proxy for arrival time.
+///   3. Only if neither parses do we stamp a fresh `server_now()`. That
+///      branch makes legacy rows look "just ingested" and breaks FIFO,
+///      so it is reserved for genuinely corrupt rows where there is no
+///      better signal.
+///
+/// This matches the same reasoning that drove `confirm_receipt_inner`'s
+/// switch to `created_at`: bot-clock-independence for any field that
+/// downstream code (admin queue, payment_date) treats as load-bearing.
+async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
+    use surrealdb::types::RecordId;
+    use surrealdb_types::SurrealValue;
+
+    #[derive(serde::Deserialize, SurrealValue)]
+    struct LegacyReceipt {
+        id: RecordId,
+        received_at: Option<String>,
+        created_at: String,
+    }
+
+    fn normalise_rfc3339(s: &str) -> Option<String> {
+        chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| {
+            dt.with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        })
+    }
+
+    // Page the scan so a multi-million-row receipt table doesn't pull the
+    // whole legacy backlog into memory at startup. Each iteration UPDATEs
+    // its batch, which removes those rows from the next SELECT's
+    // `ingested_at IS NONE` predicate — so we keep looping until a batch
+    // returns empty rather than tracking an offset.
+    //
+    // Cap the total number of batches so a steady stream of `ingested_at
+    // IS NONE` rows (e.g. an older binary still writing legacy rows
+    // mid-rolling-deploy) cannot keep startup blocked indefinitely. At
+    // `MAX_BATCHES * BATCH_SIZE` rows the loop bails with a warn log;
+    // a subsequent restart will resume from where this one stopped, so
+    // the bulk of rows still get backfilled — just not in one boot.
+    const BATCH_SIZE: i64 = 500;
+    const MAX_BATCHES: u32 = 200;
+    let mut total_backfilled: u64 = 0;
+    let mut batches_run: u32 = 0;
+    loop {
+        if batches_run >= MAX_BATCHES {
+            warn!(
+                max_batches = MAX_BATCHES,
+                batch_size = BATCH_SIZE,
+                rows_backfilled = total_backfilled,
+                "Hit ingested_at backfill cap; remaining legacy rows will be picked up on next startup"
+            );
+            break;
+        }
+        let mut result = db
+            .query(
+                "SELECT id, received_at, created_at FROM receipt \
+                 WHERE ingested_at IS NONE LIMIT $limit",
+            )
+            .bind(("limit", BATCH_SIZE))
+            .await?;
+        let rows: Vec<LegacyReceipt> = result.take(0)?;
+        if rows.is_empty() {
+            break;
+        }
+        let batch_len = rows.len();
+        for row in rows {
+            let normalised = normalise_rfc3339(&row.created_at)
+                .or_else(|| row.received_at.as_deref().and_then(normalise_rfc3339))
+                .unwrap_or_else(crate::api::models::server_now);
+            // `.check()?` surfaces SurrealDB statement errors instead of
+            // silently leaving `ingested_at` as NONE — without it a
+            // typo'd query or constraint clash would skip the row.
+            db.query("UPDATE $id SET ingested_at = $val")
+                .bind(("id", row.id))
+                .bind(("val", normalised))
+                .await?
+                .check()?;
+        }
+        total_backfilled = total_backfilled.saturating_add(batch_len as u64);
+        batches_run = batches_run.saturating_add(1);
+    }
+    if total_backfilled > 0 {
+        info!(
+            rows = total_backfilled,
+            "Backfilled receipt.ingested_at for legacy rows"
+        );
+    }
     Ok(())
 }
 
@@ -895,6 +1059,11 @@ fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
                 raw_image_url: None,
                 rejection_reason: None,
                 received_at: "2026-03-02T10:29:45+00:00".into(),
+                // Fixture is back-dated to the same wall-clock window as
+                // `received_at` so the admin queue's `ORDER BY ingested_at`
+                // shows a sensible ordering against real (server_now-stamped)
+                // rows added during a test run.
+                ingested_at: Some("2026-03-02T10:29:50.000Z".into()),
                 created_at: created_at.into(),
                 updated_at: created_at.into(),
                 deleted_at: None,
@@ -922,6 +1091,7 @@ fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
                 raw_image_url: None,
                 rejection_reason: None,
                 received_at: "2026-03-03T14:15:00+00:00".into(),
+                ingested_at: Some("2026-03-03T14:15:05.000Z".into()),
                 created_at: "2026-03-03T14:15:30+00:00".into(),
                 updated_at: "2026-03-03T16:00:00+00:00".into(),
                 deleted_at: Some("2026-03-03T16:00:00+00:00".into()),

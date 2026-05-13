@@ -2760,6 +2760,7 @@ async fn patch_receipt_scoped_admin_denied_cross_group_returns_403() {
         raw_image_url: None,
         rejection_reason: None,
         received_at: now.clone(),
+        ingested_at: Some(poolpay::api::models::server_now()),
         created_at: now.clone(),
         updated_at: now,
         deleted_at: None,
@@ -2818,6 +2819,7 @@ async fn patch_receipt_super_admin_allowed_cross_group() {
         raw_image_url: None,
         rejection_reason: None,
         received_at: now.clone(),
+        ingested_at: Some(poolpay::api::models::server_now()),
         created_at: now.clone(),
         updated_at: now,
         deleted_at: None,
@@ -3066,6 +3068,7 @@ async fn inbox_item_survives_receipt_soft_delete() {
         raw_image_url: None,
         rejection_reason: None,
         received_at: now.clone(),
+        ingested_at: Some(poolpay::api::models::server_now()),
         created_at: now.clone(),
         updated_at: now.clone(),
         deleted_at: Some(now),
@@ -3121,5 +3124,124 @@ async fn inbox_count_gates_admin_landing_when_zero() {
     assert!(
         post.is_empty(),
         "queue must drain to zero so the admin lands on /home, got {post:?}"
+    );
+}
+
+// ── Bot-clock independence ────────────────────────────────────────────────────
+
+/// A bot that lies about `received_at` must NOT be able to backdate or
+/// future-date the resulting payment row. `payment_date` is sourced from
+/// the server-stamped `ingested_at`, so the bot-supplied timestamp is
+/// purely forensic.
+#[tokio::test]
+async fn confirm_receipt_sources_payment_date_from_ingested_at_not_received_at() {
+    let (app, db) = test_app_with_auth_and_db().await;
+
+    // Receipt 1 is a pre-seeded pending receipt linked to member 4 / cycle 3.
+    // Force a deliberate mismatch: bot claims a wildly future `received_at`,
+    // server stamped `ingested_at` lives in the recent past.
+    db.query(
+        "UPDATE receipt:`1` SET \
+             received_at = '2099-12-31T23:59:59+00:00', \
+             ingested_at = '2026-03-10T10:00:00.000Z'",
+    )
+    .await
+    .expect("rewrite receipt 1 timestamps");
+
+    let resp = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/confirm")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let payments: Vec<serde_json::Value> =
+        json_body(call(app, get("/api/payments?limit=200")).await).await;
+    let new_payment = payments
+        .iter()
+        .find(|p| p["reference"] == "3EB0C123ABCD4567EF89")
+        .expect("payment created from receipt 1");
+    assert_eq!(
+        new_payment["paymentDate"], "2026-03-10",
+        "payment_date must follow server ingested_at, not bot-supplied received_at"
+    );
+}
+
+/// The admin queue must order by the server-stamped `ingested_at`. A
+/// bot that lies about `received_at` (forward or backward) cannot move
+/// its row out of true arrival order.
+#[tokio::test]
+async fn admin_receipt_queue_orders_by_ingested_at_not_received_at() {
+    use poolpay::api::models::{now_iso, ReceiptContent};
+    let (app, db) = test_app_with_auth_and_db().await;
+
+    // Two test rows with deliberately inverted `received_at` vs
+    // `ingested_at`. If the queue still ordered by `received_at`, B (with
+    // the older bot timestamp) would come before A — but A was actually
+    // ingested first, so the server timeline must win.
+    let now = now_iso();
+    let insert = |id: &'static str, received_at: &'static str, ingested_at: &'static str| {
+        let content = ReceiptContent {
+            whatsapp_message_id: format!("WAMSG-CLOCKTEST-{id}"),
+            group_id: poolpay::api::models::EntityId::from("1".to_string()),
+            chat_id: "120363000000000000@g.us".into(),
+            sender_phone: "2349999999999".into(),
+            member_id: None,
+            cycle_id: None,
+            extracted_amount: None,
+            expected_amount: None,
+            amount_matches: None,
+            status: "pending".into(),
+            ocr_text: None,
+            sender_label: None,
+            bank_label: None,
+            raw_image_url: None,
+            rejection_reason: None,
+            received_at: received_at.into(),
+            ingested_at: Some(ingested_at.into()),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            deleted_at: None,
+            confirmed_by: None,
+            rejected_by: None,
+            deleted_by: None,
+        };
+        let id = id.to_string();
+        let db = db.clone();
+        async move {
+            let _: Option<poolpay::api::models::DbReceipt> = db
+                .upsert(("receipt", id.as_str()))
+                .content(content)
+                .await
+                .expect("seed clock-test receipt");
+        }
+    };
+    // A: bot says "the future", server says "earlier in the day"
+    insert(
+        "clocktest-a",
+        "2099-01-01T00:00:00+00:00",
+        "2026-03-10T10:00:00.000Z",
+    )
+    .await;
+    // B: bot says "the past", server says "later in the day"
+    insert(
+        "clocktest-b",
+        "1999-01-01T00:00:00+00:00",
+        "2026-03-10T10:01:00.000Z",
+    )
+    .await;
+
+    let resp = call(app, get("/api/receipts?limit=200")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows: Vec<serde_json::Value> = json_body(resp).await;
+
+    let idx_a = rows
+        .iter()
+        .position(|r| r["id"] == "clocktest-a")
+        .expect("clocktest-a present in queue");
+    let idx_b = rows
+        .iter()
+        .position(|r| r["id"] == "clocktest-b")
+        .expect("clocktest-b present in queue");
+    assert!(
+        idx_a < idx_b,
+        "A (ingested 10:00) must precede B (ingested 10:01) regardless of received_at; \
+         got idx_a={idx_a} idx_b={idx_b}"
     );
 }

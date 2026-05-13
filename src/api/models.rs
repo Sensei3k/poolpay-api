@@ -333,6 +333,13 @@ pub struct DbReceipt {
     #[surreal(default)]
     pub rejection_reason: Option<String>,
     pub received_at: String,
+    /// Server-stamped wall-clock timestamp recorded at insert. Source of
+    /// truth for financial dates and admin-queue ordering — `received_at`
+    /// is bot-supplied and therefore spoofable. `#[surreal(default)]` so
+    /// rows written before this column landed still deserialise (None);
+    /// the migration in `define_receipt_extensions` backfills them.
+    #[surreal(default)]
+    pub ingested_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
@@ -504,6 +511,14 @@ pub struct Receipt {
     pub rejection_reason: Option<String>,
     #[serde(rename = "receivedAt")]
     pub received_at: String,
+    /// Server-stamped insert time. Surfaced so the FE can display the
+    /// authoritative arrival timestamp (used by payment_date and queue
+    /// order) alongside the bot-supplied `receivedAt`. Optional purely so
+    /// pre-migration rows (whose ingested_at hadn't been backfilled yet
+    /// in flight) round-trip without a deserialisation hole; the
+    /// application path always populates it on insert.
+    #[serde(rename = "ingestedAt", skip_serializing_if = "Option::is_none")]
+    pub ingested_at: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
     #[serde(rename = "updatedAt")]
@@ -660,6 +675,7 @@ impl TryFrom<DbReceipt> for Receipt {
             raw_image_url: db.raw_image_url,
             rejection_reason: db.rejection_reason,
             received_at: db.received_at,
+            ingested_at: db.ingested_at,
             created_at: db.created_at,
             updated_at: db.updated_at,
             deleted_at: db.deleted_at,
@@ -763,6 +779,7 @@ pub struct ReceiptContent {
     pub raw_image_url: Option<String>,
     pub rejection_reason: Option<String>,
     pub received_at: String,
+    pub ingested_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
@@ -1167,6 +1184,30 @@ fn is_valid_date(s: &str) -> bool {
 /// Return the current UTC timestamp as an ISO 8601 string.
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// Server-stamped wall-clock timestamp for fields the API itself owns
+/// (e.g. `receipt.ingested_at`).
+///
+/// Normalised to UTC with **millisecond** precision (fixed three-digit
+/// fractional seconds) and a literal `Z` suffix so a string-typed column
+/// lex-sorts chronologically — every value is the same width with the same
+/// trailing token, which `ORDER BY ingested_at` then relies on. Whole-second
+/// precision was previously used here, but a receipt ingested in the same
+/// wall-clock second as another would tie on `ingested_at` and fall back to
+/// `id` ordering, which is not chronological. Three-digit millis are enough
+/// to disambiguate any realistic webhook burst while keeping a fixed-width
+/// string for lex-sort. Don't reach for [`now_iso`] for ordering-critical
+/// columns: `to_rfc3339()` emits `+00:00` rather than `Z` and may shift
+/// precision with the underlying chrono build, both of which break lex-sort
+/// if a mix of formats ever lands in the same column.
+///
+/// Use this for any field that drives ordering or financial dates. The
+/// webhook handler still parses and normalises the bot-supplied
+/// `received_at` independently — we don't want the server clock to
+/// silently overwrite forensic evidence of what the bot observed.
+pub fn server_now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 // ── Auth models ───────────────────────────────────────────────────────────────
