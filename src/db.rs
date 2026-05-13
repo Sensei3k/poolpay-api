@@ -1063,7 +1063,7 @@ fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
                 // `received_at` so the admin queue's `ORDER BY ingested_at`
                 // shows a sensible ordering against real (server_now-stamped)
                 // rows added during a test run.
-                ingested_at: Some("2026-03-02T10:29:50Z".into()),
+                ingested_at: Some("2026-03-02T10:29:50.000Z".into()),
                 created_at: created_at.into(),
                 updated_at: created_at.into(),
                 deleted_at: None,
@@ -1091,7 +1091,7 @@ fn fixture_receipts() -> Vec<(&'static str, ReceiptContent)> {
                 raw_image_url: None,
                 rejection_reason: None,
                 received_at: "2026-03-03T14:15:00+00:00".into(),
-                ingested_at: Some("2026-03-03T14:15:05Z".into()),
+                ingested_at: Some("2026-03-03T14:15:05.000Z".into()),
                 created_at: "2026-03-03T14:15:30+00:00".into(),
                 updated_at: "2026-03-03T16:00:00+00:00".into(),
                 deleted_at: Some("2026-03-03T16:00:00+00:00".into()),

@@ -3143,7 +3143,7 @@ async fn confirm_receipt_sources_payment_date_from_ingested_at_not_received_at()
     db.query(
         "UPDATE receipt:`1` SET \
              received_at = '2099-12-31T23:59:59+00:00', \
-             ingested_at = '2026-03-10T10:00:00Z'",
+             ingested_at = '2026-03-10T10:00:00.000Z'",
     )
     .await
     .expect("rewrite receipt 1 timestamps");
@@ -3216,14 +3216,14 @@ async fn admin_receipt_queue_orders_by_ingested_at_not_received_at() {
     insert(
         "clocktest-a",
         "2099-01-01T00:00:00+00:00",
-        "2026-03-10T10:00:00Z",
+        "2026-03-10T10:00:00.000Z",
     )
     .await;
     // B: bot says "the past", server says "later in the day"
     insert(
         "clocktest-b",
         "1999-01-01T00:00:00+00:00",
-        "2026-03-10T10:01:00Z",
+        "2026-03-10T10:01:00.000Z",
     )
     .await;
 
