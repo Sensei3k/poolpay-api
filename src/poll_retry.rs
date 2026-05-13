@@ -181,7 +181,7 @@ impl AttemptTracker {
     /// for the `AckGiveUp` branch: until it is called the tracker keeps
     /// the entry pinned at `max_attempts` so an ack failure followed by a
     /// Green API redelivery does not restart the retry budget.
-    pub(crate) fn record_acked(&mut self, receipt_id: u64) {
+    pub fn record_acked(&mut self, receipt_id: u64) {
         self.inner.remove(&receipt_id);
     }
 
