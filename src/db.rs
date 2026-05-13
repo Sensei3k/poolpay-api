@@ -206,11 +206,18 @@ async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
 ///     (`ingestion::ingest_receipt`) always stamps it on insert.
 ///
 /// Existing-row backfill: any row pre-dating this migration gets
-/// `ingested_at = received_at` once. The substitute is deterministic (we
-/// have no real ingest time on file for those rows) and idempotent — the
-/// `WHERE ingested_at IS NONE` guard skips rows already populated by the
-/// application path on every subsequent boot, so re-running the migration
-/// is a no-op.
+/// `ingested_at` filled in once from a canonicalised copy of
+/// `received_at`. Done in Rust rather than inline SurrealQL so the
+/// timestamp can be parsed (RFC 3339) and reformatted into the same
+/// `server_now()` shape — UTC, second precision, trailing `Z` — that the
+/// application path writes. Copying `received_at` verbatim would
+/// reintroduce the mixed-format problem `server_now` was added to solve
+/// (`+00:00` vs `Z`, sub-second precision), which breaks the lex-sort
+/// invariant `ORDER BY ingested_at` relies on. Rows whose `received_at`
+/// can't be parsed fall back to a fresh `server_now()` so we never
+/// persist a value that won't sort. The backfill is idempotent — the
+/// `WHERE ingested_at IS NONE` guard skips rows already populated on
+/// every subsequent boot.
 ///
 /// Three indexes:
 ///   - `receipt_sender_received` over `(sender_phone, received_at)` powers
@@ -234,9 +241,15 @@ async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::E
     db.query(
         "DEFINE FIELD IF NOT EXISTS raw_image_url ON receipt TYPE option<string>;
          DEFINE FIELD IF NOT EXISTS rejection_reason ON receipt TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS ingested_at ON receipt TYPE option<string>;
-         UPDATE receipt SET ingested_at = received_at WHERE ingested_at IS NONE;
-         DEFINE INDEX IF NOT EXISTS receipt_sender_received
+         DEFINE FIELD IF NOT EXISTS ingested_at ON receipt TYPE option<string>;",
+    )
+    .await?
+    .check()?;
+
+    backfill_receipt_ingested_at(db).await?;
+
+    db.query(
+        "DEFINE INDEX IF NOT EXISTS receipt_sender_received
              ON receipt FIELDS sender_phone, received_at;
          DEFINE INDEX IF NOT EXISTS receipt_status_received
              ON receipt FIELDS status, received_at;
@@ -245,6 +258,45 @@ async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::E
     )
     .await?
     .check()?;
+    Ok(())
+}
+
+/// Rust-side companion to [`define_receipt_extensions`]: for every legacy
+/// `receipt` row that still has `ingested_at = NONE`, parse `received_at`
+/// as RFC 3339 and re-emit it via [`server_now`]-style formatting (UTC,
+/// second precision, `Z` suffix) before writing it back. Rows whose
+/// `received_at` is missing or unparseable fall back to a fresh
+/// `server_now()` so we never persist a value that breaks lex-sort.
+async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
+    use surrealdb::types::RecordId;
+    use surrealdb_types::SurrealValue;
+
+    #[derive(serde::Deserialize, SurrealValue)]
+    struct LegacyReceipt {
+        id: RecordId,
+        received_at: Option<String>,
+    }
+
+    let mut result = db
+        .query("SELECT id, received_at FROM receipt WHERE ingested_at IS NONE")
+        .await?;
+    let rows: Vec<LegacyReceipt> = result.take(0)?;
+
+    for row in rows {
+        let normalised = row
+            .received_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| {
+                dt.with_timezone(&chrono::Utc)
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            })
+            .unwrap_or_else(crate::api::models::server_now);
+        db.query("UPDATE $id SET ingested_at = $val")
+            .bind(("id", row.id))
+            .bind(("val", normalised))
+            .await?;
+    }
     Ok(())
 }
 
