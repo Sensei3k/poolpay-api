@@ -72,6 +72,20 @@ pub struct CreateAdminUserRequest {
     pub role: String,
 }
 
+/// Atomic create-user-with-grants payload. The user portion mirrors
+/// `CreateAdminUserRequest`; `groupIds` carries the list of groups the
+/// new admin should be granted scope on. The handler wraps the user +
+/// identity + grant inserts in a single SurrealDB transaction so a
+/// failure midway leaves no partial state behind.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAdminUserWithGrantsRequest {
+    pub email: String,
+    pub initial_password: String,
+    pub role: String,
+    pub group_ids: Vec<EntityId>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateAdminUserRequest {
@@ -93,6 +107,31 @@ pub struct AdminUserResponse {
     pub version: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// One grant echoed back in the atomic-create response. A trimmed subset
+/// of the per-call `GroupAdminGrantResponse` (defined further down): it
+/// carries `group_id`, `created_at`, and `created_by` only. The
+/// `user_id` field is intentionally dropped because the new user's id is
+/// already returned in the outer response under `user.userId`, so
+/// repeating it on every grant row is pure noise. Duplicating the rest
+/// of the shape here means the FE can confirm what landed inside the
+/// transaction without issuing a follow-up read.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUserGrantSummary {
+    pub group_id: String,
+    pub created_at: String,
+    pub created_by: String,
+}
+
+/// Response shape for `POST /api/admin/users/with-grants`. Carries the
+/// created user plus the grants attached inside the same transaction.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUserWithGrantsResponse {
+    pub user: AdminUserResponse,
+    pub grants: Vec<AdminUserGrantSummary>,
 }
 
 impl AdminUserResponse {
@@ -303,6 +342,333 @@ pub async fn create_admin_user(
     Ok((
         StatusCode::CREATED,
         Json(AdminUserResponse::from_db(&created)),
+    ))
+}
+
+// ── POST /api/admin/users/with-grants ─────────────────────────────────────────
+
+/// Hard cap on the number of groups a single atomic create may attach
+/// grants for. Caps the SQL size we construct and bounds the work each
+/// request can demand of the transaction.
+const MAX_GRANTS_PER_REQUEST: usize = 64;
+
+/// Super-admin provisions a new admin-tier user *and* attaches grants
+/// on one or more groups in a single SurrealDB transaction. The endpoint
+/// exists because the FE add-admin flow previously orchestrated three
+/// HTTP calls (create user → create grant per group → best-effort
+/// compensation on failure), which could leave partial state when grant
+/// `N` failed after grants `1..N-1` succeeded. The transaction collapses
+/// the orchestration to one round-trip and gives the FE an
+/// all-or-nothing guarantee from the DB engine.
+///
+/// Validation runs entirely before the transaction opens so 4xx errors
+/// are cheap: empty / duplicated / over-capped `groupIds`, missing
+/// fields, oversize payload, unknown role, duplicate email, and missing
+/// groups all return without writing anything. Inside the transaction
+/// we capture the new user's record id with `record::id($created.id)`
+/// and reuse it for both the `user_identity` insert and every
+/// `group_admin` insert; the UNIQUE indexes on
+/// `user_identity(provider, provider_subject)` and
+/// `group_admin(user_id, group_id)` are the safety net for any race
+/// that slipped past the pre-checks. SurrealDB cancels the whole
+/// transaction on any failure, so a UNIQUE violation on grant `N` rolls
+/// back grants `1..N-1`, the identity row, and the user row in one shot.
+pub async fn create_admin_user_with_grants(
+    SuperAdminUser(caller): SuperAdminUser,
+    State(db): State<DbConn>,
+    ClientIp(client_ip): ClientIp,
+    http_req: Request,
+) -> Result<(StatusCode, Json<AdminUserWithGrantsResponse>), AppError> {
+    let body = to_bytes(http_req.into_body(), MAX_ADMIN_USER_BODY_BYTES)
+        .await
+        .map_err(map_body_read_error)?;
+    let req: CreateAdminUserWithGrantsRequest = serde_json::from_slice(&body)
+        .map_err(|_| AppError::BadRequest("invalid JSON body".into()))?;
+
+    let email = req.email.trim().to_string();
+    if email.is_empty() {
+        return Err(AppError::BadRequest("email required".into()));
+    }
+    if email.len() > MAX_EMAIL_LEN {
+        return Err(AppError::BadRequest("email too long".into()));
+    }
+    if req.initial_password.trim().is_empty() {
+        return Err(AppError::BadRequest("initialPassword required".into()));
+    }
+    if req.initial_password.len() > MAX_PASSWORD_LEN {
+        return Err(AppError::BadRequest("initialPassword too long".into()));
+    }
+    // Only role "admin" is permitted here. `super_admin` is rejected
+    // because super-admins bypass `GroupScopedAdmin` entirely, so any
+    // `group_admin` rows attached at create-time would be dead weight —
+    // and `grant_group_admin` already enforces the same rule on the
+    // per-call path (returns 409 when targeting a super-admin). Keeping
+    // both grant entry points aligned avoids a confusing "you can grant
+    // here but not there" inconsistency.
+    if req.role != "admin" {
+        return Err(AppError::BadRequest(format!(
+            "with-grants only supports role 'admin'; got '{}'",
+            req.role
+        )));
+    }
+
+    // groupIds: required, non-empty, de-duplicated, bounded.
+    if req.group_ids.is_empty() {
+        return Err(AppError::BadRequest(
+            "groupIds must contain at least one group".into(),
+        ));
+    }
+    if req.group_ids.len() > MAX_GRANTS_PER_REQUEST {
+        return Err(AppError::BadRequest(format!(
+            "groupIds must contain at most {MAX_GRANTS_PER_REQUEST} entries"
+        )));
+    }
+    // Reject empty / whitespace-only entries up-front. Without this, an
+    // empty string falls through to the existence pre-check and returns
+    // 404 — a confusing error message for what's really a malformed
+    // request.
+    for g in &req.group_ids {
+        if g.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "groupIds entries must not be empty".into(),
+            ));
+        }
+    }
+    // Catch caller-side duplicates explicitly: relying on the UNIQUE
+    // index to surface them inside the transaction would still abort the
+    // whole write, but the resulting 409 would be ambiguous between
+    // "you sent the same id twice" and "another caller raced". A 400 on
+    // duplicates in the request body keeps the two failure modes distinct.
+    let mut seen = std::collections::HashSet::with_capacity(req.group_ids.len());
+    for g in &req.group_ids {
+        if !seen.insert(g.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "groupIds must be unique; duplicate '{g}'"
+            )));
+        }
+    }
+
+    let email_normalised = email.to_lowercase();
+    let ip = client_ip.to_string();
+
+    if find_credentials_identity(&db, &email_normalised)
+        .await?
+        .is_some()
+    {
+        record_auth_event(
+            &db,
+            None,
+            Some(caller.user_id.clone()),
+            "user_created",
+            false,
+            Some("duplicate_email"),
+            Some(&ip),
+        )
+        .await;
+        return Err(AppError::Conflict("email already registered".into()));
+    }
+
+    // Verify every requested group exists (and is not soft-deleted)
+    // before opening the transaction. Without this, an unknown group id
+    // would surface inside the transaction as a successful empty insert
+    // (SurrealDB will happily create a `group_admin` referencing a
+    // missing group) — the relational integrity check has to be explicit.
+    for gid in &req.group_ids {
+        let group: Option<DbGroup> = db.select(("group", gid.as_str())).await?;
+        if group.filter(|g| g.deleted_at.is_none()).is_none() {
+            record_auth_event(
+                &db,
+                None,
+                Some(caller.user_id.clone()),
+                "user_created",
+                false,
+                Some("unknown_group"),
+                Some(&ip),
+            )
+            .await;
+            return Err(AppError::NotFound(format!("group {gid} does not exist")));
+        }
+    }
+
+    let password_hash = match password::hash(&req.initial_password) {
+        Ok(h) => h,
+        Err(_) => {
+            record_auth_event(
+                &db,
+                None,
+                Some(caller.user_id.clone()),
+                "user_created",
+                false,
+                Some("hash_failed"),
+                Some(&ip),
+            )
+            .await;
+            return Err(AppError::Internal("password hashing failed".into()));
+        }
+    };
+
+    let now = now_iso();
+    let user_content = UserContent {
+        email: email.clone(),
+        email_normalised: email_normalised.clone(),
+        password_hash: Some(password_hash),
+        role: req.role.clone(),
+        status: "active".into(),
+        token_version: 0,
+        must_reset_password: true,
+        version: 1,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        deleted_at: None,
+    };
+
+    // Build the multi-statement transaction body. The grant inserts are
+    // appended one per group so each can bind its `group_id` to a named
+    // parameter; building one big `FOR` loop in SurrealQL would force us
+    // to bind the whole `group_ids` array as a single value, which is
+    // doable but harder to audit at the query-log level.
+    let mut sql = String::from(
+        "BEGIN TRANSACTION;\n\
+         LET $created = (CREATE ONLY user CONTENT $user_content RETURN AFTER);\n\
+         LET $uid = record::id($created.id);\n\
+         CREATE user_identity SET \
+             user_id = $uid, \
+             provider = $provider, \
+             provider_subject = $provider_subject, \
+             email_at_link = $email_at_link, \
+             created_at = $now;\n",
+    );
+    for i in 0..req.group_ids.len() {
+        sql.push_str(&format!(
+            "CREATE group_admin SET \
+                 user_id = $uid, group_id = $g{i}, \
+                 created_at = $now, created_by = $actor;\n"
+        ));
+    }
+    sql.push_str(
+        "RETURN $created;\n\
+         COMMIT TRANSACTION;\n",
+    );
+
+    let mut q = db
+        .query(sql)
+        .bind(("user_content", user_content))
+        .bind(("provider", CREDENTIALS_PROVIDER.to_string()))
+        .bind(("provider_subject", email_normalised.clone()))
+        .bind(("email_at_link", email.clone()))
+        .bind(("now", now.clone()))
+        .bind(("actor", caller.user_id.clone()));
+    for (i, gid) in req.group_ids.iter().enumerate() {
+        q = q.bind((format!("g{i}"), gid.as_str().to_string()));
+    }
+
+    // Helper to classify a transaction error into an audit reason +
+    // user-facing AppError. Bound here so the two error sites below
+    // (`q.await` failure and `.check()` failure) stay in lockstep.
+    let classify_txn_error = |msg: &str| -> (&'static str, AppError) {
+        if is_unique_constraint_error(msg) {
+            (
+                "duplicate_email_race",
+                AppError::Conflict("email already registered".into()),
+            )
+        } else {
+            (
+                "transaction_failed",
+                AppError::Internal(format!("with-grants transaction failed: {msg}")),
+            )
+        }
+    };
+
+    let resp = match q.await {
+        Ok(r) => r,
+        Err(e) => {
+            let (reason, app_err) = classify_txn_error(&e.to_string());
+            record_auth_event(
+                &db,
+                None,
+                Some(caller.user_id.clone()),
+                "user_created",
+                false,
+                Some(reason),
+                Some(&ip),
+            )
+            .await;
+            return Err(app_err);
+        }
+    };
+    let mut resp = match resp.check() {
+        Ok(r) => r,
+        Err(e) => {
+            let (reason, app_err) = classify_txn_error(&e.to_string());
+            record_auth_event(
+                &db,
+                None,
+                Some(caller.user_id.clone()),
+                "user_created",
+                false,
+                Some(reason),
+                Some(&ip),
+            )
+            .await;
+            return Err(app_err);
+        }
+    };
+
+    // The trailing `RETURN $created;` lands in the last statement slot.
+    // Statement indexes are: 0 = BEGIN, 1 = LET created, 2 = LET uid,
+    // 3 = CREATE user_identity, 4..4+N = group_admin inserts,
+    // 4+N = RETURN, last = COMMIT. `.take()` walks left-to-right by
+    // surfacing the next un-consumed result, so we pull from the end
+    // by index rather than guess the slot.
+    let return_slot = resp.num_statements().saturating_sub(2);
+    let created_opt: Option<DbUser> = resp.take(return_slot).map_err(|e| {
+        AppError::Internal(format!(
+            "with-grants transaction returned unexpected shape: {e}"
+        ))
+    })?;
+    let created = created_opt
+        .ok_or_else(|| AppError::Internal("with-grants transaction returned no user row".into()))?;
+    let user_id = record_id_to_string(created.id.clone());
+
+    record_auth_event(
+        &db,
+        Some(user_id.clone()),
+        Some(caller.user_id.clone()),
+        "user_created",
+        true,
+        Some(&req.role),
+        Some(&ip),
+    )
+    .await;
+    for gid in &req.group_ids {
+        record_auth_event(
+            &db,
+            Some(user_id.clone()),
+            Some(caller.user_id.clone()),
+            "group_admin_granted",
+            true,
+            Some(&format!("group:{gid}")),
+            Some(&ip),
+        )
+        .await;
+    }
+
+    let grants = req
+        .group_ids
+        .iter()
+        .map(|gid| AdminUserGrantSummary {
+            group_id: gid.as_str().to_string(),
+            created_at: now.clone(),
+            created_by: caller.user_id.clone(),
+        })
+        .collect();
+
+    Ok((
+        StatusCode::CREATED,
+        Json(AdminUserWithGrantsResponse {
+            user: AdminUserResponse::from_db(&created),
+            grants,
+        }),
     ))
 }
 

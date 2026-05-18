@@ -1952,6 +1952,397 @@ async fn create_admin_user_without_bearer_returns_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+// --- POST /api/admin/users/with-grants ---
+//
+// Atomic create-user-with-grants. Every happy-path assertion lands the
+// new user + every requested grant in the same transaction; every error
+// path asserts the rollback boundary (no user, no identity, no grants).
+
+fn admin_users_with_grants_post_req(token: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/admin/users/with-grants")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap()
+}
+
+async fn count_users_with_email(db: &poolpay::db::DbConn, email_normalised: &str) -> i64 {
+    let mut resp = db
+        .query("SELECT count() FROM user WHERE email_normalised = $e GROUP ALL")
+        .bind(("e", email_normalised.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp.take("count").unwrap_or_default();
+    rows.first().copied().unwrap_or(0)
+}
+
+async fn count_user_identities_for(db: &poolpay::db::DbConn, provider_subject: &str) -> i64 {
+    let mut resp = db
+        .query(
+            "SELECT count() FROM user_identity \
+             WHERE provider = 'credentials' AND provider_subject = $s GROUP ALL",
+        )
+        .bind(("s", provider_subject.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<i64> = resp.take("count").unwrap_or_default();
+    rows.first().copied().unwrap_or(0)
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_happy_path_single_group() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({
+        "email": "atomic-single@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": ["1"],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v: serde_json::Value = json_body(resp).await;
+    let new_id = v["user"]["userId"].as_str().unwrap().to_string();
+    assert_eq!(v["user"]["email"], "atomic-single@example.com");
+    assert_eq!(v["user"]["role"], "admin");
+    assert_eq!(v["user"]["status"], "active");
+    assert_eq!(v["user"]["mustResetPassword"], true);
+    let grants = v["grants"].as_array().expect("grants array");
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0]["groupId"], "1");
+    assert_eq!(grants[0]["createdBy"], super_id);
+
+    // All three rows materialised together.
+    assert_eq!(
+        count_users_with_email(&db, "atomic-single@example.com").await,
+        1
+    );
+    assert_eq!(
+        count_user_identities_for(&db, "atomic-single@example.com").await,
+        1
+    );
+    assert_eq!(count_group_admin_rows(&db, &new_id, "1").await, 1);
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_happy_path_multiple_groups() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    seed_test_group(&db, "atomic-g2").await;
+    seed_test_group(&db, "atomic-g3").await;
+
+    let body = serde_json::json!({
+        "email": "atomic-multi@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": ["1", "atomic-g2", "atomic-g3"],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v: serde_json::Value = json_body(resp).await;
+    let new_id = v["user"]["userId"].as_str().unwrap().to_string();
+    let grants = v["grants"].as_array().expect("grants array");
+    assert_eq!(grants.len(), 3);
+
+    for gid in ["1", "atomic-g2", "atomic-g3"] {
+        assert_eq!(
+            count_group_admin_rows(&db, &new_id, gid).await,
+            1,
+            "missing grant on group {gid}"
+        );
+    }
+    // One audit event for user_created, plus one per granted group.
+    assert_eq!(count_auth_events(&db, &new_id, "user_created").await, 1);
+    assert_eq!(
+        count_auth_events(&db, &new_id, "group_admin_granted").await,
+        3
+    );
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_empty_group_ids_returns_400() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({
+        "email": "empty-groups@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": [],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // No partial state: user must not exist.
+    assert_eq!(
+        count_users_with_email(&db, "empty-groups@example.com").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_duplicate_group_ids_returns_400() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({
+        "email": "dupe-groups@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": ["1", "1"],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        count_users_with_email(&db, "dupe-groups@example.com").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_empty_string_group_id_returns_400() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({
+        "email": "blank-group@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": ["1", ""],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        count_users_with_email(&db, "blank-group@example.com").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_unknown_group_returns_404_and_rolls_back() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    // Group "1" exists in the fixtures; "does-not-exist" does not. The
+    // pre-flight check must surface 404 before opening the transaction
+    // so partial inserts can never land.
+    let body = serde_json::json!({
+        "email": "unknown-group@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": ["1", "does-not-exist"],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Rollback boundary: no user, no identity, no grants for group "1"
+    // belonging to any newly-created user.
+    assert_eq!(
+        count_users_with_email(&db, "unknown-group@example.com").await,
+        0
+    );
+    assert_eq!(
+        count_user_identities_for(&db, "unknown-group@example.com").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_rejects_member_role() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({
+        "email": "member-role@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "member",
+        "groupIds": ["1"],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_rejects_super_admin_role() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({
+        "email": "super-with-grants@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "super_admin",
+        "groupIds": ["1"],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // Rollback boundary: no user landed.
+    assert_eq!(
+        count_users_with_email(&db, "super-with-grants@example.com").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_duplicate_email_returns_409_and_rolls_back() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    // Seed an existing user first so the email collision triggers in the
+    // pre-check path.
+    seed_admin_user(&app, &super_token, "collide@example.com", "admin").await;
+
+    let body = serde_json::json!({
+        "email": "collide@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": ["1"],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // Exactly one user with that email — no second row crept in.
+    assert_eq!(count_users_with_email(&db, "collide@example.com").await, 1);
+    assert_eq!(
+        count_user_identities_for(&db, "collide@example.com").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_collision_blocked_by_precheck_no_partial_state() {
+    // Exercises the **pre-check 409 path**: a pre-existing `user_identity`
+    // row for the same email is caught by `find_credentials_identity` and
+    // the handler returns 409 before any transaction is opened. The
+    // assertion is the **rollback boundary**: no new user / identity /
+    // grant rows leak when the request is rejected.
+    //
+    // Note: the same boundary holds if a race slipped past the pre-check,
+    // because the UNIQUE index on `user_identity(provider, provider_subject)`
+    // would abort the transaction inside the COMMIT and SurrealDB would
+    // roll back the user + identity + any partial grants. That
+    // in-transaction rollback path isn't directly exercised here (the
+    // pre-check fires first), but it's the load-bearing invariant covered
+    // by the no-partial-state assertion below.
+    use poolpay::api::models::{now_iso, DbUserIdentity, UserIdentityContent};
+
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    let now = now_iso();
+    let _: Option<DbUserIdentity> = db
+        .create("user_identity")
+        .content(UserIdentityContent {
+            user_id: "race-target".to_string(),
+            provider: "credentials".to_string(),
+            provider_subject: "racer@example.com".to_string(),
+            email_at_link: "racer@example.com".to_string(),
+            created_at: now,
+        })
+        .await
+        .expect("seed colliding identity");
+
+    let body = serde_json::json!({
+        "email": "racer@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": ["1"],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // The colliding identity is the one we seeded; no new user was created.
+    assert_eq!(count_users_with_email(&db, "racer@example.com").await, 0);
+    // Identity count stays at 1 (just the pre-seeded one).
+    assert_eq!(count_user_identities_for(&db, "racer@example.com").await, 1);
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_rejects_non_super_admin_with_403() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    // Seed an `admin`-role user and mint a token for them — handler must
+    // refuse with 403.
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+    let (admin_id, _) =
+        seed_admin_user(&app, &super_token, "admin-caller@example.com", "admin").await;
+    let admin_token = verifier.mint_access(&admin_id, "admin", 0).expect("mint");
+
+    let body = serde_json::json!({
+        "email": "rejected-call@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": ["1"],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&admin_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        count_users_with_email(&db, "rejected-call@example.com").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn create_admin_user_with_grants_without_bearer_returns_401() {
+    let (app, db, _v) = build_app_full(lax_rate_cfg()).await;
+    let body = serde_json::json!({
+        "email": "no-bearer@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": ["1"],
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/admin/users/with-grants")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = call(app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        count_users_with_email(&db, "no-bearer@example.com").await,
+        0
+    );
+}
+
 // --- PATCH /api/admin/users/:id ---
 
 /// Provision an admin-tier user via the POST endpoint so the PATCH/DELETE

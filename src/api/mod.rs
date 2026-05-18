@@ -128,6 +128,15 @@ pub fn router_with_config(
         // router-level layer so we can keep the response-shape control
         // local to the module).
         .route("/api/admin/users", post(admin_users::create_admin_user))
+        // Atomic create-user-with-grants endpoint. Collapses the three-step
+        // FE flow (create user → grant per group → compensation on failure)
+        // into a single SurrealDB transaction so a mid-write failure rolls
+        // back the user, identity, and any partial grants. Super-admin only,
+        // gated inside the handler.
+        .route(
+            "/api/admin/users/with-grants",
+            post(admin_users::create_admin_user_with_grants),
+        )
         .route("/api/admin/users/{id}", patch(admin_users::update_admin_user))
         .route("/api/admin/users/{id}", delete(admin_users::delete_admin_user))
         .route(
