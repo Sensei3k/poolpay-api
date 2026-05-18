@@ -16,10 +16,10 @@ use crate::db::{is_unique_constraint_error, DbConn, FIXTURE_GROUP_ID};
 const BOOTSTRAP_EVENT_TYPE: &str = "bootstrap_admin_created";
 const CREDENTIALS_PROVIDER: &str = "credentials";
 
-/// Dev-only fixture password for `seed_dummy_admins`. Only applied when
+/// Dev-only fixture password for `seed_dummy_fixtures`. Only applied when
 /// `SEED_ON_EMPTY=true` **and** `APP_ENV` is `development` or `test`, so
 /// production boots cannot accidentally plant it.
-const DUMMY_ADMIN_PASSWORD: &str = "PoolPayQA2026!";
+const DUMMY_FIXTURE_PASSWORD: &str = "PoolPayQA2026!";
 
 /// Declarative spec for the dev-only fixture user accounts. Each row pairs
 /// an email with its role, whether to receive a `group_admin` grant on
@@ -39,7 +39,7 @@ const DUMMY_ADMIN_PASSWORD: &str = "PoolPayQA2026!";
 /// - member1: `member`, no grant, linked to fixture pool member `1`
 ///   (Adaeze Okonkwo) so the auth identity fronts a real pool participant
 ///   with cycles + payments visible to the member dashboard.
-struct DummyAdmin {
+struct DummyFixtureUser {
     email: &'static str,
     role: &'static str,
     grant_fixture_group: bool,
@@ -50,32 +50,32 @@ struct DummyAdmin {
     link_pool_member_id: Option<&'static str>,
 }
 
-const DUMMY_ADMINS: [DummyAdmin; 5] = [
-    DummyAdmin {
+const DUMMY_FIXTURE_USERS: [DummyFixtureUser; 5] = [
+    DummyFixtureUser {
         email: "admin1@poolpay.test",
         role: "admin",
         grant_fixture_group: true,
         link_pool_member_id: None,
     },
-    DummyAdmin {
+    DummyFixtureUser {
         email: "admin2@poolpay.test",
         role: "admin",
         grant_fixture_group: false,
         link_pool_member_id: None,
     },
-    DummyAdmin {
+    DummyFixtureUser {
         email: "admin3@poolpay.test",
         role: "super_admin",
         grant_fixture_group: false,
         link_pool_member_id: None,
     },
-    DummyAdmin {
+    DummyFixtureUser {
         email: "admin4@poolpay.test",
         role: "admin",
         grant_fixture_group: false,
         link_pool_member_id: None,
     },
-    DummyAdmin {
+    DummyFixtureUser {
         email: "member1@poolpay.test",
         role: "member",
         grant_fixture_group: false,
@@ -187,12 +187,12 @@ fn redact(email: &str) -> String {
     }
 }
 
-/// Dev-only: seed the fixture admin + member users so both the admin
-/// management UI and the member dashboard have clickable targets without
-/// forcing manual `POST /api/admin/users` calls or social-signup flows.
+/// Dev-only: seed the fixture users so both the admin management UI and
+/// the member dashboard have clickable targets without forcing manual
+/// `POST /api/admin/users` calls or social-signup flows.
 ///
-/// See `DUMMY_ADMINS` for the full matrix. All accounts share
-/// `DUMMY_ADMIN_PASSWORD` and use `must_reset_password: false` so login is
+/// See `DUMMY_FIXTURE_USERS` for the full matrix. All accounts share
+/// `DUMMY_FIXTURE_PASSWORD` and use `must_reset_password: false` so login is
 /// one-shot, unlike the bootstrap super-admin. Idempotent on every email:
 /// a restart re-checks `user_identity`, skips already-present rows, and
 /// re-asserts every per-user side-effect (admin1's `group_admin` grant on
@@ -201,28 +201,28 @@ fn redact(email: &str) -> String {
 /// `SEED_ON_EMPTY=true` **and** `APP_ENV` ∈ {`development`, `test`} so any
 /// other deploy — including unset `APP_ENV` — fails closed. This mirrors
 /// the `/api/test/reset` gate in `src/api/mod.rs`.
-pub async fn seed_dummy_admins(db: &DbConn) -> Result<(), surrealdb::Error> {
+pub async fn seed_dummy_fixtures(db: &DbConn) -> Result<(), surrealdb::Error> {
     let flag_enabled = std::env::var("SEED_ON_EMPTY").as_deref() == Ok("true");
     let env_allows_fixtures = matches!(
         std::env::var("APP_ENV").as_deref(),
         Ok("development" | "test")
     );
-    seed_dummy_admins_with_flag(db, flag_enabled && env_allows_fixtures).await
+    seed_dummy_fixtures_with_flag(db, flag_enabled && env_allows_fixtures).await
 }
 
 /// Internal entry point that takes an explicit boolean instead of reading
-/// process env. `seed_dummy_admins` calls this after evaluating the
+/// process env. `seed_dummy_fixtures` calls this after evaluating the
 /// `SEED_ON_EMPTY` + `APP_ENV` gates; tests call it directly so they never
 /// have to mutate env vars at runtime (which would race with concurrent
 /// `std::env::var` reads elsewhere in the suite).
 ///
 /// Marked `#[doc(hidden)]` — `pub` is required because integration tests
 /// live in the external `tests/` crate, but it must not be treated as part
-/// of the public surface. Production code should call `seed_dummy_admins`
+/// of the public surface. Production code should call `seed_dummy_fixtures`
 /// so the env-based safety gates are always evaluated. Mirrors the pattern
 /// used by `auth::hmac::sign_for_testing`.
 #[doc(hidden)]
-pub async fn seed_dummy_admins_with_flag(
+pub async fn seed_dummy_fixtures_with_flag(
     db: &DbConn,
     enabled: bool,
 ) -> Result<(), surrealdb::Error> {
@@ -237,22 +237,22 @@ pub async fn seed_dummy_admins_with_flag(
     let super_admin_id = match find_super_admin_id(db).await? {
         Some(id) => id,
         None => {
-            info!("seed_dummy_admins: no super-admin present — skipping");
+            info!("seed_dummy_fixtures: no super-admin present — skipping");
             return Ok(());
         }
     };
 
-    for spec in DUMMY_ADMINS.iter() {
-        let user_id = ensure_admin_fixture(
+    for spec in DUMMY_FIXTURE_USERS.iter() {
+        let user_id = ensure_fixture_user(
             db,
             spec.email,
-            DUMMY_ADMIN_PASSWORD,
+            DUMMY_FIXTURE_PASSWORD,
             spec.role,
             &super_admin_id,
         )
         .await?;
         // If the user couldn't be produced (skip case from
-        // `ensure_admin_fixture`), there's nothing to grant or link to.
+        // `ensure_fixture_user`), there's nothing to grant or link to.
         let Some(user_id) = user_id else { continue };
         // Re-asserting the grant on every run (not just when the user was
         // created this run) restores it after manual cleanup / partial prior
@@ -284,13 +284,13 @@ async fn find_super_admin_id(db: &DbConn) -> Result<Option<String>, surrealdb::E
     Ok(users.into_iter().next().map(|u| record_id_to_string(u.id)))
 }
 
-/// Returns the fixture admin's user id whether the row was inserted this
+/// Returns the fixture user's user id whether the row was inserted this
 /// run or already existed. Callers use this id to re-assert follow-up
 /// writes (like admin1's `group_admin` grant) so idempotency holds even
 /// when the user row survived but a grant was manually deleted. `Ok(None)`
 /// is reserved for skip cases where we could not produce a usable id
 /// (e.g. password hash failed, `create` returned no record).
-async fn ensure_admin_fixture(
+async fn ensure_fixture_user(
     db: &DbConn,
     email: &str,
     password_plain: &str,
@@ -298,7 +298,7 @@ async fn ensure_admin_fixture(
     super_admin_id: &str,
 ) -> Result<Option<String>, surrealdb::Error> {
     // Defence-in-depth: `role` is only ever sourced from the in-module
-    // `DUMMY_ADMINS` `const`, but guard against a typo slipping in during
+    // `DUMMY_FIXTURE_USERS` `const`, but guard against a typo slipping in during
     // future edits so a bogus role can't be silently written to `user.role`
     // (where extractors + admin_users UPDATE queries compare against the
     // exact strings `"admin"` / `"super_admin"` / `"member"` — matches the
@@ -369,7 +369,7 @@ async fn ensure_admin_fixture(
                 warn!(
                     email_redacted = redact(email),
                     user_id = identity.user_id.as_str(),
-                    "fixture admin identity points at a missing user — skipping grant"
+                    "fixture user identity points at a missing user — skipping grant"
                 );
                 Ok(None)
             }
@@ -382,7 +382,7 @@ async fn ensure_admin_fixture(
             warn!(
                 error = ?e,
                 email_redacted = redact(email),
-                "fixture admin hash failed — skipping"
+                "fixture user hash failed — skipping"
             );
             return Ok(None);
         }
@@ -411,7 +411,7 @@ async fn ensure_admin_fixture(
         None => {
             warn!(
                 email_redacted = redact(email),
-                "fixture admin create returned no record — skipping"
+                "fixture user create returned no record — skipping"
             );
             return Ok(None);
         }
@@ -436,7 +436,7 @@ async fn ensure_admin_fixture(
             warn!(
                 email_redacted = redact(email),
                 user_id = user_id.as_str(),
-                "fixture admin identity create returned no record — rolling back user"
+                "fixture user identity create returned no record — rolling back user"
             );
             rollback_fixture_user(db, &user_id).await;
             return Ok(None);
@@ -446,7 +446,7 @@ async fn ensure_admin_fixture(
                 email_redacted = redact(email),
                 user_id = user_id.as_str(),
                 error = %e,
-                "fixture admin identity create failed — rolling back user"
+                "fixture user identity create failed — rolling back user"
             );
             rollback_fixture_user(db, &user_id).await;
             return Err(e);
@@ -466,18 +466,18 @@ async fn ensure_admin_fixture(
     // Fixture seeding must not fail startup on a transient audit-write
     // error. The user + identity rows are already persisted, so degrade to
     // a warn-and-continue on audit issues — matches the best-effort
-    // contract documented on `seed_dummy_admins`.
+    // contract documented on `seed_dummy_fixtures`.
     let audit_result: Result<Option<DbAuthEvent>, _> = db.create("auth_event").content(event).await;
     if let Err(e) = audit_result {
         warn!(
             email_redacted = redact(email),
             user_id = user_id.as_str(),
             error = %e,
-            "fixture admin auth_event insert failed — continuing"
+            "fixture user auth_event insert failed — continuing"
         );
     }
 
-    info!(email_redacted = redact(email), "fixture admin created");
+    info!(email_redacted = redact(email), "fixture user created");
     Ok(Some(user_id))
 }
 
@@ -491,14 +491,14 @@ async fn rollback_fixture_user(db: &DbConn, user_id: &str) {
         warn!(
             error = %e,
             user_id,
-            "fixture admin rollback failed after identity error — orphan user row"
+            "fixture user rollback failed after identity error — orphan user row"
         );
     }
 }
 
-/// Reconcile a persisted fixture admin's role to the spec. Used when
-/// `ensure_admin_fixture` detects that `user.role` has drifted from the
-/// `DUMMY_ADMINS` entry (typically because the UI was used to promote or
+/// Reconcile a persisted fixture user's role to the spec. Used when
+/// `ensure_fixture_user` detects that `user.role` has drifted from the
+/// `DUMMY_FIXTURE_USERS` entry (typically because the UI was used to promote or
 /// demote the fixture between restarts). Bumps `version` (OCC) and
 /// `token_version` (invalidates cached access tokens) to match the
 /// semantics of the real `PATCH /api/admin/users/:id` role-change path.

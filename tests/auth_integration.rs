@@ -2878,11 +2878,11 @@ async fn count_rows(db: &poolpay::db::DbConn, query: &str) -> i64 {
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_creates_all_fixtures_with_expected_roles_and_grants() {
+async fn seed_dummy_fixtures_creates_all_fixtures_with_expected_roles_and_grants() {
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
-        .expect("seed_dummy_admins");
+        .expect("seed_dummy_fixtures");
 
     // admin1, admin2, admin4 — regular `admin` role.
     let admin_role_rows = count_rows(
@@ -2949,12 +2949,12 @@ async fn seed_dummy_admins_creates_all_fixtures_with_expected_roles_and_grants()
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_is_idempotent_across_restarts() {
+async fn seed_dummy_fixtures_is_idempotent_across_restarts() {
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("first seed");
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("second seed (simulated restart)");
 
@@ -2979,13 +2979,13 @@ async fn seed_dummy_admins_is_idempotent_across_restarts() {
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_is_noop_without_flag() {
+async fn seed_dummy_fixtures_is_noop_without_flag() {
     let (_app, db) = test_app().await;
     // Verify the guard short-circuits rather than relying on idempotency
     // alone, so a production boot without the flag is provably silent.
-    bootstrap::seed_dummy_admins_with_flag(&db, false)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, false)
         .await
-        .expect("seed_dummy_admins noop");
+        .expect("seed_dummy_fixtures noop");
 
     let admins = count_rows(
         &db,
@@ -3004,12 +3004,12 @@ async fn seed_dummy_admins_is_noop_without_flag() {
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_restores_missing_admin1_grant_on_restart() {
+async fn seed_dummy_fixtures_restores_missing_admin1_grant_on_restart() {
     // Idempotency contract: if admin1 already exists but the `group_admin`
     // grant was manually deleted (partial cleanup, ops intervention), a
     // subsequent seed must restore the grant rather than silently skip it.
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("first seed");
 
@@ -3027,7 +3027,7 @@ async fn seed_dummy_admins_restores_missing_admin1_grant_on_restart() {
     .await;
     assert_eq!(grants_after_wipe, 0, "precondition: grant wiped");
 
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("second seed restores grant");
 
@@ -3040,14 +3040,14 @@ async fn seed_dummy_admins_restores_missing_admin1_grant_on_restart() {
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_skips_grant_when_fixture_user_is_disabled() {
+async fn seed_dummy_fixtures_skips_grant_when_fixture_user_is_disabled() {
     // If the fixture admin1 was disabled via the admin UI (soft-deleted or
     // status=disabled) after the first seed, a subsequent seed must NOT
     // award a fresh `group_admin` grant to that disabled user — the fixture
     // is no longer in a usable state, and silently granting would mask the
     // fact that admin1 has been taken offline.
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("first seed");
 
@@ -3068,7 +3068,7 @@ async fn seed_dummy_admins_skips_grant_when_fixture_user_is_disabled() {
         .check()
         .unwrap();
 
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("second seed tolerates disabled fixture admin");
 
@@ -3084,14 +3084,14 @@ async fn seed_dummy_admins_skips_grant_when_fixture_user_is_disabled() {
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_reconciles_role_drift_on_restart() {
+async fn seed_dummy_fixtures_reconciles_role_drift_on_restart() {
     // If a fixture admin was re-roled via the admin UI after first seed
     // (e.g. admin3 demoted from super_admin to admin), the next restart
-    // must restore the role declared in DUMMY_ADMINS so the fixture matrix
+    // must restore the role declared in DUMMY_FIXTURE_USERS so the fixture matrix
     // stays the source of truth. Also bumps token_version so any cached
     // access token the drifted user held is invalidated.
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("first seed");
 
@@ -3118,7 +3118,7 @@ async fn seed_dummy_admins_reconciles_role_drift_on_restart() {
     .check()
     .unwrap();
 
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("second seed reconciles role");
 
@@ -3154,16 +3154,16 @@ async fn seed_dummy_admins_reconciles_role_drift_on_restart() {
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_creates_member1_linked_to_fixture_pool_member() {
+async fn seed_dummy_fixtures_creates_member1_linked_to_fixture_pool_member() {
     // member1 widens the seed matrix beyond admins so manual UI walkthroughs
     // have a member-role login that fronts a real pool participant. Two
     // invariants in one test: the auth row is correct (active, member,
     // must_reset_password=false) and the pool member row carries the
     // user_id back-pointer used by future join-aware queries.
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
-        .expect("seed_dummy_admins");
+        .expect("seed_dummy_fixtures");
 
     let member_user_rows = count_rows(
         &db,
