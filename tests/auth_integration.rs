@@ -2243,17 +2243,20 @@ async fn create_admin_user_with_grants_duplicate_email_returns_409_and_rolls_bac
 }
 
 #[tokio::test]
-async fn create_admin_user_with_grants_race_aborts_transaction_no_partial_state() {
-    // Simulates a race: between the pre-check and the transaction, another
-    // caller inserts a user_identity row for the same email. We force that
-    // condition deterministically by pre-inserting the identity row with
-    // no corresponding user, which the pre-check still catches via the
-    // `find_credentials_identity` lookup. The point of the test is to
-    // assert the **rollback boundary**: even when the API surfaces 409,
-    // no partial user / identity / grant rows leak. The same invariant
-    // would hold if the race made it past the pre-check, since the UNIQUE
-    // index on user_identity(provider, provider_subject) would abort the
-    // transaction the same way.
+async fn create_admin_user_with_grants_collision_blocked_by_precheck_no_partial_state() {
+    // Exercises the **pre-check 409 path**: a pre-existing `user_identity`
+    // row for the same email is caught by `find_credentials_identity` and
+    // the handler returns 409 before any transaction is opened. The
+    // assertion is the **rollback boundary**: no new user / identity /
+    // grant rows leak when the request is rejected.
+    //
+    // Note: the same boundary holds if a race slipped past the pre-check,
+    // because the UNIQUE index on `user_identity(provider, provider_subject)`
+    // would abort the transaction inside the COMMIT and SurrealDB would
+    // roll back the user + identity + any partial grants. That
+    // in-transaction rollback path isn't directly exercised here (the
+    // pre-check fires first), but it's the load-bearing invariant covered
+    // by the no-partial-state assertion below.
     use poolpay::api::models::{now_iso, DbUserIdentity, UserIdentityContent};
 
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
