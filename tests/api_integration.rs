@@ -1820,7 +1820,11 @@ async fn get_receipts_response_shape() {
 #[tokio::test]
 async fn get_receipts_filter_by_group_id() {
     let app = test_app_with_auth().await;
-    let resp = call(app, get_jwt_with("/api/receipts?groupId=1", &admin_bearer())).await;
+    let resp = call(
+        app,
+        get_jwt_with("/api/receipts?groupId=1", &admin_bearer()),
+    )
+    .await;
     let receipts: Vec<serde_json::Value> = json_body(resp).await;
     assert!(receipts.iter().all(|r| r["groupId"] == "1"));
 }
@@ -1877,20 +1881,12 @@ async fn get_receipts_excludes_soft_deleted() {
 #[tokio::test]
 async fn reset_restores_receipts_to_fixture_count() {
     let app = test_app_with_auth().await;
-    let before: Vec<serde_json::Value> = json_body(
-        call(
-            app.clone(),
-            get_jwt_with("/api/receipts", &admin_bearer()),
-        )
-        .await,
-    )
-    .await;
+    let before: Vec<serde_json::Value> =
+        json_body(call(app.clone(), get_jwt_with("/api/receipts", &admin_bearer())).await).await;
     let baseline = before.len();
     call(app.clone(), post_empty("/api/test/reset")).await;
-    let after: Vec<serde_json::Value> = json_body(
-        call(app, get_jwt_with("/api/receipts", &admin_bearer())).await,
-    )
-    .await;
+    let after: Vec<serde_json::Value> =
+        json_body(call(app, get_jwt_with("/api/receipts", &admin_bearer())).await).await;
     assert_eq!(after.len(), baseline);
 }
 
