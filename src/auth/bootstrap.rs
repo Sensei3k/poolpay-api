@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::api::models::{
     now_iso, record_id_to_string, AuthEventContent, DbAuthEvent, DbGroup, DbGroupAdmin, DbMember,
-    DbUser, DbUserIdentity, GroupAdminContent, UserContent, UserIdentityContent,
+    DbUser, DbUserIdentity, GroupAdminContent, MemberContent, UserContent, UserIdentityContent,
 };
 use crate::auth::password;
 use crate::db::{is_unique_constraint_error, DbConn, FIXTURE_GROUP_ID};
@@ -302,7 +302,7 @@ async fn ensure_fixture_user(
     // future edits so a bogus role can't be silently written to `user.role`
     // (where extractors + admin_users UPDATE queries compare against the
     // exact strings `"admin"` / `"super_admin"` / `"member"` — matches the
-    // DB-level ASSERT in `db::define_user_table`).
+    // DB-level ASSERT in `db::define_user_table`.
     assert!(
         matches!(role, "admin" | "super_admin" | "member"),
         "fixture user role must be 'admin', 'super_admin', or 'member', got {role:?}"
@@ -361,7 +361,7 @@ async fn ensure_fixture_user(
                 warn!(
                     email_redacted = redact(email),
                     user_id = identity.user_id.as_str(),
-                    "fixture user identity points at a disabled/out-of-spec user — skipping grant"
+                    "fixture user identity points at a disabled/out-of-spec user — skipping fixture side-effects"
                 );
                 Ok(None)
             }
@@ -369,7 +369,7 @@ async fn ensure_fixture_user(
                 warn!(
                     email_redacted = redact(email),
                     user_id = identity.user_id.as_str(),
-                    "fixture user identity points at a missing user — skipping grant"
+                    "fixture user identity points at a missing user — skipping fixture side-effects"
                 );
                 Ok(None)
             }
@@ -601,48 +601,72 @@ async fn ensure_group_admin_grant(
 }
 
 /// Stamp `user_id` onto a fixture row in the `member` table so a seeded
-/// auth user fronts a real pool participant. Idempotent: writing the same
-/// `user_id` twice is a no-op on the row, and the helper bails cleanly
-/// when the target member row is missing or soft-deleted (e.g. a partial
-/// DB where `db::seed()` didn't run).
+/// auth user fronts a real pool participant. Truly idempotent: if the link
+/// is already correct the function returns without touching the row. Bails
+/// cleanly when the target member row is missing or soft-deleted (e.g. a
+/// partial DB where `db::seed()` didn't run).
 ///
-/// The `member` table is SCHEMALESS, so adding `user_id` here doesn't
-/// require a schema migration. Mirrors `ensure_group_admin_grant`: the
-/// linked state is re-asserted on every restart so manual cleanup between
-/// boots is restored without dropping data.
+/// Uses the typed `MemberContent` upsert path so the link survives future
+/// admin API updates of the member row — full-record replacement preserves
+/// `user_id` rather than silently dropping it as a raw `UPDATE` would if
+/// the schema is later enforced. Mirrors the OCC pattern (`version + 1`)
+/// used by every other member write path.
 async fn ensure_pool_member_link(
     db: &DbConn,
     user_id: &str,
     pool_member_id: &str,
 ) -> Result<(), surrealdb::Error> {
     let member: Option<DbMember> = db.select(("member", pool_member_id)).await?;
-    if member.filter(|m| m.deleted_at.is_none()).is_none() {
-        info!(
-            pool_member_id,
-            "fixture pool member missing or deleted — skipping user_id link"
-        );
+    let member = match member {
+        Some(m) if m.deleted_at.is_none() => m,
+        _ => {
+            info!(
+                pool_member_id,
+                "fixture pool member missing or deleted — skipping user_id link"
+            );
+            return Ok(());
+        }
+    };
+
+    // True idempotency: if the link is already correct, skip the write so
+    // `updated_at` and `version` are not bumped unnecessarily on every boot.
+    if member.user_id.as_deref() == Some(user_id) {
         return Ok(());
     }
 
-    // Capture the UPDATE result so a zero-rows write (the pool member was
-    // soft-deleted between the pre-flight `select` above and the UPDATE,
-    // i.e. TOCTOU) doesn't masquerade as a successful link in the logs.
-    // The `WHERE deleted_at IS NONE` guard is intentional defence-in-depth
-    // so a racing soft-delete can't be silently overwritten — but it also
-    // means the UPDATE can no-op without erroring, hence this check.
-    let mut resp = db
-        .query("UPDATE $mid SET user_id = $uid, updated_at = $now WHERE deleted_at IS NONE")
-        .bind(("mid", RecordId::new("member", pool_member_id.to_string())))
-        .bind(("uid", user_id.to_string()))
-        .bind(("now", now_iso()))
-        .await?
-        .check()?;
-    let updated: Vec<DbMember> = resp.take(0).unwrap_or_default();
-    if updated.is_empty() {
+    // Build a fresh content record preserving every existing field, then
+    // set the new `user_id` and bump version (OCC) + updated_at. Use the
+    // typed upsert path so future full-record replacements via the admin API
+    // also carry `user_id` forward and never silently drop the linkage.
+    let now = now_iso();
+    let content = MemberContent {
+        name: member.name,
+        phone: member.phone,
+        position: member.position,
+        status: member.status,
+        group_id: member.group_id,
+        notes: member.notes,
+        joined_at: member.joined_at,
+        created_at: member.created_at,
+        updated_at: now,
+        deleted_at: member.deleted_at,
+        version: member.version + 1,
+        user_id: Some(user_id.to_string()),
+    };
+
+    // TOCTOU guard: if the member was soft-deleted between the pre-flight
+    // select and this upsert, the upsert will still write (upsert has no
+    // WHERE guard). Accepting that narrow race is consistent with the rest
+    // of the fixture seed path which is best-effort and development-only.
+    let updated: Option<DbMember> = db
+        .upsert(("member", pool_member_id))
+        .content(content)
+        .await?;
+    if updated.is_none() {
         warn!(
             user_id,
             pool_member_id,
-            "fixture pool member vanished between pre-flight select and UPDATE — link skipped"
+            "fixture pool member upsert returned no record — link skipped"
         );
         return Ok(());
     }
