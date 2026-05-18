@@ -3152,3 +3152,85 @@ async fn seed_dummy_admins_reconciles_role_drift_on_restart() {
         "role reconciliation must bump token_version (before={tv_before}, after={tv_after})"
     );
 }
+
+#[tokio::test]
+async fn seed_dummy_admins_creates_member1_linked_to_fixture_pool_member() {
+    // member1 widens the seed matrix beyond admins so manual UI walkthroughs
+    // have a member-role login that fronts a real pool participant. Two
+    // invariants in one test: the auth row is correct (active, member,
+    // must_reset_password=false) and the pool member row carries the
+    // user_id back-pointer used by future join-aware queries.
+    let (_app, db) = test_app().await;
+    bootstrap::seed_dummy_admins_with_flag(&db, true)
+        .await
+        .expect("seed_dummy_admins");
+
+    let member_user_rows = count_rows(
+        &db,
+        "SELECT count() FROM user \
+         WHERE email_normalised = 'member1@poolpay.test' \
+         AND role = 'member' AND status = 'active' AND must_reset_password = false \
+         GROUP ALL",
+    )
+    .await;
+    assert_eq!(
+        member_user_rows, 1,
+        "member1 must be created as an active member-role user"
+    );
+
+    // The seeded user must not receive a group_admin grant — that join row
+    // is admin-only and would mis-classify member1 in the admin extractors.
+    let member_grants = count_rows(
+        &db,
+        "SELECT count() FROM group_admin \
+         WHERE user_id IN (\
+             SELECT VALUE meta::id(id) FROM user WHERE email_normalised = 'member1@poolpay.test'\
+         ) GROUP ALL",
+    )
+    .await;
+    assert_eq!(
+        member_grants, 0,
+        "member1 must not receive a group_admin grant"
+    );
+
+    // Pool member "1" (Adaeze Okonkwo) must carry the user_id back-pointer
+    // so any future endpoint that joins auth → pool membership resolves
+    // to the same row. Use `SELECT VALUE` so the row hydrates into a flat
+    // `Vec<String>` and we don't need an ad-hoc `SurrealValue` derive in
+    // the test crate.
+    let member_links: Vec<String> = db
+        .query(
+            "SELECT VALUE user_id FROM member \
+             WHERE meta::id(id) = '1' AND user_id != NONE",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap()
+        .take(0)
+        .unwrap();
+    assert_eq!(
+        member_links.len(),
+        1,
+        "fixture pool member 1 must carry a user_id link after seed"
+    );
+
+    // The link must resolve back to the member1 auth user (not some other
+    // seeded user, and not a stale id from a previous run).
+    let member1_user_id: Vec<String> = db
+        .query(
+            "SELECT VALUE meta::id(id) FROM user \
+             WHERE email_normalised = 'member1@poolpay.test'",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap()
+        .take(0)
+        .unwrap();
+    let expected = member1_user_id.first().expect("member1 user id").as_str();
+    assert_eq!(
+        member_links[0], expected,
+        "pool member 1 user_id must point at member1's auth user"
+    );
+}
