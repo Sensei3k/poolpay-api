@@ -323,9 +323,10 @@ async fn ensure_fixture_user(
         // Don't blindly trust the identity pointer — the underlying `user`
         // row may have been soft-deleted or disabled via the admin UI since
         // the fixture was first seeded. Reusing a stale pointer would let
-        // `ensure_group_admin_grant` award a grant to a non-admin, and
-        // silently mask a broken fixture. Verify the user is still an
-        // active admin before returning its id.
+        // `ensure_group_admin_grant` award a grant to an out-of-spec user,
+        // and silently mask a broken fixture. Verify the user is still an
+        // active, non-deleted, in-spec fixture user (admin / super_admin /
+        // member) before returning its id.
         let linked: Option<DbUser> = db.select(("user", identity.user_id.as_str())).await?;
         return match linked {
             Some(u)
