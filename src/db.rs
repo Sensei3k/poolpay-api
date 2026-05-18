@@ -650,6 +650,7 @@ fn fixture_members() -> Vec<(&'static str, MemberContent)> {
                 updated_at: created_at.into(),
                 deleted_at: None,
                 version: 1,
+                user_id: None,
             },
         ),
         (
@@ -666,6 +667,7 @@ fn fixture_members() -> Vec<(&'static str, MemberContent)> {
                 updated_at: created_at.into(),
                 deleted_at: None,
                 version: 1,
+                user_id: None,
             },
         ),
         (
@@ -682,6 +684,7 @@ fn fixture_members() -> Vec<(&'static str, MemberContent)> {
                 updated_at: created_at.into(),
                 deleted_at: None,
                 version: 1,
+                user_id: None,
             },
         ),
         (
@@ -698,6 +701,7 @@ fn fixture_members() -> Vec<(&'static str, MemberContent)> {
                 updated_at: created_at.into(),
                 deleted_at: None,
                 version: 1,
+                user_id: None,
             },
         ),
         (
@@ -714,6 +718,7 @@ fn fixture_members() -> Vec<(&'static str, MemberContent)> {
                 updated_at: created_at.into(),
                 deleted_at: None,
                 version: 1,
+                user_id: None,
             },
         ),
         (
@@ -730,6 +735,7 @@ fn fixture_members() -> Vec<(&'static str, MemberContent)> {
                 updated_at: created_at.into(),
                 deleted_at: None,
                 version: 1,
+                user_id: None,
             },
         ),
     ]

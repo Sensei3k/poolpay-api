@@ -485,6 +485,7 @@ pub async fn create_member(
         updated_at: now,
         deleted_at: None,
         version: 1,
+        user_id: None,
     };
 
     let db_member: Option<DbMember> = db.create("member").content(content).await?;
@@ -552,6 +553,7 @@ pub async fn update_member(
         updated_at: now_iso(),
         deleted_at: existing.deleted_at,
         version: existing.version + 1,
+        user_id: existing.user_id,
     };
 
     let updated: Option<DbMember> = db.upsert(("member", id.as_str())).content(content).await?;
@@ -602,6 +604,7 @@ pub async fn delete_member(
         updated_at: now.clone(),
         deleted_at: Some(now),
         version: existing.version + 1,
+        user_id: existing.user_id,
     };
     let _: Option<DbMember> = db.upsert(("member", id.as_str())).content(content).await?;
 
