@@ -2877,12 +2877,26 @@ async fn count_rows(db: &poolpay::db::DbConn, query: &str) -> i64 {
     rows.first().copied().unwrap_or(0)
 }
 
+/// Run a `SELECT VALUE …` query and return the flat result vector. Sibling
+/// of `count_rows` for the shape that doesn't fit the `count() GROUP ALL`
+/// mould — keeps fixture/link assertions to a single call site instead of
+/// the seven-stage `.query(…).await.unwrap().check().unwrap().take(0).unwrap()`
+/// chain that recurs across every member-facing test.
+async fn query_values<T>(db: &poolpay::db::DbConn, query: &str) -> Vec<T>
+where
+    T: serde::de::DeserializeOwned + surrealdb_types::SurrealValue,
+{
+    let mut resp = db.query(query).await.unwrap().check().unwrap();
+    resp.take(0)
+        .expect("query_values: failed to decode response")
+}
+
 #[tokio::test]
-async fn seed_dummy_admins_creates_all_fixtures_with_expected_roles_and_grants() {
+async fn seed_dummy_fixtures_creates_all_fixtures_with_expected_roles_and_grants() {
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
-        .expect("seed_dummy_admins");
+        .expect("seed_dummy_fixtures");
 
     // admin1, admin2, admin4 — regular `admin` role.
     let admin_role_rows = count_rows(
@@ -2933,6 +2947,7 @@ async fn seed_dummy_admins_creates_all_fixtures_with_expected_roles_and_grants()
         "admin2@poolpay.test",
         "admin3@poolpay.test",
         "admin4@poolpay.test",
+        "member1@poolpay.test",
     ] {
         let grants = count_rows(
             &db,
@@ -2946,29 +2961,48 @@ async fn seed_dummy_admins_creates_all_fixtures_with_expected_roles_and_grants()
         .await;
         assert_eq!(grants, 0, "{email} must not receive any fixture grants");
     }
+
+    // member1 — `member` role, linked back to fixture pool member `1`.
+    // The deeper link-resolves-to-the-same-user assertion lives in
+    // `seed_dummy_fixtures_creates_member1_linked_to_fixture_pool_member`;
+    // here we just establish the 5th fixture is part of the sweep so a
+    // regression dropping member1 from `DUMMY_FIXTURE_USERS` is caught.
+    let member1_rows = count_rows(
+        &db,
+        "SELECT count() FROM user \
+         WHERE email_normalised = 'member1@poolpay.test' \
+         AND role = 'member' AND status = 'active' AND must_reset_password = false \
+         GROUP ALL",
+    )
+    .await;
+    assert_eq!(
+        member1_rows, 1,
+        "member1 must be created as an active member-role user"
+    );
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_is_idempotent_across_restarts() {
+async fn seed_dummy_fixtures_is_idempotent_across_restarts() {
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("first seed");
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("second seed (simulated restart)");
 
-    let admins = count_rows(
+    let fixtures = count_rows(
         &db,
         "SELECT count() FROM user \
          WHERE email_normalised IN [\
              'admin1@poolpay.test', 'admin2@poolpay.test', \
-             'admin3@poolpay.test', 'admin4@poolpay.test'\
+             'admin3@poolpay.test', 'admin4@poolpay.test', \
+             'member1@poolpay.test'\
          ] \
          GROUP ALL",
     )
     .await;
-    assert_eq!(admins, 4, "restart must not duplicate fixture admin rows");
+    assert_eq!(fixtures, 5, "restart must not duplicate fixture user rows");
 
     let grants = count_rows(
         &db,
@@ -2976,40 +3010,147 @@ async fn seed_dummy_admins_is_idempotent_across_restarts() {
     )
     .await;
     assert_eq!(grants, 1, "restart must not duplicate fixture grants");
+
+    // Pool member 1 must still carry exactly one user_id back-pointer to
+    // member1 — re-running the seed must not duplicate the link or drift
+    // it onto a different user (e.g. a stale id from a previous boot).
+    let member_links: Vec<String> = query_values(
+        &db,
+        "SELECT VALUE user_id FROM member \
+         WHERE meta::id(id) = '1' AND user_id != NONE",
+    )
+    .await;
+    assert_eq!(
+        member_links.len(),
+        1,
+        "restart must keep the pool member → user_id link intact"
+    );
+    let member1_user_id: Vec<String> = query_values(
+        &db,
+        "SELECT VALUE meta::id(id) FROM user \
+         WHERE email_normalised = 'member1@poolpay.test'",
+    )
+    .await;
+    assert_eq!(
+        member_links.first().map(String::as_str),
+        member1_user_id.first().map(String::as_str),
+        "restart must not drift the link onto a different user"
+    );
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_is_noop_without_flag() {
+async fn seed_dummy_fixtures_is_noop_without_flag() {
     let (_app, db) = test_app().await;
     // Verify the guard short-circuits rather than relying on idempotency
     // alone, so a production boot without the flag is provably silent.
-    bootstrap::seed_dummy_admins_with_flag(&db, false)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, false)
         .await
-        .expect("seed_dummy_admins noop");
+        .expect("seed_dummy_fixtures noop");
 
-    let admins = count_rows(
+    let fixtures = count_rows(
         &db,
         "SELECT count() FROM user \
          WHERE email_normalised IN [\
              'admin1@poolpay.test', 'admin2@poolpay.test', \
-             'admin3@poolpay.test', 'admin4@poolpay.test'\
+             'admin3@poolpay.test', 'admin4@poolpay.test', \
+             'member1@poolpay.test'\
          ] \
          GROUP ALL",
     )
     .await;
     assert_eq!(
-        admins, 0,
-        "fixture admins must not be seeded without SEED_ON_EMPTY=true"
+        fixtures, 0,
+        "fixture users must not be seeded without SEED_ON_EMPTY=true"
+    );
+
+    // The link side-effect must stay silent too: `db::init_memory()` seeds
+    // pool member `1` without a `user_id`, and a no-op
+    // `seed_dummy_fixtures_with_flag` must leave that field untouched.
+    let member_links: Vec<String> = query_values(
+        &db,
+        "SELECT VALUE user_id FROM member \
+         WHERE meta::id(id) = '1' AND user_id != NONE",
+    )
+    .await;
+    assert!(
+        member_links.is_empty(),
+        "noop seed must not stamp user_id onto pool member 1"
     );
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_restores_missing_admin1_grant_on_restart() {
+async fn seed_dummy_fixtures_restores_missing_member1_link_on_restart() {
+    // Mirror of the admin1 grant restoration contract, but for the
+    // `member.user_id` link: if member1 already exists but the `user_id`
+    // back-pointer on pool member `1` was manually cleared (partial cleanup,
+    // ops intervention, schema-less drift), a subsequent seed must
+    // re-stamp the link rather than silently skip it.
+    let (_app, db) = test_app().await;
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
+        .await
+        .expect("first seed");
+
+    // Capture member1's user id before the cleanup so we can compare against
+    // it after the restore — `ensure_pool_member_link` must reach the same
+    // user, not a stale or freshly-rolled identity.
+    let member1_user_id_before: Vec<String> = query_values(
+        &db,
+        "SELECT VALUE meta::id(id) FROM user \
+         WHERE email_normalised = 'member1@poolpay.test'",
+    )
+    .await;
+    let expected = member1_user_id_before
+        .first()
+        .expect("member1 user id after first seed")
+        .clone();
+
+    // Clear the link on pool member `1` without touching the user row,
+    // simulating a manual cleanup that left member1 intact but stripped
+    // the back-pointer.
+    db.query("UPDATE member:`1` SET user_id = NONE")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let links_after_wipe: Vec<String> = query_values(
+        &db,
+        "SELECT VALUE user_id FROM member \
+         WHERE meta::id(id) = '1' AND user_id != NONE",
+    )
+    .await;
+    assert!(
+        links_after_wipe.is_empty(),
+        "precondition: pool member 1 user_id wiped"
+    );
+
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
+        .await
+        .expect("second seed restores link");
+
+    let links: Vec<String> = query_values(
+        &db,
+        "SELECT VALUE user_id FROM member \
+         WHERE meta::id(id) = '1' AND user_id != NONE",
+    )
+    .await;
+    assert_eq!(
+        links.len(),
+        1,
+        "restart must restore the pool member → user_id link"
+    );
+    assert_eq!(
+        links[0], expected,
+        "restored link must point at the same member1 user, not a stale id"
+    );
+}
+
+#[tokio::test]
+async fn seed_dummy_fixtures_restores_missing_admin1_grant_on_restart() {
     // Idempotency contract: if admin1 already exists but the `group_admin`
     // grant was manually deleted (partial cleanup, ops intervention), a
     // subsequent seed must restore the grant rather than silently skip it.
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("first seed");
 
@@ -3027,7 +3168,7 @@ async fn seed_dummy_admins_restores_missing_admin1_grant_on_restart() {
     .await;
     assert_eq!(grants_after_wipe, 0, "precondition: grant wiped");
 
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("second seed restores grant");
 
@@ -3040,14 +3181,14 @@ async fn seed_dummy_admins_restores_missing_admin1_grant_on_restart() {
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_skips_grant_when_fixture_user_is_disabled() {
+async fn seed_dummy_fixtures_skips_grant_when_fixture_user_is_disabled() {
     // If the fixture admin1 was disabled via the admin UI (soft-deleted or
     // status=disabled) after the first seed, a subsequent seed must NOT
     // award a fresh `group_admin` grant to that disabled user — the fixture
     // is no longer in a usable state, and silently granting would mask the
     // fact that admin1 has been taken offline.
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("first seed");
 
@@ -3068,7 +3209,7 @@ async fn seed_dummy_admins_skips_grant_when_fixture_user_is_disabled() {
         .check()
         .unwrap();
 
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("second seed tolerates disabled fixture admin");
 
@@ -3084,14 +3225,14 @@ async fn seed_dummy_admins_skips_grant_when_fixture_user_is_disabled() {
 }
 
 #[tokio::test]
-async fn seed_dummy_admins_reconciles_role_drift_on_restart() {
+async fn seed_dummy_fixtures_reconciles_role_drift_on_restart() {
     // If a fixture admin was re-roled via the admin UI after first seed
     // (e.g. admin3 demoted from super_admin to admin), the next restart
-    // must restore the role declared in DUMMY_ADMINS so the fixture matrix
+    // must restore the role declared in DUMMY_FIXTURE_USERS so the fixture matrix
     // stays the source of truth. Also bumps token_version so any cached
     // access token the drifted user held is invalidated.
     let (_app, db) = test_app().await;
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("first seed");
 
@@ -3118,7 +3259,7 @@ async fn seed_dummy_admins_reconciles_role_drift_on_restart() {
     .check()
     .unwrap();
 
-    bootstrap::seed_dummy_admins_with_flag(&db, true)
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
         .await
         .expect("second seed reconciles role");
 
@@ -3150,5 +3291,75 @@ async fn seed_dummy_admins_reconciles_role_drift_on_restart() {
     assert!(
         tv_after > tv_before,
         "role reconciliation must bump token_version (before={tv_before}, after={tv_after})"
+    );
+}
+
+#[tokio::test]
+async fn seed_dummy_fixtures_creates_member1_linked_to_fixture_pool_member() {
+    // member1 widens the seed matrix beyond admins so manual UI walkthroughs
+    // have a member-role login that fronts a real pool participant. Two
+    // invariants in one test: the auth row is correct (active, member,
+    // must_reset_password=false) and the pool member row carries the
+    // user_id back-pointer used by future join-aware queries.
+    let (_app, db) = test_app().await;
+    bootstrap::seed_dummy_fixtures_with_flag(&db, true)
+        .await
+        .expect("seed_dummy_fixtures");
+
+    let member_user_rows = count_rows(
+        &db,
+        "SELECT count() FROM user \
+         WHERE email_normalised = 'member1@poolpay.test' \
+         AND role = 'member' AND status = 'active' AND must_reset_password = false \
+         GROUP ALL",
+    )
+    .await;
+    assert_eq!(
+        member_user_rows, 1,
+        "member1 must be created as an active member-role user"
+    );
+
+    // The seeded user must not receive a group_admin grant — that join row
+    // is admin-only and would mis-classify member1 in the admin extractors.
+    let member_grants = count_rows(
+        &db,
+        "SELECT count() FROM group_admin \
+         WHERE user_id IN (\
+             SELECT VALUE meta::id(id) FROM user WHERE email_normalised = 'member1@poolpay.test'\
+         ) GROUP ALL",
+    )
+    .await;
+    assert_eq!(
+        member_grants, 0,
+        "member1 must not receive a group_admin grant"
+    );
+
+    // Pool member "1" (Adaeze Okonkwo) must carry the user_id back-pointer
+    // so any future endpoint that joins auth → pool membership resolves
+    // to the same row.
+    let member_links: Vec<String> = query_values(
+        &db,
+        "SELECT VALUE user_id FROM member \
+         WHERE meta::id(id) = '1' AND user_id != NONE",
+    )
+    .await;
+    assert_eq!(
+        member_links.len(),
+        1,
+        "fixture pool member 1 must carry a user_id link after seed"
+    );
+
+    // The link must resolve back to the member1 auth user (not some other
+    // seeded user, and not a stale id from a previous run).
+    let member1_user_id: Vec<String> = query_values(
+        &db,
+        "SELECT VALUE meta::id(id) FROM user \
+         WHERE email_normalised = 'member1@poolpay.test'",
+    )
+    .await;
+    let expected = member1_user_id.first().expect("member1 user id").as_str();
+    assert_eq!(
+        member_links[0], expected,
+        "pool member 1 user_id must point at member1's auth user"
     );
 }
