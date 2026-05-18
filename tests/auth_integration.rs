@@ -2119,6 +2119,28 @@ async fn create_admin_user_with_grants_duplicate_group_ids_returns_400() {
 }
 
 #[tokio::test]
+async fn create_admin_user_with_grants_empty_string_group_id_returns_400() {
+    let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
+    let super_id = bootstrap_admin_id(&db).await;
+    let super_token = verifier
+        .mint_access(&super_id, "super_admin", 0)
+        .expect("mint");
+
+    let body = serde_json::json!({
+        "email": "blank-group@example.com",
+        "initialPassword": "initial-secret-passphrase",
+        "role": "admin",
+        "groupIds": ["1", ""],
+    });
+    let resp = call(app, admin_users_with_grants_post_req(&super_token, &body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        count_users_with_email(&db, "blank-group@example.com").await,
+        0
+    );
+}
+
+#[tokio::test]
 async fn create_admin_user_with_grants_unknown_group_returns_404_and_rolls_back() {
     let (app, db, verifier) = build_app_full(lax_rate_cfg()).await;
     let super_id = bootstrap_admin_id(&db).await;

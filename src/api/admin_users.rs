@@ -419,6 +419,17 @@ pub async fn create_admin_user_with_grants(
             "groupIds must contain at most {MAX_GRANTS_PER_REQUEST} entries"
         )));
     }
+    // Reject empty / whitespace-only entries up-front. Without this, an
+    // empty string falls through to the existence pre-check and returns
+    // 404 — a confusing error message for what's really a malformed
+    // request.
+    for g in &req.group_ids {
+        if g.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "groupIds entries must not be empty".into(),
+            ));
+        }
+    }
     // Catch caller-side duplicates explicitly: relying on the UNIQUE
     // index to surface them inside the transaction would still abort the
     // whole write, but the resulting 409 would be ambiguous between
