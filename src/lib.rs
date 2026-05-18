@@ -3,6 +3,7 @@ pub mod auth;
 pub mod db;
 pub mod extractor;
 pub mod ingestion;
+pub mod migrations;
 pub mod models;
 pub mod parser;
 pub mod poll_retry;
