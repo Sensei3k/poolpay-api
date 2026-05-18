@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::api::models::{
     now_iso, record_id_to_string, AuthEventContent, DbAuthEvent, DbGroup, DbGroupAdmin, DbMember,
-    DbUser, DbUserIdentity, GroupAdminContent, MemberContent, UserContent, UserIdentityContent,
+    DbUser, DbUserIdentity, GroupAdminContent, UserContent, UserIdentityContent,
 };
 use crate::auth::password;
 use crate::db::{is_unique_constraint_error, DbConn, FIXTURE_GROUP_ID};
@@ -607,69 +607,70 @@ async fn ensure_group_admin_grant(
 /// cleanly when the target member row is missing or soft-deleted (e.g. a
 /// partial DB where `db::seed()` didn't run).
 ///
-/// Uses the typed `MemberContent` upsert path so the link survives future
-/// admin API updates of the member row — full-record replacement preserves
-/// `user_id` rather than silently dropping it as a raw `UPDATE` would if
-/// the schema is later enforced. Mirrors the OCC pattern (`version + 1`)
-/// used by every other member write path.
+/// Uses a conditional `UPDATE … WHERE deleted_at IS NONE AND …` so the write
+/// and the soft-delete guard are evaluated atomically inside SurrealDB,
+/// closing the TOCTOU window that an upsert with a pre-flight select leaves
+/// open. Mirrors the OCC pattern (`version + 1`) used by every other member
+/// write path.
 async fn ensure_pool_member_link(
     db: &DbConn,
     user_id: &str,
     pool_member_id: &str,
 ) -> Result<(), surrealdb::Error> {
-    let member: Option<DbMember> = db.select(("member", pool_member_id)).await?;
-    let member = match member {
-        Some(m) if m.deleted_at.is_none() => m,
-        _ => {
-            info!(
-                pool_member_id,
-                "fixture pool member missing or deleted — skipping user_id link"
-            );
-            return Ok(());
+    // Single conditional UPDATE: idempotency (user_id already correct) and
+    // soft-delete guard are both enforced atomically by the WHERE clause, so
+    // there is no TOCTOU window between a pre-flight read and the write.
+    let mut resp = db
+        .query(
+            "UPDATE $mid SET \
+                 user_id = $uid, \
+                 version = version + 1, \
+                 updated_at = $now \
+             WHERE deleted_at IS NONE \
+               AND (user_id IS NONE OR user_id != $uid) \
+             RETURN AFTER",
+        )
+        .bind(("mid", RecordId::new("member", pool_member_id.to_string())))
+        .bind(("uid", user_id.to_string()))
+        .bind(("now", now_iso()))
+        .await?
+        .check()?;
+    let updated: Vec<DbMember> = resp.take(0).unwrap_or_default();
+
+    if updated.is_empty() {
+        // Either the link was already correct (idempotent silent success),
+        // or the row is soft-deleted / missing. Do a best-effort select to
+        // produce a more informative log line; if that secondary read fails
+        // we still return Ok — the fixture seed path is best-effort.
+        let member: Option<DbMember> = db.select(("member", pool_member_id)).await.unwrap_or(None);
+        match member {
+            Some(m) if m.user_id.as_deref() == Some(user_id) => {
+                // Already linked — nothing to do.
+            }
+            Some(m) if m.deleted_at.is_some() => {
+                info!(
+                    pool_member_id,
+                    "fixture pool member is soft-deleted — skipping user_id link"
+                );
+                let _ = m; // suppress unused warning
+            }
+            None => {
+                info!(
+                    pool_member_id,
+                    "fixture pool member missing — skipping user_id link"
+                );
+            }
+            _ => {
+                warn!(
+                    user_id,
+                    pool_member_id,
+                    "fixture pool member UPDATE matched 0 rows for unknown reason — link skipped"
+                );
+            }
         }
-    };
-
-    // True idempotency: if the link is already correct, skip the write so
-    // `updated_at` and `version` are not bumped unnecessarily on every boot.
-    if member.user_id.as_deref() == Some(user_id) {
         return Ok(());
     }
 
-    // Build a fresh content record preserving every existing field, then
-    // set the new `user_id` and bump version (OCC) + updated_at. Use the
-    // typed upsert path so future full-record replacements via the admin API
-    // also carry `user_id` forward and never silently drop the linkage.
-    let now = now_iso();
-    let content = MemberContent {
-        name: member.name,
-        phone: member.phone,
-        position: member.position,
-        status: member.status,
-        group_id: member.group_id,
-        notes: member.notes,
-        joined_at: member.joined_at,
-        created_at: member.created_at,
-        updated_at: now,
-        deleted_at: member.deleted_at,
-        version: member.version + 1,
-        user_id: Some(user_id.to_string()),
-    };
-
-    // TOCTOU guard: if the member was soft-deleted between the pre-flight
-    // select and this upsert, the upsert will still write (upsert has no
-    // WHERE guard). Accepting that narrow race is consistent with the rest
-    // of the fixture seed path which is best-effort and development-only.
-    let updated: Option<DbMember> = db
-        .upsert(("member", pool_member_id))
-        .content(content)
-        .await?;
-    if updated.is_none() {
-        warn!(
-            user_id,
-            pool_member_id, "fixture pool member upsert returned no record — link skipped"
-        );
-        return Ok(());
-    }
     info!(
         user_id,
         pool_member_id, "fixture pool member linked to fixture user"
