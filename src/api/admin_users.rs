@@ -109,10 +109,14 @@ pub struct AdminUserResponse {
     pub updated_at: String,
 }
 
-/// One grant echoed back in the atomic-create response. Same fields as
-/// the per-call `GroupAdminGrantResponse` (defined further down) but
-/// duplicated here so the FE can confirm what landed without an extra
-/// read.
+/// One grant echoed back in the atomic-create response. A trimmed subset
+/// of the per-call `GroupAdminGrantResponse` (defined further down): it
+/// carries `group_id`, `created_at`, and `created_by` only. The
+/// `user_id` field is intentionally dropped because the new user's id is
+/// already returned in the outer response under `user.userId`, so
+/// repeating it on every grant row is pure noise. Duplicating the rest
+/// of the shape here means the FE can confirm what landed inside the
+/// transaction without issuing a follow-up read.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminUserGrantSummary {
