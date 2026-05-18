@@ -727,7 +727,7 @@ pub struct MemberContent {
     pub updated_at: String,
     pub deleted_at: Option<String>,
     pub version: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
 }
 
