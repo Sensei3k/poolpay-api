@@ -656,7 +656,6 @@ async fn ensure_pool_member_link(
                     pool_member_id,
                     "fixture pool member is soft-deleted — skipping user_id link"
                 );
-                let _ = m; // suppress unused warning
             }
             None => {
                 info!(
