@@ -3000,6 +3000,323 @@ async fn patch_receipt_confirm_rejects_reason_field() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// ── PATCH action behaviour — audit + payment integrity ───────────────────────
+//
+// These cases cover the behaviour previously asserted only against the
+// legacy POST /api/admin/receipts/{id}/{confirm,reject} routes. The PATCH
+// dispatcher routes through the same `*_receipt_inner` helpers, so the
+// behaviour is identical — but the legacy POST routes are being removed,
+// so the assertions need a live entry point.
+
+#[tokio::test]
+async fn patch_receipt_confirm_creates_payment_with_correct_fields_and_audit_event() {
+    // Beyond the "payment row materialises" check in
+    // `patch_receipt_confirm_creates_payment_and_inbox_item`, the resulting
+    // payment must carry the correct member/cycle/amount/currency/reference
+    // fields, the confirming admin on both the receipt and payment rows,
+    // and a successful `auth_event` row attributing the action to the
+    // admin while recording the linked member as the subject.
+    let (app, db) = test_app_with_auth_and_db().await;
+
+    let payments_before: Vec<serde_json::Value> =
+        json_body(call(app.clone(), get("/api/payments")).await).await;
+    let baseline = payments_before.len();
+
+    let resp = call(
+        app.clone(),
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let updated: serde_json::Value = json_body(resp).await;
+    assert_eq!(updated["status"], "confirmed");
+    assert_eq!(updated["id"], "1");
+    assert_eq!(updated["confirmedBy"], TEST_SUPER_ADMIN_SUB);
+
+    let payments_after: Vec<serde_json::Value> =
+        json_body(call(app, get("/api/payments")).await).await;
+    assert_eq!(payments_after.len(), baseline + 1);
+
+    let new_payment = payments_after
+        .iter()
+        .find(|p| p["reference"] == "3EB0C123ABCD4567EF89")
+        .expect("expected new payment referencing the receipt's whatsapp message id");
+    assert_eq!(new_payment["memberId"], "4");
+    assert_eq!(new_payment["cycleId"], "3");
+    assert_eq!(new_payment["amount"], 1_000_000);
+    assert_eq!(new_payment["currency"], "NGN");
+    assert!(new_payment["confirmedAt"].is_string());
+    assert_eq!(new_payment["confirmedBy"], TEST_SUPER_ADMIN_SUB);
+
+    use surrealdb_types::SurrealValue;
+    #[derive(Debug, serde::Deserialize, SurrealValue)]
+    struct AuthEventRow {
+        user_id: Option<String>,
+        actor_id: Option<String>,
+        success: bool,
+    }
+    let rows: Vec<AuthEventRow> = db
+        .query(
+            "SELECT user_id, actor_id, success FROM auth_event \
+             WHERE event_type = 'receipt_confirmed' AND success = true",
+        )
+        .await
+        .expect("select auth_event")
+        .take(0)
+        .expect("decode auth_event rows");
+    let event = rows
+        .into_iter()
+        .find(|r| r.success && r.actor_id.as_deref() == Some(TEST_SUPER_ADMIN_SUB))
+        .expect("expected successful receipt_confirmed auth_event for this admin");
+    assert_eq!(
+        event.user_id.as_deref(),
+        Some("4"),
+        "auth_event.user_id should be the linked member id, not null"
+    );
+}
+
+#[tokio::test]
+async fn patch_receipt_reject_creates_no_payment_and_records_admin() {
+    // Symmetric audit guard for reject: the rejecting admin is recorded on
+    // the receipt row, and no payment row is created. Status + reason are
+    // covered separately by `patch_receipt_reject_returns_200_and_persists_reason`.
+    let app = test_app_with_auth().await;
+    let payments_before: Vec<serde_json::Value> =
+        json_body(call(app.clone(), get("/api/payments")).await).await;
+    let baseline = payments_before.len();
+
+    let resp = call(
+        app.clone(),
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "reject"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let updated: serde_json::Value = json_body(resp).await;
+    assert_eq!(updated["status"], "rejected");
+    assert_eq!(updated["rejectedBy"], TEST_SUPER_ADMIN_SUB);
+
+    let payments_after: Vec<serde_json::Value> =
+        json_body(call(app, get("/api/payments")).await).await;
+    assert_eq!(payments_after.len(), baseline);
+}
+
+#[tokio::test]
+async fn patch_receipt_confirm_with_existing_payment_for_member_cycle_returns_409() {
+    // Pre-create a payment for the same member+cycle referenced by receipt 1,
+    // then confirm the receipt and verify the duplicate-payment guard
+    // returns 409 Conflict instead of silently double-paying.
+    let app = test_app_with_auth().await;
+    let create = post_json_jwt(
+        "/api/payments",
+        serde_json::json!({
+            "memberId": "4",
+            "cycleId": "3",
+            "amount": 1_000_000,
+            "currency": "NGN",
+            "paymentDate": "2026-03-02"
+        }),
+    );
+    let create_resp = call(app.clone(), create).await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+    let resp = call(
+        app,
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn patch_receipt_confirm_unknown_id_returns_404_for_super_admin() {
+    // Super-admin path on a missing id: the opaque-denial cover only kicks
+    // in for non-scoped admins, so super-admins still receive a true 404.
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt(
+            "/api/receipts/does-not-exist",
+            serde_json::json!({"action": "confirm"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn patch_receipt_reject_unknown_id_returns_404_for_super_admin() {
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt(
+            "/api/receipts/nope",
+            serde_json::json!({"action": "reject"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn patch_receipt_soft_deleted_returns_404() {
+    // Fixture receipt id 2 is soft-deleted — `load_active_receipt_opt`
+    // filters it out, so any action against it surfaces as 404.
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt("/api/receipts/2", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn patch_receipt_double_reject_returns_409() {
+    // Reject once, then attempt a second reject — the status-transition
+    // guard inside `reject_receipt_inner` must surface a 409, not a
+    // silent idempotent success.
+    let app = test_app_with_auth().await;
+    let first = call(
+        app.clone(),
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "reject"})),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = call(
+        app,
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "reject"})),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn patch_receipt_confirm_after_reject_returns_409() {
+    // Cross-action transition: a rejected receipt cannot be revived via
+    // confirm. The transition matrix must refuse both directions
+    // symmetrically.
+    let app = test_app_with_auth().await;
+    let r = call(
+        app.clone(),
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "reject"})),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let c = call(
+        app,
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(c.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn patch_receipt_confirm_admin_without_group_admin_returns_403() {
+    // `admin`-role user with no `group_admin` rows: must be refused by
+    // `require_group_scope` even on a receipt in a group that exists.
+    // Complements `patch_receipt_scoped_admin_denied_cross_group_returns_403`,
+    // which exercises "scoped admin on the wrong group" instead.
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt_with(
+            "/api/receipts/1",
+            serde_json::json!({"action": "confirm"}),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn patch_receipt_reject_admin_without_group_admin_returns_403() {
+    // Symmetric guard for reject — same actor, same target, different action.
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt_with(
+            "/api/receipts/1",
+            serde_json::json!({"action": "reject"}),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn patch_receipt_reject_scoped_admin_proceeds() {
+    // Positive branch: a scoped admin with `group_admin{user_id, group_id=1}`
+    // succeeds on a receipt in group 1.
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt_with(
+            "/api/receipts/1",
+            serde_json::json!({"action": "reject"}),
+            &scoped_admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn patch_receipt_unknown_id_denies_non_scoped_admin_opaquely() {
+    // Cross-tenant existence probing guard: a non-scoped `admin` cannot
+    // tell "this id doesn't exist" from "this id is in a group you can't
+    // touch" — both collapse to 403. Super-admins keep their 404 path
+    // (covered by `patch_receipt_confirm_unknown_id_returns_404_for_super_admin`).
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        patch_json_jwt_with(
+            "/api/receipts/does-not-exist",
+            serde_json::json!({"action": "confirm"}),
+            &admin_bearer(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn patch_receipt_confirm_sources_payment_date_from_ingested_at_not_received_at() {
+    // A bot that lies about `received_at` must NOT be able to backdate or
+    // future-date the resulting payment row. `payment_date` is sourced
+    // from the server-stamped `ingested_at`, so a hostile bot timestamp
+    // is purely forensic.
+    let (app, db) = test_app_with_auth_and_db().await;
+
+    db.query(
+        "UPDATE receipt:`1` SET \
+             received_at = '2099-12-31T23:59:59+00:00', \
+             ingested_at = '2026-03-10T10:00:00.000Z'",
+    )
+    .await
+    .expect("rewrite receipt 1 timestamps");
+
+    let resp = call(
+        app.clone(),
+        patch_json_jwt("/api/receipts/1", serde_json::json!({"action": "confirm"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let payments: Vec<serde_json::Value> =
+        json_body(call(app, get("/api/payments?limit=200")).await).await;
+    let new_payment = payments
+        .iter()
+        .find(|p| p["reference"] == "3EB0C123ABCD4567EF89")
+        .expect("payment created from receipt 1");
+    assert_eq!(
+        new_payment["paymentDate"], "2026-03-10",
+        "payment_date must follow server ingested_at, not bot-supplied received_at"
+    );
+}
+
 // ── inbox_item side effects (Slice 5) ─────────────────────────────────────────
 //
 // Verifies the new inbox_item table behaves end-to-end: rows materialise
