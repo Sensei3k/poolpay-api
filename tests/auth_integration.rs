@@ -3032,8 +3032,8 @@ async fn seed_dummy_fixtures_is_idempotent_across_restarts() {
     )
     .await;
     assert_eq!(
-        member_links[0],
-        *member1_user_id.first().expect("member1 user id"),
+        member_links.first().map(String::as_str),
+        member1_user_id.first().map(String::as_str),
         "restart must not drift the link onto a different user"
     );
 }
