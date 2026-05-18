@@ -635,14 +635,16 @@ async fn ensure_pool_member_link(
         .bind(("now", now_iso()))
         .await?
         .check()?;
-    let updated: Vec<DbMember> = resp.take(0).unwrap_or_default();
+    let updated: Vec<DbMember> = resp
+        .take(0)
+        .expect("ensure_pool_member_link: failed to decode UPDATE response");
 
     if updated.is_empty() {
         // Either the link was already correct (idempotent silent success),
         // or the row is soft-deleted / missing. Do a best-effort select to
         // produce a more informative log line; if that secondary read fails
         // we still return Ok — the fixture seed path is best-effort.
-        let member: Option<DbMember> = db.select(("member", pool_member_id)).await.unwrap_or(None);
+        let member: Option<DbMember> = db.select(("member", pool_member_id)).await?;
         match member {
             Some(m) if m.user_id.as_deref() == Some(user_id) => {
                 // Already linked — nothing to do.
