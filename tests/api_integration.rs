@@ -283,19 +283,6 @@ fn delete_req_jwt_with(uri: &str, bearer: &str) -> Request<Body> {
         .unwrap()
 }
 
-fn post_empty_jwt(uri: &str) -> Request<Body> {
-    post_empty_jwt_with(uri, &super_admin_bearer())
-}
-
-fn post_empty_jwt_with(uri: &str, bearer: &str) -> Request<Body> {
-    Request::builder()
-        .method(Method::POST)
-        .uri(uri)
-        .header("authorization", bearer)
-        .body(Body::empty())
-        .unwrap()
-}
-
 fn get_jwt(uri: &str) -> Request<Body> {
     get_jwt_with(uri, &super_admin_bearer())
 }
@@ -2017,183 +2004,6 @@ async fn get_receipts_super_admin_token_includes_sensitive_fields() {
     assert!(r["senderPhone"].is_string());
 }
 
-// ── POST /api/admin/receipts/{id}/confirm ────────────────────────────────────
-
-#[tokio::test]
-async fn confirm_receipt_requires_auth() {
-    let app = test_app_with_auth().await;
-    let resp = call(app, post_empty("/api/admin/receipts/1/confirm")).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn confirm_receipt_unknown_id_returns_404() {
-    let app = test_app_with_auth().await;
-    let resp = call(
-        app,
-        post_empty_jwt("/api/admin/receipts/does-not-exist/confirm"),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn confirm_receipt_soft_deleted_returns_404() {
-    // Fixture receipt id 2 is soft-deleted.
-    let app = test_app_with_auth().await;
-    let resp = call(app, post_empty_jwt("/api/admin/receipts/2/confirm")).await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn confirm_receipt_marks_status_and_creates_payment() {
-    let (app, db) = test_app_with_auth_and_db().await;
-
-    let payments_before: Vec<serde_json::Value> =
-        json_body(call(app.clone(), get("/api/payments")).await).await;
-    let baseline = payments_before.len();
-
-    let resp = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/confirm")).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let updated: serde_json::Value = json_body(resp).await;
-    assert_eq!(updated["status"], "confirmed");
-    assert_eq!(updated["id"], "1");
-    // Audit: the confirming admin is recorded on the receipt row itself.
-    assert_eq!(updated["confirmedBy"], TEST_SUPER_ADMIN_SUB);
-
-    let payments_after: Vec<serde_json::Value> =
-        json_body(call(app, get("/api/payments")).await).await;
-    assert_eq!(payments_after.len(), baseline + 1);
-
-    let new_payment = payments_after
-        .iter()
-        .find(|p| p["reference"] == "3EB0C123ABCD4567EF89")
-        .expect("expected new payment referencing the receipt's whatsapp message id");
-    assert_eq!(new_payment["memberId"], "4");
-    assert_eq!(new_payment["cycleId"], "3");
-    assert_eq!(new_payment["amount"], 1_000_000);
-    assert_eq!(new_payment["currency"], "NGN");
-    assert!(new_payment["confirmedAt"].is_string());
-    // Audit: same admin is attributed on the payment created from the receipt.
-    assert_eq!(new_payment["confirmedBy"], TEST_SUPER_ADMIN_SUB);
-
-    // Audit: the `auth_event` row carries the linked member as the subject
-    // (user_id), not null. Receipt 1's fixture has member_id="4".
-    use surrealdb_types::SurrealValue;
-    #[derive(Debug, serde::Deserialize, SurrealValue)]
-    struct AuthEventRow {
-        user_id: Option<String>,
-        actor_id: Option<String>,
-        success: bool,
-    }
-    let rows: Vec<AuthEventRow> = db
-        .query(
-            "SELECT user_id, actor_id, success FROM auth_event \
-             WHERE event_type = 'receipt_confirmed' AND success = true",
-        )
-        .await
-        .expect("select auth_event")
-        .take(0)
-        .expect("decode auth_event rows");
-    let event = rows
-        .into_iter()
-        .find(|r| r.success && r.actor_id.as_deref() == Some(TEST_SUPER_ADMIN_SUB))
-        .expect("expected successful receipt_confirmed auth_event for this admin");
-    assert_eq!(
-        event.user_id.as_deref(),
-        Some("4"),
-        "auth_event.user_id should be the linked member id, not null"
-    );
-}
-
-#[tokio::test]
-async fn confirm_receipt_twice_returns_409() {
-    let app = test_app_with_auth().await;
-    let first = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/confirm")).await;
-    assert_eq!(first.status(), StatusCode::OK);
-    let second = call(app, post_empty_jwt("/api/admin/receipts/1/confirm")).await;
-    assert_eq!(second.status(), StatusCode::CONFLICT);
-}
-
-#[tokio::test]
-async fn confirm_receipt_with_existing_payment_for_member_cycle_returns_409() {
-    // Pre-create a payment for the same member+cycle referenced by receipt 1,
-    // then confirm the receipt and verify the duplicate-payment guard returns
-    // HTTP 409 Conflict.
-    let app = test_app_with_auth().await;
-    let create = post_json_jwt(
-        "/api/payments",
-        serde_json::json!({
-            "memberId": "4",
-            "cycleId": "3",
-            "amount": 1_000_000,
-            "currency": "NGN",
-            "paymentDate": "2026-03-02"
-        }),
-    );
-    let create_resp = call(app.clone(), create).await;
-    assert_eq!(create_resp.status(), StatusCode::CREATED);
-
-    let resp = call(app, post_empty_jwt("/api/admin/receipts/1/confirm")).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-}
-
-// ── POST /api/admin/receipts/{id}/reject ─────────────────────────────────────
-
-#[tokio::test]
-async fn reject_receipt_requires_auth() {
-    let app = test_app_with_auth().await;
-    let resp = call(app, post_empty("/api/admin/receipts/1/reject")).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn reject_receipt_unknown_id_returns_404() {
-    let app = test_app_with_auth().await;
-    let resp = call(app, post_empty_jwt("/api/admin/receipts/nope/reject")).await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn reject_receipt_marks_status_and_creates_no_payment() {
-    let app = test_app_with_auth().await;
-    let payments_before: Vec<serde_json::Value> =
-        json_body(call(app.clone(), get("/api/payments")).await).await;
-    let baseline = payments_before.len();
-
-    let resp = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/reject")).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let updated: serde_json::Value = json_body(resp).await;
-    assert_eq!(updated["status"], "rejected");
-    // Audit: rejecting admin is recorded so later reviewers can attribute the decision.
-    assert_eq!(updated["rejectedBy"], TEST_SUPER_ADMIN_SUB);
-
-    let payments_after: Vec<serde_json::Value> =
-        json_body(call(app, get("/api/payments")).await).await;
-    assert_eq!(payments_after.len(), baseline);
-}
-
-#[tokio::test]
-async fn reject_receipt_already_rejected_returns_409() {
-    // Fixture receipt id 2 is rejected and soft-deleted, so reject hits 404.
-    // Use receipt 1: reject once, then try again.
-    let app = test_app_with_auth().await;
-    let first = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/reject")).await;
-    assert_eq!(first.status(), StatusCode::OK);
-    let second = call(app, post_empty_jwt("/api/admin/receipts/1/reject")).await;
-    assert_eq!(second.status(), StatusCode::CONFLICT);
-}
-
-#[tokio::test]
-async fn confirm_after_reject_returns_409() {
-    let app = test_app_with_auth().await;
-    let r = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/reject")).await;
-    assert_eq!(r.status(), StatusCode::OK);
-    let c = call(app, post_empty_jwt("/api/admin/receipts/1/confirm")).await;
-    assert_eq!(c.status(), StatusCode::CONFLICT);
-}
-
 // ── GroupScopedAdmin guard (BE-5b–e) ─────────────────────────────────────────
 //
 // These cases pin both branches of `require_group_scope` for every
@@ -2390,39 +2200,6 @@ async fn delete_payment_admin_without_group_admin_returns_403() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-#[tokio::test]
-async fn confirm_receipt_admin_without_group_admin_returns_403() {
-    let app = test_app_with_auth().await;
-    let resp = call(
-        app,
-        post_empty_jwt_with("/api/admin/receipts/1/confirm", &admin_bearer()),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn reject_receipt_admin_without_group_admin_returns_403() {
-    let app = test_app_with_auth().await;
-    let resp = call(
-        app,
-        post_empty_jwt_with("/api/admin/receipts/1/reject", &admin_bearer()),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn reject_receipt_scoped_admin_proceeds() {
-    let app = test_app_with_auth().await;
-    let resp = call(
-        app,
-        post_empty_jwt_with("/api/admin/receipts/1/reject", &scoped_admin_bearer()),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
 // ── Opaque-denial for unknown ids (cross-tenant existence probing) ───────────
 //
 // A non-scoped `admin` must not be able to distinguish "this id doesn't
@@ -2452,20 +2229,6 @@ async fn delete_cycle_unknown_id_denies_non_scoped_admin_opaquely() {
     let resp = call(
         app,
         delete_req_jwt_with("/api/admin/cycles/does-not-exist", &admin_bearer()),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn confirm_receipt_unknown_id_denies_non_scoped_admin_opaquely() {
-    let app = test_app_with_auth().await;
-    let resp = call(
-        app,
-        post_empty_jwt_with(
-            "/api/admin/receipts/does-not-exist/confirm",
-            &admin_bearer(),
-        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -3002,11 +2765,12 @@ async fn patch_receipt_confirm_rejects_reason_field() {
 
 // ── PATCH action behaviour — audit + payment integrity ───────────────────────
 //
-// These cases cover the behaviour previously asserted only against the
-// legacy POST /api/admin/receipts/{id}/{confirm,reject} routes. The PATCH
-// dispatcher routes through the same `*_receipt_inner` helpers, so the
-// behaviour is identical — but the legacy POST routes are being removed,
-// so the assertions need a live entry point.
+// Pins the receipt-action behaviour that lives inside the shared
+// `*_receipt_inner` helpers: audit fields on the receipt + payment rows,
+// the duplicate-payment guard, soft-delete + unknown-id surfacing,
+// state-transition refusal (double action / cross-action), the
+// `GroupScopedAdmin` matrix, and the ingested_at-sourced `payment_date`
+// guard against a hostile bot clock.
 
 #[tokio::test]
 async fn patch_receipt_confirm_creates_payment_with_correct_fields_and_audit_event() {
@@ -3510,40 +3274,6 @@ async fn inbox_count_gates_admin_landing_when_zero() {
 }
 
 // ── Bot-clock independence ────────────────────────────────────────────────────
-
-/// A bot that lies about `received_at` must NOT be able to backdate or
-/// future-date the resulting payment row. `payment_date` is sourced from
-/// the server-stamped `ingested_at`, so the bot-supplied timestamp is
-/// purely forensic.
-#[tokio::test]
-async fn confirm_receipt_sources_payment_date_from_ingested_at_not_received_at() {
-    let (app, db) = test_app_with_auth_and_db().await;
-
-    // Receipt 1 is a pre-seeded pending receipt linked to member 4 / cycle 3.
-    // Force a deliberate mismatch: bot claims a wildly future `received_at`,
-    // server stamped `ingested_at` lives in the recent past.
-    db.query(
-        "UPDATE receipt:`1` SET \
-             received_at = '2099-12-31T23:59:59+00:00', \
-             ingested_at = '2026-03-10T10:00:00.000Z'",
-    )
-    .await
-    .expect("rewrite receipt 1 timestamps");
-
-    let resp = call(app.clone(), post_empty_jwt("/api/admin/receipts/1/confirm")).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let payments: Vec<serde_json::Value> =
-        json_body(call(app, get("/api/payments?limit=200")).await).await;
-    let new_payment = payments
-        .iter()
-        .find(|p| p["reference"] == "3EB0C123ABCD4567EF89")
-        .expect("payment created from receipt 1");
-    assert_eq!(
-        new_payment["paymentDate"], "2026-03-10",
-        "payment_date must follow server ingested_at, not bot-supplied received_at"
-    );
-}
 
 /// The admin queue must order by the server-stamped `ingested_at`. A
 /// bot that lies about `received_at` (forward or backward) cannot move
