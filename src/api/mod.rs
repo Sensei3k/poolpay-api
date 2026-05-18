@@ -17,11 +17,10 @@ use crate::auth::jwt::{JwtConfig, SharedVerifier, StaticKeyVerifier};
 use crate::auth::rate_limit::{self, CredentialFailureLimiter, RateLimitConfig};
 use crate::db::DbConn;
 use handlers::{
-    confirm_receipt, create_cycle, create_group, create_member, create_payment,
-    create_whatsapp_link, delete_cycle, delete_group, delete_member, delete_payment,
-    delete_whatsapp_link, get_cycles, get_groups, get_members, get_payments, get_receipts,
-    get_whatsapp_links, patch_receipt, reject_receipt, reset_db, update_cycle, update_group,
-    update_member,
+    create_cycle, create_group, create_member, create_payment, create_whatsapp_link, delete_cycle,
+    delete_group, delete_member, delete_payment, delete_whatsapp_link, get_cycles, get_groups,
+    get_members, get_payments, get_receipts, get_whatsapp_links, patch_receipt, reset_db,
+    update_cycle, update_group, update_member,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -113,13 +112,7 @@ pub fn router_with_config(
         .route("/api/admin/groups/{gid}/cycles", post(create_cycle))
         .route("/api/admin/cycles/{id}", patch(update_cycle))
         .route("/api/admin/cycles/{id}", delete(delete_cycle))
-        // Admin Receipt endpoints. The legacy confirm/reject POST routes
-        // stay live alongside the new unified PATCH /api/receipts/{id} so
-        // the FE can migrate without a synchronised cut; slice 6 drops
-        // the POST routes once callers have moved across.
-        .route("/api/admin/receipts/{id}/confirm", post(confirm_receipt))
-        .route("/api/admin/receipts/{id}/reject", post(reject_receipt))
-        // Slice 5 unified action endpoint. Accepts
+        // Unified action endpoint for receipt admin actions. Accepts
         // `{ action: 'confirm' | 'reject' | 'flag', reason?: string }`
         // and gates on `GroupScopedAdmin` via the inner helpers.
         .route("/api/receipts/{id}", patch(patch_receipt))

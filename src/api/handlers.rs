@@ -1058,9 +1058,9 @@ fn sanitise_reason(reason: Option<String>) -> Result<Option<String>, AppError> {
     }
 }
 
-/// Unified action dispatcher. The legacy POST `/api/admin/receipts/{id}/{confirm,reject}`
-/// routes stay alive and delegate to the same `_inner` helpers, so this
-/// endpoint and the legacy routes cannot diverge.
+/// Unified action dispatcher for receipt admin actions. Routes
+/// `confirm` / `reject` / `flag` through the shared `_inner` helpers so
+/// every path runs the same state-transition + audit logic.
 pub async fn patch_receipt(
     user: AuthenticatedUser,
     State(db): State<DbConn>,
@@ -1092,24 +1092,6 @@ pub async fn patch_receipt(
             "unknown action '{other}'; must be one of confirm, reject, flag"
         ))),
     }
-}
-
-// Legacy POST routes ----------------------------------------------------------
-
-pub async fn confirm_receipt(
-    user: AuthenticatedUser,
-    State(db): State<DbConn>,
-    Path(id): Path<EntityId>,
-) -> Result<Json<Receipt>, AppError> {
-    confirm_receipt_inner(user, &db, &id).await
-}
-
-pub async fn reject_receipt(
-    user: AuthenticatedUser,
-    State(db): State<DbConn>,
-    Path(id): Path<EntityId>,
-) -> Result<Json<Receipt>, AppError> {
-    reject_receipt_inner(user, &db, &id, None).await
 }
 
 // Action handlers -------------------------------------------------------------
