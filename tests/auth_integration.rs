@@ -2887,7 +2887,7 @@ where
     T: serde::de::DeserializeOwned + surrealdb_types::SurrealValue,
 {
     let mut resp = db.query(query).await.unwrap().check().unwrap();
-    resp.take(0).unwrap_or_default()
+    resp.take(0).expect("query_values: failed to decode response")
 }
 
 #[tokio::test]
