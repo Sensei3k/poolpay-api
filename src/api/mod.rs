@@ -94,6 +94,12 @@ pub fn router_with_config(
         .route("/api/payments", get(get_payments))
         .route("/api/payments", post(create_payment))
         .route("/api/payments/{member_id}/{cycle_id}", delete(delete_payment))
+        // `/api/receipts` lists receipts for any authenticated user. The
+        // handler gates with `AuthenticatedUser` (anonymous → 401) and
+        // splits the response shape by role: members get a stripped
+        // projection that omits bot-supplied content and PII; admins get
+        // the full payload they need to triage the pending queue. See the
+        // strip rationale in `get_receipts` in `handlers.rs`.
         .route("/api/receipts", get(get_receipts))
         // Admin group endpoints
         .route("/api/admin/groups", post(create_group))

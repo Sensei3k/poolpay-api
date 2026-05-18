@@ -19,7 +19,7 @@ use crate::api::pagination::{
     header_u32, Pagination, PaginationParams, HEADER_LIMIT, HEADER_OFFSET, HEADER_TOTAL_COUNT,
 };
 use crate::auth::audit::record_auth_event;
-use crate::auth::extractors::{AuthenticatedUser, GroupScopedAdmin, OptionalAuth, SuperAdminUser};
+use crate::auth::extractors::{AuthenticatedUser, GroupScopedAdmin, SuperAdminUser};
 use crate::db::{reseed, DbConn};
 
 // ── Query params ─────────────────────────────────────────────────────────────
@@ -216,7 +216,7 @@ pub async fn get_payments(
 
 pub async fn get_receipts(
     State(db): State<DbConn>,
-    OptionalAuth(auth): OptionalAuth,
+    user: AuthenticatedUser,
     Query(params): Query<ReceiptsQuery>,
 ) -> Result<(HeaderMap, Json<Vec<Receipt>>), AppError> {
     // Validate status filter up-front so an unknown value returns 400
@@ -282,21 +282,29 @@ pub async fn get_receipts(
     let mut resp = q.await?;
     let total = take_count(&mut resp, 0)?;
     let rows: Vec<DbReceipt> = resp.take(1)?;
-    // `GET /api/receipts` is public by default but exposes the admin-review
-    // fields (`raw_image_url`, `rejection_reason`) only to callers presenting
-    // a valid admin-tier Bearer token. `raw_image_url` is the bot-supplied
-    // screenshot URL an admin needs to inspect a pending receipt before
-    // confirming/rejecting; `rejection_reason` is an admin-supplied note.
-    // Without this gating, an admin had no read path to fetch `raw_image_url`
-    // (no separate admin list endpoint exists). Member-role tokens are
-    // treated like anonymous callers here — they get the stripped public
-    // projection. Token verification + status/version checks happen in
-    // `OptionalAuth`, so any failure mode collapses to `None`, which also
-    // keeps the public projection in place.
-    let is_admin = auth
-        .as_ref()
-        .map(|u| matches!(u.role.as_str(), "admin" | "super_admin"))
-        .unwrap_or(false);
+    // The route is gated by `AuthenticatedUser`, so anonymous callers never
+    // reach this body — they get 401 at the extractor. Within authenticated
+    // callers the response shape splits two ways:
+    //
+    // * Admin tier (`admin` / `super_admin`): full payload. Admins need
+    //   `raw_image_url` to inspect the screenshot, `rejection_reason` for
+    //   audit context, and the bot-supplied content fields (`ocr_text`,
+    //   `sender_label`, `bank_label`) plus `sender_phone` to triage the
+    //   pending queue. There is no separate admin list route, so this
+    //   handler is their read path.
+    //
+    // * Member tier: stripped projection. A compromised WhatsApp bot can
+    //   plant attacker-controlled strings into `ocr_text`, `sender_label`,
+    //   `bank_label`, or `raw_image_url`; surfacing them to non-admin
+    //   callers would turn a bot compromise into a public XSS / phishing
+    //   surface. `sender_phone` is PII regardless of bot intent. The
+    //   listing endpoint exposes none of these to members.
+    //
+    // A valid token is not the same as admin authority — the role check
+    // happens on the DB-resolved user (`AuthenticatedUser` re-reads role
+    // from the DB row, not from the JWT claim) so a stale or downgraded
+    // token cannot reach the admin projection by replaying an old claim.
+    let is_admin = matches!(user.role.as_str(), "admin" | "super_admin");
     let receipts: Result<Vec<Receipt>, AppError> = rows
         .into_iter()
         .map(Receipt::try_from)
@@ -305,6 +313,10 @@ pub async fn get_receipts(
                 if !is_admin {
                     receipt.raw_image_url = None;
                     receipt.rejection_reason = None;
+                    receipt.ocr_text = None;
+                    receipt.sender_phone = None;
+                    receipt.sender_label = None;
+                    receipt.bank_label = None;
                 }
                 receipt
             })
