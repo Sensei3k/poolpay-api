@@ -2887,7 +2887,8 @@ where
     T: serde::de::DeserializeOwned + surrealdb_types::SurrealValue,
 {
     let mut resp = db.query(query).await.unwrap().check().unwrap();
-    resp.take(0).expect("query_values: failed to decode response")
+    resp.take(0)
+        .expect("query_values: failed to decode response")
 }
 
 #[tokio::test]
@@ -3001,10 +3002,7 @@ async fn seed_dummy_fixtures_is_idempotent_across_restarts() {
          GROUP ALL",
     )
     .await;
-    assert_eq!(
-        fixtures, 5,
-        "restart must not duplicate fixture user rows"
-    );
+    assert_eq!(fixtures, 5, "restart must not duplicate fixture user rows");
 
     let grants = count_rows(
         &db,

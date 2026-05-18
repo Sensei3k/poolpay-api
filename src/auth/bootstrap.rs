@@ -665,8 +665,7 @@ async fn ensure_pool_member_link(
     if updated.is_none() {
         warn!(
             user_id,
-            pool_member_id,
-            "fixture pool member upsert returned no record — link skipped"
+            pool_member_id, "fixture pool member upsert returned no record — link skipped"
         );
         return Ok(());
     }
