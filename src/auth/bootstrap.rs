@@ -7,8 +7,8 @@ use surrealdb::types::RecordId;
 use tracing::{info, warn};
 
 use crate::api::models::{
-    now_iso, record_id_to_string, AuthEventContent, DbAuthEvent, DbGroup, DbGroupAdmin, DbUser,
-    DbUserIdentity, GroupAdminContent, UserContent, UserIdentityContent,
+    now_iso, record_id_to_string, AuthEventContent, DbAuthEvent, DbGroup, DbGroupAdmin, DbMember,
+    DbUser, DbUserIdentity, GroupAdminContent, UserContent, UserIdentityContent,
 };
 use crate::auth::password;
 use crate::db::{is_unique_constraint_error, DbConn, FIXTURE_GROUP_ID};
@@ -21,10 +21,12 @@ const CREDENTIALS_PROVIDER: &str = "credentials";
 /// production boots cannot accidentally plant it.
 const DUMMY_ADMIN_PASSWORD: &str = "PoolPayQA2026!";
 
-/// Declarative spec for the dev-only fixture admin accounts. Each row pairs
-/// an email with its role and whether to receive a `group_admin` grant on
-/// `FIXTURE_GROUP_ID` — lets us cover every role × grant combination the
-/// admin UI can render without branching inside the seed loop.
+/// Declarative spec for the dev-only fixture user accounts. Each row pairs
+/// an email with its role, whether to receive a `group_admin` grant on
+/// `FIXTURE_GROUP_ID`, and an optional `member` row id to stamp `user_id`
+/// onto — lets us cover every role × grant × pool-membership combination
+/// the admin UI and member dashboard can render without branching inside
+/// the seed loop.
 ///
 /// Current matrix:
 /// - admin1: `admin` + FIXTURE_GROUP_ID grant — typical group admin.
@@ -34,32 +36,50 @@ const DUMMY_ADMIN_PASSWORD: &str = "PoolPayQA2026!";
 ///   the bootstrap account.
 /// - admin4: `admin`, no grant — stable "orphan admin" baseline that stays
 ///   ungranted even after admin2 gets manually granted during testing.
+/// - member1: `member`, no grant, linked to fixture pool member `1`
+///   (Adaeze Okonkwo) so the auth identity fronts a real pool participant
+///   with cycles + payments visible to the member dashboard.
 struct DummyAdmin {
     email: &'static str,
     role: &'static str,
     grant_fixture_group: bool,
+    /// When `Some(member_id)`, stamps the seeded user's id onto that
+    /// fixture row in the `member` table after the user is created. Only
+    /// the `member` role uses this today; admin/super_admin fixtures
+    /// leave it `None`.
+    link_pool_member_id: Option<&'static str>,
 }
 
-const DUMMY_ADMINS: [DummyAdmin; 4] = [
+const DUMMY_ADMINS: [DummyAdmin; 5] = [
     DummyAdmin {
         email: "admin1@poolpay.test",
         role: "admin",
         grant_fixture_group: true,
+        link_pool_member_id: None,
     },
     DummyAdmin {
         email: "admin2@poolpay.test",
         role: "admin",
         grant_fixture_group: false,
+        link_pool_member_id: None,
     },
     DummyAdmin {
         email: "admin3@poolpay.test",
         role: "super_admin",
         grant_fixture_group: false,
+        link_pool_member_id: None,
     },
     DummyAdmin {
         email: "admin4@poolpay.test",
         role: "admin",
         grant_fixture_group: false,
+        link_pool_member_id: None,
+    },
+    DummyAdmin {
+        email: "member1@poolpay.test",
+        role: "member",
+        grant_fixture_group: false,
+        link_pool_member_id: Some("1"),
     },
 ];
 
@@ -167,19 +187,17 @@ fn redact(email: &str) -> String {
     }
 }
 
-/// Dev-only: seed two fixture admin users so the admin-management UI has
-/// clickable targets without forcing manual `POST /api/admin/users` calls.
+/// Dev-only: seed the fixture admin + member users so both the admin
+/// management UI and the member dashboard have clickable targets without
+/// forcing manual `POST /api/admin/users` calls or social-signup flows.
 ///
-/// - `admin1@poolpay.test` — active admin with a `group_admin` grant on
-///   fixture group `1` (exercises the group-scoped extractor path).
-/// - `admin2@poolpay.test` — active admin with no grants (exercises the
-///   "grant a new group" flow).
-///
-/// Both use `must_reset_password: false` so login is one-shot, unlike the
-/// bootstrap super-admin. Idempotent on every email: a restart re-checks
-/// `user_identity`, skips already-present rows, and re-asserts admin1's
-/// fixture grant even when the user already existed (so a manual
-/// `group_admin` delete is restored by a restart). Gated on
+/// See `DUMMY_ADMINS` for the full matrix. All accounts share
+/// `DUMMY_ADMIN_PASSWORD` and use `must_reset_password: false` so login is
+/// one-shot, unlike the bootstrap super-admin. Idempotent on every email:
+/// a restart re-checks `user_identity`, skips already-present rows, and
+/// re-asserts every per-user side-effect (admin1's `group_admin` grant on
+/// fixture group `1`, member1's `user_id` stamp on fixture pool member
+/// `1`) so manual cleanup between restarts is restored. Gated on
 /// `SEED_ON_EMPTY=true` **and** `APP_ENV` ∈ {`development`, `test`} so any
 /// other deploy — including unset `APP_ENV` — fails closed. This mirrors
 /// the `/api/test/reset` gate in `src/api/mod.rs`.
@@ -233,13 +251,21 @@ pub async fn seed_dummy_admins_with_flag(
             &super_admin_id,
         )
         .await?;
+        // If the user couldn't be produced (skip case from
+        // `ensure_admin_fixture`), there's nothing to grant or link to.
+        let Some(user_id) = user_id else { continue };
         // Re-asserting the grant on every run (not just when the user was
         // created this run) restores it after manual cleanup / partial prior
         // runs; `ensure_group_admin_grant` is idempotent on unique conflict.
         if spec.grant_fixture_group {
-            if let Some(user_id) = user_id {
-                ensure_group_admin_grant(db, &user_id, FIXTURE_GROUP_ID, &super_admin_id).await?;
-            }
+            ensure_group_admin_grant(db, &user_id, FIXTURE_GROUP_ID, &super_admin_id).await?;
+        }
+        // Mirror the grant re-assertion above: stamp `user_id` onto the
+        // linked pool member row on every restart so manual cleanup that
+        // cleared the link is restored. The helper is idempotent — writing
+        // the same `user_id` twice is a no-op on the row.
+        if let Some(pool_member_id) = spec.link_pool_member_id {
+            ensure_pool_member_link(db, &user_id, pool_member_id).await?;
         }
     }
     Ok(())
@@ -275,10 +301,11 @@ async fn ensure_admin_fixture(
     // `DUMMY_ADMINS` `const`, but guard against a typo slipping in during
     // future edits so a bogus role can't be silently written to `user.role`
     // (where extractors + admin_users UPDATE queries compare against the
-    // exact strings `"admin"` / `"super_admin"`).
+    // exact strings `"admin"` / `"super_admin"` / `"member"` — matches the
+    // DB-level ASSERT in `db::define_user_table`).
     assert!(
-        matches!(role, "admin" | "super_admin"),
-        "fixture admin role must be 'admin' or 'super_admin', got {role:?}"
+        matches!(role, "admin" | "super_admin" | "member"),
+        "fixture user role must be 'admin', 'super_admin', or 'member', got {role:?}"
     );
     let email_normalised = email.to_lowercase();
 
@@ -304,7 +331,7 @@ async fn ensure_admin_fixture(
             Some(u)
                 if u.deleted_at.is_none()
                     && u.status == "active"
-                    && matches!(u.role.as_str(), "admin" | "super_admin") =>
+                    && matches!(u.role.as_str(), "admin" | "super_admin" | "member") =>
             {
                 // Reconcile drift: if the fixture spec now declares a role
                 // different from what's persisted (e.g. admin3 was demoted
@@ -320,12 +347,12 @@ async fn ensure_admin_fixture(
                         user_id = identity.user_id.as_str(),
                         from = u.role.as_str(),
                         to = role,
-                        "fixture admin role drifted from spec — reconciled"
+                        "fixture user role drifted from spec — reconciled"
                     );
                 } else {
                     info!(
                         email_redacted = redact(email),
-                        "fixture admin already seeded — reusing user_id"
+                        "fixture user already seeded — reusing user_id"
                     );
                 }
                 Ok(Some(identity.user_id))
@@ -334,7 +361,7 @@ async fn ensure_admin_fixture(
                 warn!(
                     email_redacted = redact(email),
                     user_id = identity.user_id.as_str(),
-                    "fixture admin identity points at a disabled/non-admin user — skipping grant"
+                    "fixture user identity points at a disabled/out-of-spec user — skipping grant"
                 );
                 Ok(None)
             }
@@ -571,4 +598,57 @@ async fn ensure_group_admin_grant(
         }
         Err(e) => Err(e),
     }
+}
+
+/// Stamp `user_id` onto a fixture row in the `member` table so a seeded
+/// auth user fronts a real pool participant. Idempotent: writing the same
+/// `user_id` twice is a no-op on the row, and the helper bails cleanly
+/// when the target member row is missing or soft-deleted (e.g. a partial
+/// DB where `db::seed()` didn't run).
+///
+/// The `member` table is SCHEMALESS, so adding `user_id` here doesn't
+/// require a schema migration. Mirrors `ensure_group_admin_grant`: the
+/// linked state is re-asserted on every restart so manual cleanup between
+/// boots is restored without dropping data.
+async fn ensure_pool_member_link(
+    db: &DbConn,
+    user_id: &str,
+    pool_member_id: &str,
+) -> Result<(), surrealdb::Error> {
+    let member: Option<DbMember> = db.select(("member", pool_member_id)).await?;
+    if member.filter(|m| m.deleted_at.is_none()).is_none() {
+        info!(
+            pool_member_id,
+            "fixture pool member missing or deleted — skipping user_id link"
+        );
+        return Ok(());
+    }
+
+    // Capture the UPDATE result so a zero-rows write (the pool member was
+    // soft-deleted between the pre-flight `select` above and the UPDATE,
+    // i.e. TOCTOU) doesn't masquerade as a successful link in the logs.
+    // The `WHERE deleted_at IS NONE` guard is intentional defence-in-depth
+    // so a racing soft-delete can't be silently overwritten — but it also
+    // means the UPDATE can no-op without erroring, hence this check.
+    let mut resp = db
+        .query("UPDATE $mid SET user_id = $uid, updated_at = $now WHERE deleted_at IS NONE")
+        .bind(("mid", RecordId::new("member", pool_member_id.to_string())))
+        .bind(("uid", user_id.to_string()))
+        .bind(("now", now_iso()))
+        .await?
+        .check()?;
+    let updated: Vec<DbMember> = resp.take(0).unwrap_or_default();
+    if updated.is_empty() {
+        warn!(
+            user_id,
+            pool_member_id,
+            "fixture pool member vanished between pre-flight select and UPDATE — link skipped"
+        );
+        return Ok(());
+    }
+    info!(
+        user_id,
+        pool_member_id, "fixture pool member linked to fixture user"
+    );
+    Ok(())
 }
