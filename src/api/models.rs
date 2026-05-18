@@ -488,8 +488,13 @@ pub struct Receipt {
     pub group_id: EntityId,
     #[serde(rename = "chatId")]
     pub chat_id: String,
-    #[serde(rename = "senderPhone")]
-    pub sender_phone: String,
+    /// Bot-supplied sender phone — PII. Modelled as `Option<String>` so the
+    /// non-admin projection of `GET /api/receipts` can strip it (set to
+    /// `None`, skipped in JSON) while admin-tier callers continue to see the
+    /// real value. The DB row always carries a `String`; the conversion in
+    /// `TryFrom<DbReceipt>` wraps it with `Some(..)`.
+    #[serde(rename = "senderPhone", skip_serializing_if = "Option::is_none")]
+    pub sender_phone: Option<String>,
     #[serde(rename = "memberId", skip_serializing_if = "Option::is_none")]
     pub member_id: Option<EntityId>,
     #[serde(rename = "cycleId", skip_serializing_if = "Option::is_none")]
@@ -661,7 +666,7 @@ impl TryFrom<DbReceipt> for Receipt {
             whatsapp_message_id: db.whatsapp_message_id,
             group_id: db.group_id,
             chat_id: db.chat_id,
-            sender_phone: db.sender_phone,
+            sender_phone: Some(db.sender_phone),
             member_id: db.member_id,
             cycle_id: db.cycle_id,
             extracted_amount: db.extracted_amount,
