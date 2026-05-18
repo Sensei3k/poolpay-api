@@ -2877,6 +2877,19 @@ async fn count_rows(db: &poolpay::db::DbConn, query: &str) -> i64 {
     rows.first().copied().unwrap_or(0)
 }
 
+/// Run a `SELECT VALUE …` query and return the flat result vector. Sibling
+/// of `count_rows` for the shape that doesn't fit the `count() GROUP ALL`
+/// mould — keeps fixture/link assertions to a single call site instead of
+/// the seven-stage `.query(…).await.unwrap().check().unwrap().take(0).unwrap()`
+/// chain that recurs across every member-facing test.
+async fn query_values<T>(db: &poolpay::db::DbConn, query: &str) -> Vec<T>
+where
+    T: serde::de::DeserializeOwned + surrealdb_types::SurrealValue,
+{
+    let mut resp = db.query(query).await.unwrap().check().unwrap();
+    resp.take(0).unwrap_or_default()
+}
+
 #[tokio::test]
 async fn seed_dummy_fixtures_creates_all_fixtures_with_expected_roles_and_grants() {
     let (_app, db) = test_app().await;
@@ -3195,20 +3208,13 @@ async fn seed_dummy_fixtures_creates_member1_linked_to_fixture_pool_member() {
 
     // Pool member "1" (Adaeze Okonkwo) must carry the user_id back-pointer
     // so any future endpoint that joins auth → pool membership resolves
-    // to the same row. Use `SELECT VALUE` so the row hydrates into a flat
-    // `Vec<String>` and we don't need an ad-hoc `SurrealValue` derive in
-    // the test crate.
-    let member_links: Vec<String> = db
-        .query(
-            "SELECT VALUE user_id FROM member \
-             WHERE meta::id(id) = '1' AND user_id != NONE",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap()
-        .take(0)
-        .unwrap();
+    // to the same row.
+    let member_links: Vec<String> = query_values(
+        &db,
+        "SELECT VALUE user_id FROM member \
+         WHERE meta::id(id) = '1' AND user_id != NONE",
+    )
+    .await;
     assert_eq!(
         member_links.len(),
         1,
@@ -3217,17 +3223,12 @@ async fn seed_dummy_fixtures_creates_member1_linked_to_fixture_pool_member() {
 
     // The link must resolve back to the member1 auth user (not some other
     // seeded user, and not a stale id from a previous run).
-    let member1_user_id: Vec<String> = db
-        .query(
-            "SELECT VALUE meta::id(id) FROM user \
-             WHERE email_normalised = 'member1@poolpay.test'",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap()
-        .take(0)
-        .unwrap();
+    let member1_user_id: Vec<String> = query_values(
+        &db,
+        "SELECT VALUE meta::id(id) FROM user \
+         WHERE email_normalised = 'member1@poolpay.test'",
+    )
+    .await;
     let expected = member1_user_id.first().expect("member1 user id").as_str();
     assert_eq!(
         member_links[0], expected,
