@@ -302,7 +302,7 @@ async fn ensure_fixture_user(
     // future edits so a bogus role can't be silently written to `user.role`
     // (where extractors + admin_users UPDATE queries compare against the
     // exact strings `"admin"` / `"super_admin"` / `"member"` — matches the
-    // DB-level ASSERT in `db::define_auth_tables`.
+    // DB-level ASSERT on `user.role` in the `0001_initial_schema` migration).
     assert!(
         matches!(role, "admin" | "super_admin" | "member"),
         "fixture user role must be 'admin', 'super_admin', or 'member', got {role:?}"
