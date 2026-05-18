@@ -641,9 +641,11 @@ async fn ensure_pool_member_link(
         // Either the link was already correct (idempotent silent success),
         // or the row is soft-deleted / missing. Do a follow-up select to
         // produce a more informative log line. Any error from the UPDATE
-        // decode or this select propagates via `?` to the caller
-        // (`seed_dummy_fixtures_with_flag`), which logs and continues
-        // without aborting startup.
+        // decode or this select propagates via `?` up the seed call chain
+        // (`seed_dummy_fixtures_with_flag` → `seed_dummy_fixtures`) to
+        // `main`, which logs the error and continues without aborting
+        // startup — preserves error visibility while honouring the
+        // best-effort fixture-seed contract.
         let member: Option<DbMember> = db.select(("member", pool_member_id)).await?;
         match member {
             Some(m) if m.user_id.as_deref() == Some(user_id) => {
