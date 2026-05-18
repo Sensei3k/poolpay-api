@@ -394,9 +394,16 @@ pub async fn create_admin_user_with_grants(
     if req.initial_password.len() > MAX_PASSWORD_LEN {
         return Err(AppError::BadRequest("initialPassword too long".into()));
     }
-    if !matches!(req.role.as_str(), "admin" | "super_admin") {
+    // Only role "admin" is permitted here. `super_admin` is rejected
+    // because super-admins bypass `GroupScopedAdmin` entirely, so any
+    // `group_admin` rows attached at create-time would be dead weight —
+    // and `grant_group_admin` already enforces the same rule on the
+    // per-call path (returns 409 when targeting a super-admin). Keeping
+    // both grant entry points aligned avoids a confusing "you can grant
+    // here but not there" inconsistency.
+    if req.role != "admin" {
         return Err(AppError::BadRequest(format!(
-            "unsupported role: {}",
+            "with-grants only supports role 'admin'; got '{}'",
             req.role
         )));
     }
