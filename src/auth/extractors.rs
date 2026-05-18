@@ -137,45 +137,6 @@ where
     }
 }
 
-/// Authentication probe that never rejects the request.
-///
-/// Used by endpoints that are public by default but expose extra fields to
-/// callers who present a valid Bearer token (currently: `GET /api/receipts`
-/// returns `raw_image_url` / `rejection_reason` to authenticated admins so
-/// they can review pending receipts, while unauthenticated callers see the
-/// stripped projection). Any failure to extract a valid `AuthenticatedUser`
-/// — missing header, malformed token, expired token, mismatched
-/// `token_version`, inactive/deleted user — collapses to `None` so the
-/// public path is never blocked.
-#[derive(Debug, Clone)]
-pub struct OptionalAuth(pub Option<AuthenticatedUser>);
-
-impl<S> FromRequestParts<S> for OptionalAuth
-where
-    S: Send + Sync,
-    DbConn: FromRef<S>,
-{
-    type Rejection = std::convert::Infallible;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // Skip the work entirely when no Authorization header is present —
-        // saves a token verification + DB round-trip on the common
-        // unauthenticated path.
-        if parts
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .is_none()
-        {
-            return Ok(Self(None));
-        }
-        Ok(Self(
-            AuthenticatedUser::from_request_parts(parts, state)
-                .await
-                .ok(),
-        ))
-    }
-}
-
 pub async fn require_group_scope(
     user: &AuthenticatedUser,
     group_id: &str,

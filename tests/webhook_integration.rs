@@ -55,8 +55,15 @@ async fn webhook_app() -> Router {
     init_env();
     let conn = db::init_memory().await.expect("init test DB");
     seed_link(&conn).await;
+    seed_admin_user(&conn).await;
     api::router(conn)
 }
+
+/// Test fixture: an `admin`-role user that backs the admin Bearer used to
+/// list receipts through `/api/receipts`. The listing route is gated by
+/// `AuthenticatedUser`, and the role is re-read from the DB row on every
+/// request, so a real `user` record (not just a signed JWT) is required.
+const TEST_WEBHOOK_ADMIN_SUB: &str = "webhook-test-admin";
 
 /// Seed a `group_link` for the fixture group so the matcher resolves
 /// `LINKED_CHAT_ID` → group `1` (and therefore can find the seeded members).
@@ -76,6 +83,56 @@ async fn seed_link(db: &poolpay::db::DbConn) {
         .content(content)
         .await
         .expect("seed group_link");
+}
+
+/// Seed the `admin` fixture user the listing assertions authenticate as.
+/// Mirrors the shape produced by `tests/api_integration.rs` so the role
+/// re-read inside `AuthenticatedUser` resolves to `admin` and the full
+/// payload is returned.
+async fn seed_admin_user(db: &poolpay::db::DbConn) {
+    use poolpay::api::models::{now_iso, DbUser, UserContent};
+    let now = now_iso();
+    let content = UserContent {
+        email: format!("{TEST_WEBHOOK_ADMIN_SUB}@test.local"),
+        email_normalised: format!("{TEST_WEBHOOK_ADMIN_SUB}@test.local"),
+        password_hash: None,
+        role: "admin".into(),
+        status: "active".into(),
+        token_version: 0,
+        must_reset_password: false,
+        version: 1,
+        created_at: now.clone(),
+        updated_at: now,
+        deleted_at: None,
+    };
+    let _: Option<DbUser> = db
+        .upsert(("user", TEST_WEBHOOK_ADMIN_SUB))
+        .content(content)
+        .await
+        .expect("seed webhook admin user");
+}
+
+/// Mint a Bearer for `TEST_WEBHOOK_ADMIN_SUB` signed by the process-shared
+/// verifier so `AuthenticatedUser` accepts it. The verifier is the same
+/// instance the router uses to verify, so a freshly-minted token round-trips.
+fn admin_bearer() -> String {
+    let token = poolpay::api::shared_verifier()
+        .mint_access(TEST_WEBHOOK_ADMIN_SUB, "admin", 0)
+        .expect("shared verifier must mint");
+    format!("Bearer {token}")
+}
+
+/// Build an authenticated GET for the listing — every webhook test that
+/// reads `/api/receipts` is verifying that the ingest path actually
+/// persisted, so it needs to bypass the public auth gate that the listing
+/// otherwise enforces.
+fn authed_get(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("authorization", admin_bearer())
+        .body(Body::empty())
+        .unwrap()
 }
 
 fn now_ts() -> i64 {
@@ -360,15 +417,7 @@ async fn webhook_concurrent_duplicate_deliveries_persist_single_row() {
 
     // And exactly one row must persist for the message id — the whole point
     // of the unique index is that the second insert never lands.
-    let list = call(
-        app,
-        Request::builder()
-            .method(Method::GET)
-            .uri("/api/receipts?limit=200")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
+    let list = call(app, authed_get("/api/receipts?limit=200")).await;
     assert_eq!(list.status(), StatusCode::OK);
     let receipts: Vec<serde_json::Value> = json_body(list).await;
     let persisted: Vec<_> = receipts
@@ -537,18 +586,11 @@ async fn webhook_trims_whitespace_padded_fields_and_routes() {
         .to_string();
 
     // Confirm the row persisted with canonical (trimmed) identifier
-    // values. `/api/receipts` exposes `chatId`, `senderPhone`, and
-    // `whatsappMessageId` to anonymous callers; `rawImageUrl` is admin-
-    // gated and exercised in unit coverage of the trim path itself.
-    let list = call(
-        app,
-        Request::builder()
-            .method(Method::GET)
-            .uri("/api/receipts?limit=200")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
+    // values. The listing strips bot-supplied content + sender PII for
+    // non-admin callers, so we authenticate as the seeded admin to read
+    // back the full payload — the trim assertions then exercise
+    // `whatsappMessageId`, `chatId`, and `senderPhone` end-to-end.
+    let list = call(app, authed_get("/api/receipts?limit=200")).await;
     assert_eq!(list.status(), StatusCode::OK);
     let receipts: Vec<serde_json::Value> = json_body(list).await;
     let row = receipts
@@ -575,10 +617,11 @@ async fn webhook_persists_receipt_row_visible_to_admin_list() {
     // up in `GET /api/receipts`. Confirms the receipt row materialises
     // through the same listing the FE admin queue consumes.
     //
-    // `GET /api/receipts` is a public read endpoint, so it deliberately
-    // strips bot-supplied (`rawImageUrl`) and admin-supplied
-    // (`rejectionReason`) fields — we assert the row appears and carries
-    // the public identifiers, and that the sensitive fields are absent.
+    // The listing is gated by `AuthenticatedUser` and returns the full
+    // payload (including `rawImageUrl` and `rejectionReason`) to admin
+    // callers — so we authenticate as the seeded admin and assert that
+    // the ingested row appears in the admin projection. The strip
+    // behaviour for non-admin callers is covered in `api_integration.rs`.
     let app = webhook_app().await;
     let body = payload_matching_member("WAMSG-PERSIST");
 
@@ -590,15 +633,7 @@ async fn webhook_persists_receipt_row_visible_to_admin_list() {
         .expect("ingested response must carry receiptId")
         .to_string();
 
-    let list = call(
-        app,
-        Request::builder()
-            .method(Method::GET)
-            .uri("/api/receipts?limit=200")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
+    let list = call(app, authed_get("/api/receipts?limit=200")).await;
     assert_eq!(list.status(), StatusCode::OK);
     let receipts: Vec<serde_json::Value> = json_body(list).await;
     let row = receipts
@@ -606,12 +641,8 @@ async fn webhook_persists_receipt_row_visible_to_admin_list() {
         .find(|r| r["id"] == receipt_id)
         .expect("ingested receipt must appear in /api/receipts");
     assert_eq!(row["whatsappMessageId"], "WAMSG-PERSIST");
-    assert!(
-        row.get("rawImageUrl").is_none(),
-        "public /api/receipts must not expose bot-supplied rawImageUrl"
-    );
-    assert!(
-        row.get("rejectionReason").is_none(),
-        "public /api/receipts must not expose admin-supplied rejectionReason"
-    );
+    // `payload_matching_member` ships `rawImageUrl` and the ingest path
+    // persists it verbatim, so an admin caller must read it back from the
+    // listing — this is the read path admins use to triage the queue.
+    assert_eq!(row["rawImageUrl"], "https://example.com/receipt.jpg");
 }

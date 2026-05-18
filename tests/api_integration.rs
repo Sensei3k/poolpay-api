@@ -86,9 +86,11 @@ async fn test_app_with_auth_and_db() -> (Router, db::DbConn) {
 const TEST_SUPER_ADMIN_SUB: &str = "test-super-admin";
 const TEST_ADMIN_SUB: &str = "test-admin";
 const TEST_SCOPED_ADMIN_SUB: &str = "test-scoped-admin";
-/// `member`-role fixture user — used to assert that member tokens still
-/// receive the stripped public projection on `GET /api/receipts` (admin
-/// review fields are admin-only).
+/// `member`-role fixture user — used to assert that member tokens are
+/// admitted to `GET /api/receipts` (the route is gated by
+/// `AuthenticatedUser`) but receive the stripped projection that omits
+/// bot-supplied content and sender PII. Admin-review fields are
+/// admin-only.
 const TEST_MEMBER_SUB: &str = "test-member";
 /// Fixture group the scoped admin is granted access to — matches the
 /// single group id produced by `db::init_memory()`.
@@ -233,9 +235,9 @@ fn scoped_admin_bearer() -> String {
 }
 
 /// Bearer for a `member`-role user. Used to verify that handlers which
-/// release admin-only fields when `OptionalAuth` resolves to an admin
-/// (e.g. `GET /api/receipts`) still strip those fields for member
-/// callers — a valid token is not the same as admin authority.
+/// release admin-only fields to admin callers (e.g. `GET /api/receipts`)
+/// still strip those fields for member callers — a valid token is not
+/// the same as admin authority.
 fn member_bearer() -> String {
     format!("Bearer {}", mint_user_jwt(TEST_MEMBER_SUB, "member"))
 }
@@ -1758,20 +1760,32 @@ async fn delete_whatsapp_link_allows_relinking_same_chat_id() {
 
 #[tokio::test]
 async fn get_receipts_returns_200() {
-    let resp = call(test_app().await, get("/api/receipts")).await;
+    let resp = call(
+        test_app_with_auth().await,
+        get_jwt_with("/api/receipts", &admin_bearer()),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn get_receipts_no_auth_header_is_public() {
-    // No Authorization header — endpoint must still succeed (public read).
-    let resp = call(test_app().await, get("/api/receipts")).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+async fn get_receipts_no_auth_header_returns_401() {
+    // No Authorization header — endpoint must reject. The listing route is
+    // gated behind `AuthenticatedUser` because the payload contains
+    // bot-supplied content and sender PII that a compromised bot can
+    // poison; anonymous read access turns a bot compromise into a public
+    // phishing / XSS surface.
+    let resp = call(test_app_with_auth().await, get("/api/receipts")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn get_receipts_returns_seeded_fixtures() {
-    let resp = call(test_app().await, get("/api/receipts")).await;
+    let resp = call(
+        test_app_with_auth().await,
+        get_jwt_with("/api/receipts", &admin_bearer()),
+    )
+    .await;
     let receipts: Vec<serde_json::Value> = json_body(resp).await;
     assert!(
         !receipts.is_empty(),
@@ -1781,7 +1795,11 @@ async fn get_receipts_returns_seeded_fixtures() {
 
 #[tokio::test]
 async fn get_receipts_response_shape() {
-    let resp = call(test_app().await, get("/api/receipts")).await;
+    let resp = call(
+        test_app_with_auth().await,
+        get_jwt_with("/api/receipts", &admin_bearer()),
+    )
+    .await;
     let receipts: Vec<serde_json::Value> = json_body(resp).await;
     let r = &receipts[0];
     for field in [
@@ -1801,40 +1819,56 @@ async fn get_receipts_response_shape() {
 
 #[tokio::test]
 async fn get_receipts_filter_by_group_id() {
-    let app = test_app().await;
-    let resp = call(app, get("/api/receipts?groupId=1")).await;
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        get_jwt_with("/api/receipts?groupId=1", &admin_bearer()),
+    )
+    .await;
     let receipts: Vec<serde_json::Value> = json_body(resp).await;
     assert!(receipts.iter().all(|r| r["groupId"] == "1"));
 }
 
 #[tokio::test]
 async fn get_receipts_filter_by_group_id_unknown_returns_empty() {
-    let app = test_app().await;
-    let resp = call(app, get("/api/receipts?groupId=does-not-exist")).await;
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        get_jwt_with("/api/receipts?groupId=does-not-exist", &admin_bearer()),
+    )
+    .await;
     let receipts: Vec<serde_json::Value> = json_body(resp).await;
     assert_eq!(receipts.len(), 0);
 }
 
 #[tokio::test]
 async fn get_receipts_filter_by_status_pending() {
-    let app = test_app().await;
-    let resp = call(app, get("/api/receipts?status=pending")).await;
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        get_jwt_with("/api/receipts?status=pending", &admin_bearer()),
+    )
+    .await;
     let receipts: Vec<serde_json::Value> = json_body(resp).await;
     assert!(receipts.iter().all(|r| r["status"] == "pending"));
 }
 
 #[tokio::test]
 async fn get_receipts_invalid_status_returns_400() {
-    let app = test_app().await;
-    let resp = call(app, get("/api/receipts?status=weird")).await;
+    let app = test_app_with_auth().await;
+    let resp = call(
+        app,
+        get_jwt_with("/api/receipts?status=weird", &admin_bearer()),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn get_receipts_excludes_soft_deleted() {
     // At least one fixture receipt has deleted_at set — ensure it's filtered out.
-    let app = test_app().await;
-    let resp = call(app, get("/api/receipts")).await;
+    let app = test_app_with_auth().await;
+    let resp = call(app, get_jwt_with("/api/receipts", &admin_bearer())).await;
     let receipts: Vec<serde_json::Value> = json_body(resp).await;
     assert!(
         receipts
@@ -1846,63 +1880,77 @@ async fn get_receipts_excludes_soft_deleted() {
 
 #[tokio::test]
 async fn reset_restores_receipts_to_fixture_count() {
-    let app = test_app().await;
+    let app = test_app_with_auth().await;
     let before: Vec<serde_json::Value> =
-        json_body(call(app.clone(), get("/api/receipts")).await).await;
+        json_body(call(app.clone(), get_jwt_with("/api/receipts", &admin_bearer())).await).await;
     let baseline = before.len();
     call(app.clone(), post_empty("/api/test/reset")).await;
-    let after: Vec<serde_json::Value> = json_body(call(app, get("/api/receipts")).await).await;
+    let after: Vec<serde_json::Value> =
+        json_body(call(app, get_jwt_with("/api/receipts", &admin_bearer())).await).await;
     assert_eq!(after.len(), baseline);
 }
 
-/// Seed admin-review fields on receipt id `1` so the projection tests
-/// can prove which callers see them and which do not. The fixture leaves
-/// both fields `None`, but the serializer skips `None`, so without a
-/// real value present we cannot distinguish "field stripped" from
-/// "field never set" — write a known value here and assert against it.
-async fn seed_admin_review_fields_on_receipt_one(db: &poolpay::db::DbConn) {
+/// Seed the bot-supplied content fields and admin note on receipt id `1`
+/// so the projection tests can prove which callers see them and which do
+/// not. The fixture leaves these fields blank or `None`; the serializer
+/// skips `None`, so without a real value present we cannot distinguish
+/// "field stripped" from "field never set" — write known values here and
+/// assert against them.
+async fn seed_strippable_fields_on_receipt_one(db: &poolpay::db::DbConn) {
     use surrealdb::types::RecordId;
-    db.query("UPDATE $id SET raw_image_url = $url, rejection_reason = $reason")
-        .bind(("id", RecordId::new("receipt", "1".to_string())))
-        .bind(("url", "https://example.invalid/screenshot.png".to_string()))
-        .bind(("reason", "needs manual review".to_string()))
-        .await
-        .expect("seed admin-review fields")
-        .check()
-        .expect("admin-review field update must succeed");
+    db.query(
+        "UPDATE $id SET \
+             raw_image_url = $url, \
+             rejection_reason = $reason, \
+             ocr_text = $ocr, \
+             sender_label = $sender, \
+             bank_label = $bank",
+    )
+    .bind(("id", RecordId::new("receipt", "1".to_string())))
+    .bind(("url", "https://example.invalid/screenshot.png".to_string()))
+    .bind(("reason", "needs manual review".to_string()))
+    .bind(("ocr", "NGN 1,000,000.00\nFrom: Tunde Bakare".to_string()))
+    .bind(("sender", "Tunde Bakare".to_string()))
+    .bind(("bank", "GTBank".to_string()))
+    .await
+    .expect("seed strippable fields")
+    .check()
+    .expect("strippable field update must succeed");
 }
 
-#[tokio::test]
-async fn get_receipts_anonymous_strips_admin_review_fields() {
-    // Anonymous callers must never see `rawImageUrl` or `rejectionReason`,
-    // even when the underlying row has them populated.
-    let (app, db) = test_app_with_auth_and_db().await;
-    seed_admin_review_fields_on_receipt_one(&db).await;
+/// Fields that must NEVER appear in a non-admin projection of the listing.
+/// Bot-supplied content (`rawImageUrl`, `ocrText`, `senderLabel`,
+/// `bankLabel`) is attacker-controllable through a compromised WhatsApp
+/// bot; `senderPhone` is PII; `rejectionReason` is an admin note. Surfacing
+/// any of these to non-admin callers turns a bot compromise or a stolen
+/// member token into a public phishing / data-exfil surface.
+const NON_ADMIN_STRIPPED_FIELDS: &[&str] = &[
+    "rawImageUrl",
+    "rejectionReason",
+    "ocrText",
+    "senderPhone",
+    "senderLabel",
+    "bankLabel",
+];
 
+#[tokio::test]
+async fn get_receipts_anonymous_returns_401() {
+    // Anonymous callers cannot reach the listing at all — the route is
+    // gated behind `AuthenticatedUser`. Token presence is not authority,
+    // but token absence is an outright refusal.
+    let app = test_app_with_auth().await;
     let resp = call(app, get("/api/receipts")).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let receipts: Vec<serde_json::Value> = json_body(resp).await;
-    let r = receipts
-        .iter()
-        .find(|r| r["id"] == "1")
-        .expect("receipt 1 must be in the listing");
-    assert!(
-        r.get("rawImageUrl").is_none(),
-        "anonymous callers must not see rawImageUrl: {r}"
-    );
-    assert!(
-        r.get("rejectionReason").is_none(),
-        "anonymous callers must not see rejectionReason: {r}"
-    );
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
-async fn get_receipts_member_token_strips_admin_review_fields() {
+async fn get_receipts_member_token_strips_sensitive_fields() {
     // A valid token is not the same as admin authority — `member`-role
-    // callers must receive the same stripped public projection as
-    // anonymous callers.
+    // callers receive a stripped projection that omits bot-supplied
+    // content and sender PII even when the underlying row has them
+    // populated.
     let (app, db) = test_app_with_auth_and_db().await;
-    seed_admin_review_fields_on_receipt_one(&db).await;
+    seed_strippable_fields_on_receipt_one(&db).await;
 
     let resp = call(app, get_jwt_with("/api/receipts", &member_bearer())).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1911,23 +1959,21 @@ async fn get_receipts_member_token_strips_admin_review_fields() {
         .iter()
         .find(|r| r["id"] == "1")
         .expect("receipt 1 must be in the listing");
-    assert!(
-        r.get("rawImageUrl").is_none(),
-        "member-token callers must not see rawImageUrl: {r}"
-    );
-    assert!(
-        r.get("rejectionReason").is_none(),
-        "member-token callers must not see rejectionReason: {r}"
-    );
+    for field in NON_ADMIN_STRIPPED_FIELDS {
+        assert!(
+            r.get(field).is_none(),
+            "member-token callers must not see {field}: {r}"
+        );
+    }
 }
 
 #[tokio::test]
-async fn get_receipts_admin_token_includes_admin_review_fields() {
+async fn get_receipts_admin_token_includes_sensitive_fields() {
     // Admin-tier callers (`admin` or `super_admin`) are the only callers
-    // who get `rawImageUrl` and `rejectionReason` in the listing — they
-    // need them to review pending receipts before confirming/rejecting.
+    // who get the full payload — they need the bot-supplied content to
+    // triage the pending queue and `rejectionReason` for audit context.
     let (app, db) = test_app_with_auth_and_db().await;
-    seed_admin_review_fields_on_receipt_one(&db).await;
+    seed_strippable_fields_on_receipt_one(&db).await;
 
     let resp = call(app, get_jwt_with("/api/receipts", &admin_bearer())).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1936,22 +1982,25 @@ async fn get_receipts_admin_token_includes_admin_review_fields() {
         .iter()
         .find(|r| r["id"] == "1")
         .expect("receipt 1 must be in the listing");
-    assert_eq!(
-        r["rawImageUrl"], "https://example.invalid/screenshot.png",
-        "admin callers must see rawImageUrl: {r}"
-    );
-    assert_eq!(
-        r["rejectionReason"], "needs manual review",
-        "admin callers must see rejectionReason: {r}"
+    assert_eq!(r["rawImageUrl"], "https://example.invalid/screenshot.png");
+    assert_eq!(r["rejectionReason"], "needs manual review");
+    assert_eq!(r["ocrText"], "NGN 1,000,000.00\nFrom: Tunde Bakare");
+    assert_eq!(r["senderLabel"], "Tunde Bakare");
+    assert_eq!(r["bankLabel"], "GTBank");
+    // `senderPhone` is sourced from the row itself (always present in the
+    // DB, not from the test seed), so just assert it surfaces as a string.
+    assert!(
+        r["senderPhone"].is_string(),
+        "admin callers must see senderPhone: {r}"
     );
 }
 
 #[tokio::test]
-async fn get_receipts_super_admin_token_includes_admin_review_fields() {
+async fn get_receipts_super_admin_token_includes_sensitive_fields() {
     // `super_admin` is strictly more privileged than `admin`; if `admin`
-    // sees the review fields, super-admin must as well.
+    // sees the full payload, super-admin must as well.
     let (app, db) = test_app_with_auth_and_db().await;
-    seed_admin_review_fields_on_receipt_one(&db).await;
+    seed_strippable_fields_on_receipt_one(&db).await;
 
     let resp = call(app, get_jwt_with("/api/receipts", &super_admin_bearer())).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1962,6 +2011,10 @@ async fn get_receipts_super_admin_token_includes_admin_review_fields() {
         .expect("receipt 1 must be in the listing");
     assert_eq!(r["rawImageUrl"], "https://example.invalid/screenshot.png");
     assert_eq!(r["rejectionReason"], "needs manual review");
+    assert_eq!(r["ocrText"], "NGN 1,000,000.00\nFrom: Tunde Bakare");
+    assert_eq!(r["senderLabel"], "Tunde Bakare");
+    assert_eq!(r["bankLabel"], "GTBank");
+    assert!(r["senderPhone"].is_string());
 }
 
 // ── POST /api/admin/receipts/{id}/confirm ────────────────────────────────────
@@ -2583,7 +2636,11 @@ async fn pagination_excludes_soft_deleted_receipts_from_total_count() {
     // The receipts fixture seeds two rows — one active, one
     // soft-deleted. After filtering, the count + body should both
     // surface only the active row.
-    let resp = call(test_app().await, get("/api/receipts?limit=200")).await;
+    let resp = call(
+        test_app_with_auth().await,
+        get_jwt_with("/api/receipts?limit=200", &admin_bearer()),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let total = total_count_header(&resp);
     let receipts: Vec<serde_json::Value> = json_body(resp).await;
@@ -3099,7 +3156,11 @@ async fn inbox_count_gates_admin_landing_when_zero() {
     // after every pending fixture row is acted on, the queue drains.
     let app = test_app_with_auth().await;
 
-    let before = call(app.clone(), get("/api/receipts?status=pending&limit=200")).await;
+    let before = call(
+        app.clone(),
+        get_jwt_with("/api/receipts?status=pending&limit=200", &admin_bearer()),
+    )
+    .await;
     let pre: Vec<serde_json::Value> = json_body(before).await;
     assert!(
         !pre.is_empty(),
@@ -3119,7 +3180,11 @@ async fn inbox_count_gates_admin_landing_when_zero() {
         assert_eq!(resp.status(), StatusCode::OK, "reject {id}");
     }
 
-    let after = call(app, get("/api/receipts?status=pending&limit=200")).await;
+    let after = call(
+        app,
+        get_jwt_with("/api/receipts?status=pending&limit=200", &admin_bearer()),
+    )
+    .await;
     let post: Vec<serde_json::Value> = json_body(after).await;
     assert!(
         post.is_empty(),
@@ -3227,7 +3292,11 @@ async fn admin_receipt_queue_orders_by_ingested_at_not_received_at() {
     )
     .await;
 
-    let resp = call(app, get("/api/receipts?limit=200")).await;
+    let resp = call(
+        app,
+        get_jwt_with("/api/receipts?limit=200", &admin_bearer()),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let rows: Vec<serde_json::Value> = json_body(resp).await;
 
