@@ -78,6 +78,22 @@ struct AppliedMigration {
 /// `schema_migration` meta table. Returns once the in-memory migration
 /// list is exhausted (idempotent on a fully-applied DB).
 pub async fn apply_pending(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
+    debug_assert!(
+        MIGRATIONS.windows(2).all(|w| w[0].0 < w[1].0),
+        "MIGRATIONS must be strictly sorted by name — found out-of-order entries"
+    );
+    // Runtime guard (in addition to the debug_assert) so a release build
+    // with a misordered array fails fast at startup rather than silently
+    // apply migrations in the wrong order.
+    for w in MIGRATIONS.windows(2) {
+        if w[0].0 >= w[1].0 {
+            return Err(surrealdb::Error::thrown(format!(
+                "MIGRATIONS array is not strictly sorted: '{}' must come before '{}'",
+                w[0].0, w[1].0
+            )));
+        }
+    }
+
     ensure_meta_table(db).await?;
     let applied = load_applied(db).await?;
 
@@ -267,6 +283,21 @@ mod tests {
             checksum: "x".into(),
         }];
         enforce_no_skipped(migrations, &applied).expect("contiguous prefix must pass");
+    }
+
+    #[test]
+    fn migrations_array_is_strictly_sorted() {
+        // Lock the sort-order invariant the module doc claims — if a
+        // future maintainer appends an out-of-order entry, this test
+        // fires before the runtime guard ever has to.
+        for w in MIGRATIONS.windows(2) {
+            assert!(
+                w[0].0 < w[1].0,
+                "MIGRATIONS must be strictly sorted: '{}' should come before '{}'",
+                w[0].0,
+                w[1].0
+            );
+        }
     }
 
     #[test]
