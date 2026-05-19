@@ -191,16 +191,17 @@ async fn apply_one(
             info!(migration = name, "Applied migration");
             Ok(())
         }
-        Err(e) if is_unique_constraint_error(&e.to_string()) => {
-            // The bookkeeping `CREATE schema_migration` is the FIRST
-            // statement in the transaction (see SQL above), so a
-            // UNIQUE violation here unambiguously means another
-            // binary won the race on `schema_migration.name` —
-            // nothing else has run yet. Reload the existing row and
-            // re-check its checksum: if the race partner is shipping
-            // a divergent migration body, that's drift and must
-            // surface the same hard error the main checksum path
-            // raises rather than silently no-op past it.
+        Err(e) if is_schema_migration_claim_collision(&e.to_string()) => {
+            // Narrowed by `is_schema_migration_claim_collision` so this
+            // arm only fires for UNIQUE failures that reference the
+            // `schema_migration` table / `schema_migration_name_unique`
+            // index. A migration body that defines its own UNIQUE
+            // index and violates it propagates instead of getting
+            // silently swallowed as a benign race. Structurally the
+            // claim is still the first statement in the transaction
+            // (see SQL above), but relying on statement ordering alone
+            // is fragile — the explicit narrowing makes the
+            // failure-mode partitioning unambiguous at the matcher.
             info!(
                 migration = name,
                 "Concurrent boot race detected — another binary won the schema_migration claim"
@@ -329,6 +330,22 @@ fn unknown_error(name: &str) -> surrealdb::Error {
     ))
 }
 
+/// Narrows `is_unique_constraint_error` to the `schema_migration`
+/// bookkeeping row only. The migration body sits inside the same
+/// transaction (after the `CREATE schema_migration` claim) and could
+/// itself raise a UNIQUE failure — e.g. a future migration that
+/// defines a UNIQUE index and seeds rows that violate it. The
+/// benign-race branch must not swallow those; only collisions that
+/// reference the `schema_migration` table or its UNIQUE index count
+/// as a concurrent-boot race. If SurrealDB's error message format ever
+/// stops naming the table/index, this helper fails-closed (returns
+/// false) and the genuine error propagates — never the other way.
+fn is_schema_migration_claim_collision(message: &str) -> bool {
+    is_unique_constraint_error(message)
+        && (message.contains("schema_migration_name_unique")
+            || message.contains("schema_migration"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +395,29 @@ mod tests {
         let err =
             enforce_no_skipped(migrations, &applied).expect_err("gap in applied history must fail");
         assert!(err.to_string().contains("0001_a"));
+    }
+
+    #[test]
+    fn schema_migration_claim_collision_narrows_to_meta_table() {
+        // The benign-race branch must only fire for UNIQUE failures on the
+        // schema_migration bookkeeping row. A body-level UNIQUE failure on
+        // an unrelated table or index must NOT slot in — it propagates as
+        // a real error.
+        assert!(is_schema_migration_claim_collision(
+            "Database index `schema_migration_name_unique` already contains 0001_initial_schema"
+        ));
+        assert!(is_schema_migration_claim_collision(
+            "unique constraint failed on schema_migration"
+        ));
+        assert!(!is_schema_migration_claim_collision(
+            "Database index `receipt_whatsapp_message_id_unique` already contains WAMSG-123"
+        ));
+        assert!(!is_schema_migration_claim_collision(
+            "Database index `user_identity_provider_subject` already contains [credentials, foo@bar.com]"
+        ));
+        // Non-UNIQUE errors don't qualify regardless of message content.
+        assert!(!is_schema_migration_claim_collision(
+            "schema_migration: connection refused"
+        ));
     }
 }
