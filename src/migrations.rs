@@ -147,11 +147,25 @@ async fn load_applied(db: &Surreal<Any>) -> Result<Vec<AppliedMigration>, surrea
     Ok(rows)
 }
 
-/// Apply a single migration inside one SurrealDB transaction: the body
-/// statements first, then the `schema_migration` insert. SurrealDB
-/// cancels the whole transaction on any failure, so a half-applied
-/// migration cannot leave behind a `schema_migration` row that claims
-/// success.
+/// Apply a single migration inside one SurrealDB transaction.
+///
+/// The transaction body lays the bookkeeping row down FIRST and the
+/// migration's own statements second. That ordering matters: under a
+/// concurrent-boot race the second binary's `CREATE schema_migration`
+/// will fail on the UNIQUE index on `name` before any body statement
+/// runs, which lets us distinguish a benign "the other binary already
+/// applied this" from a genuine UNIQUE error inside the migration
+/// body (e.g. a bad seed row hitting a UNIQUE index the migration
+/// just defined). If the bookkeeping insert succeeds and the body
+/// then fails for any reason, SurrealDB rolls back the bookkeeping
+/// row too — there's never a `schema_migration` row claiming success
+/// for a body that didn't land.
+///
+/// On the benign-race branch we reload the existing `schema_migration`
+/// row and re-check its checksum: if the race partner committed a row
+/// whose checksum disagrees with ours, the two binaries are shipping
+/// divergent migration content and we must surface the same drift
+/// error the main checksum path raises.
 async fn apply_one(
     db: &Surreal<Any>,
     name: &str,
@@ -161,8 +175,8 @@ async fn apply_one(
     let applied_at = now_iso();
     let sql = format!(
         "BEGIN TRANSACTION;\n\
-         {body}\n\
          CREATE schema_migration SET name = $name, checksum = $checksum, applied_at = $applied_at;\n\
+         {body}\n\
          COMMIT TRANSACTION;"
     );
     let result = db
@@ -178,22 +192,53 @@ async fn apply_one(
             Ok(())
         }
         Err(e) if is_unique_constraint_error(&e.to_string()) => {
-            // Concurrent boot race: another binary applied this same
-            // migration between our `load_applied()` and our CREATE.
-            // The UNIQUE index on `schema_migration.name` caught it, so
-            // the other binary's work is durable and ours can no-op.
-            // The next iteration of `apply_pending`'s loop will skip
-            // this name on the cached `applied` set — fine because the
-            // only remaining work is downstream migrations, which the
-            // race partner has equal claim to apply.
+            // The bookkeeping `CREATE schema_migration` is the FIRST
+            // statement in the transaction (see SQL above), so a
+            // UNIQUE violation here unambiguously means another
+            // binary won the race on `schema_migration.name` —
+            // nothing else has run yet. Reload the existing row and
+            // re-check its checksum: if the race partner is shipping
+            // a divergent migration body, that's drift and must
+            // surface the same hard error the main checksum path
+            // raises rather than silently no-op past it.
             info!(
                 migration = name,
-                "Concurrent boot race detected — migration was applied by another binary"
+                "Concurrent boot race detected — another binary won the schema_migration claim"
             );
-            Ok(())
+            verify_race_partner_checksum(db, name, checksum).await
         }
         Err(e) => Err(e),
     }
+}
+
+/// Fetch the `schema_migration` row another binary just inserted under
+/// our nose and compare its checksum against ours. Surfaces the same
+/// `drift_error` the main checksum-mismatch path uses, so the two
+/// failure modes look identical to operators reading the logs.
+async fn verify_race_partner_checksum(
+    db: &Surreal<Any>,
+    name: &str,
+    expected_checksum: &str,
+) -> Result<(), surrealdb::Error> {
+    let mut resp = db
+        .query("SELECT name, checksum FROM schema_migration WHERE name = $name LIMIT 1")
+        .bind(("name", name.to_string()))
+        .await?
+        .check()?;
+    let rows: Vec<AppliedMigration> = resp.take(0)?;
+    let partner = rows.into_iter().next().ok_or_else(|| {
+        // If we hit UNIQUE on insert but the row isn't there on
+        // read, something between us and SurrealDB ate it. That's
+        // not a benign race — surface it loudly.
+        surrealdb::Error::thrown(format!(
+            "migration {name} hit UNIQUE on insert but no schema_migration row exists on re-read; \
+             racing binary may have been killed mid-commit"
+        ))
+    })?;
+    if partner.checksum != expected_checksum {
+        return Err(drift_error(name, &partner.checksum, expected_checksum));
+    }
+    Ok(())
 }
 
 /// Refuse to proceed if the applied set isn't a contiguous prefix of
