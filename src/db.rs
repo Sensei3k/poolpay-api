@@ -78,7 +78,7 @@ pub async fn init() -> Result<DbConn, InitError> {
 
     db.use_ns("circle").use_db("main").await?;
 
-    define_tables(&db).await?;
+    apply_schema(&db).await?;
 
     if std::env::var("SEED_ON_EMPTY").as_deref() == Ok("true") {
         seed(&db).await?;
@@ -117,9 +117,21 @@ fn missing_remote_credential_error(var: &str) -> InitError {
 pub async fn init_memory() -> Result<DbConn, surrealdb::Error> {
     let db = connect("mem://").await?;
     db.use_ns("circle").use_db("main").await?;
-    define_tables(&db).await?;
+    apply_schema(&db).await?;
     seed(&db).await?;
     Ok(Arc::new(db))
+}
+
+/// Apply pending schema migrations, then run any runtime data backfills
+/// that depend on the migrated schema. The backfill itself is not part
+/// of the migration history because it mutates user data — the runner
+/// covers schema only, and the backfill is idempotent (it scans for
+/// `ingested_at IS NONE` and skips already-populated rows on every
+/// boot).
+async fn apply_schema(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
+    crate::migrations::apply_pending(db).await?;
+    backfill_receipt_ingested_at(db).await?;
+    Ok(())
 }
 
 /// URL schemes are case-insensitive (RFC 3986 §3.1), so we lowercase the
@@ -159,135 +171,8 @@ fn redact_url_userinfo(url: &str) -> String {
     format!("{}://***@{host}{rest}", &url[..scheme_end])
 }
 
-/// Idempotently define every table the application reads from.
-///
-/// In SurrealDB 3, `SELECT` against an undefined table returns an error rather
-/// than an empty result. Tables seeded via `upsert` in `insert_fixtures` are
-/// defined implicitly, but tables that start empty (e.g. `group_link`) must be
-/// declared here so handlers can query them without special-casing.
-async fn define_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
-    db.query(
-        "DEFINE TABLE IF NOT EXISTS group SCHEMALESS;
-         DEFINE TABLE IF NOT EXISTS member SCHEMALESS;
-         DEFINE TABLE IF NOT EXISTS cycle SCHEMALESS;
-         DEFINE TABLE IF NOT EXISTS payment SCHEMALESS;
-         DEFINE TABLE IF NOT EXISTS group_link SCHEMALESS;
-         DEFINE TABLE IF NOT EXISTS receipt SCHEMALESS;",
-    )
-    .await?
-    .check()?;
-
-    define_receipt_extensions(db).await?;
-    define_inbox_table(db).await?;
-    define_auth_tables(db).await?;
-    Ok(())
-}
-
-/// Slice 5 + server-stamped-timestamp additions to the receipt table.
-///
-/// Three optional fields:
-///   - `raw_image_url`: direct URL to the WhatsApp screenshot, captured by
-///     the bot and persisted so admins can review the original artefact
-///     during confirm/reject.
-///   - `rejection_reason`: short human note recorded when an admin rejects
-///     or flags a receipt. Must NOT contain PII (sender phone, OCR text,
-///     member name). That is a handler-side invariant; the schema stays
-///     open-ended so legacy rows remain readable.
-///   - `ingested_at`: server-stamped wall-clock timestamp recorded at the
-///     moment the API persists the row. Treated as the source of truth for
-///     financial dates and admin-queue ordering — `received_at` is supplied
-///     by the bot and therefore controllable by an attacker who can spoof
-///     a webhook payload. `received_at` stays for forensics; financial and
-///     ordering paths must read `ingested_at` instead. Stored as
-///     `option<string>` rather than `string` so the schema migration is
-///     compatible with rows written by older binaries during a rolling
-///     deploy and with the fixture/test paths that hadn't yet been
-///     updated when this column landed. The application-layer contract
-///     (`ingestion::ingest_receipt`) always stamps it on insert.
-///
-/// Existing-row backfill: any row pre-dating this migration gets
-/// `ingested_at` filled in once via a three-step fallback chain. Each
-/// candidate is parsed as RFC 3339 and re-emitted in the canonical
-/// `server_now()` shape — UTC, fixed-width millisecond precision,
-/// trailing `Z` — that the application path writes. The reparse is the
-/// point of doing this in Rust rather than inline SurrealQL: the stored
-/// `created_at` is generally written via `now_iso()` (e.g. receipt
-/// ingestion), which emits `+00:00` and may vary fractional precision,
-/// so copying a timestamp verbatim would reintroduce the mixed-format
-/// problem `server_now` was added to solve and break the lex-sort
-/// invariant `ORDER BY ingested_at` relies on. What matters about
-/// `created_at` here is that it is server-owned (bot-clock-independent),
-/// not that it is already in canonical shape — we normalise it before
-/// writing. The chain is:
-///   1. Prefer the row's server-stamped `created_at`, parsed and
-///      normalised to canonical `server_now()` shape — server-owned, so
-///      it cannot be steered by a misclocked or hostile bot.
-///   2. If `created_at` is unparseable (the column is required, so this
-///      should never fire in practice), fall back to the bot-supplied
-///      `received_at` as a forensic last-resort proxy for arrival time.
-///   3. Only if neither parses do we stamp a fresh `server_now()`. That
-///      last branch makes legacy rows look "just ingested" and is
-///      reserved for genuinely corrupt rows.
-///
-/// The backfill is idempotent — the `WHERE ingested_at IS NONE` guard
-/// skips rows already populated on every subsequent boot. The loop is
-/// also bounded (see `MAX_BATCHES` in `backfill_receipt_ingested_at`) so
-/// a rolling deploy that still has older binaries writing legacy rows
-/// can't keep startup blocked indefinitely.
-///
-/// Four indexes:
-///   - `receipt_whatsapp_message_id_unique` over `(whatsapp_message_id)` is
-///     the DB-side dedup gate. The ingest pipeline reads the existing row
-///     first as a fast path, but the read-then-write window leaves a TOCTOU
-///     race under concurrent webhook delivery (Green API retries, bot
-///     replays). The UNIQUE constraint closes that window: a colliding
-///     insert fails atomically and the handler maps the violation to the
-///     same `DuplicateMessage` outcome the pre-check returns.
-///   - `receipt_sender_received` over `(sender_phone, received_at)` powers
-///     the "show every receipt this phone has ever sent" admin-side history
-///     lookups landing in the FE slice 5 modal.
-///   - `receipt_status_received` over `(status, received_at)` is retained
-///     for forensics queries that need bot-clock chronology (e.g. comparing
-///     what the bot claims it observed vs what the server actually stored).
-///   - `receipt_status_ingested` over `(status, ingested_at)` powers the
-///     admin queue's "filtered by status, oldest first" default sort (FIFO
-///     so the backlog drains in server-arrival order) without a table scan
-///     as receipt volume grows. `GET /api/receipts` issues
-///     `ORDER BY ingested_at ASC, id ASC` — keep the index and the handler
-///     in lock-step if the contract ever flips to newest-first.
-///
-/// The receipt table itself stays SCHEMALESS so existing fixtures and
-/// in-flight writes are unaffected — new fields land as plain optional
-/// columns. SCHEMAFULL would force a destructive backfill on every
-/// existing row.
-async fn define_receipt_extensions(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
-    db.query(
-        "DEFINE FIELD IF NOT EXISTS raw_image_url ON receipt TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS rejection_reason ON receipt TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS ingested_at ON receipt TYPE option<string>;",
-    )
-    .await?
-    .check()?;
-
-    backfill_receipt_ingested_at(db).await?;
-
-    db.query(
-        "DEFINE INDEX IF NOT EXISTS receipt_whatsapp_message_id_unique
-             ON receipt FIELDS whatsapp_message_id UNIQUE;
-         DEFINE INDEX IF NOT EXISTS receipt_sender_received
-             ON receipt FIELDS sender_phone, received_at;
-         DEFINE INDEX IF NOT EXISTS receipt_status_received
-             ON receipt FIELDS status, received_at;
-         DEFINE INDEX IF NOT EXISTS receipt_status_ingested
-             ON receipt FIELDS status, ingested_at;",
-    )
-    .await?
-    .check()?;
-    Ok(())
-}
-
-/// Rust-side companion to [`define_receipt_extensions`]: for every legacy
-/// `receipt` row that still has `ingested_at = NONE`, derive a
+/// Rust-side companion to the `0001_initial_schema` migration: for every
+/// legacy `receipt` row that still has `ingested_at = NONE`, derive a
 /// monotonic-with-arrival timestamp and re-emit it via [`server_now`]-style
 /// formatting (UTC, millisecond precision, `Z` suffix) before writing it
 /// back.
@@ -393,108 +278,6 @@ async fn backfill_receipt_ingested_at(db: &Surreal<Any>) -> Result<(), surrealdb
             "Backfilled receipt.ingested_at for legacy rows"
         );
     }
-    Ok(())
-}
-
-/// `inbox_item` is the per-user notification stream rendered by the FE
-/// `/inbox` route (HANDOFF §4 and §5.1). SCHEMAFULL because the `kind`
-/// vocabulary is contract-bearing: the FE switches presentation on the
-/// value, and an unknown kind would render as a blank row. The DB-side
-/// `ASSERT $value IN [...]` guarantees the contract holds even if a
-/// future handler forgets to validate.
-///
-/// Indexes:
-///   - `inbox_item_user_created` powers the "newest first" feed query —
-///     `WHERE user_id = $uid ORDER BY created_at DESC`.
-///   - `inbox_item_user_unread`  powers the inbox-bell unread count and the
-///     "you have N pending items" badges on the home page.
-async fn define_inbox_table(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
-    db.query(
-        "DEFINE TABLE IF NOT EXISTS inbox_item SCHEMAFULL;
-         DEFINE FIELD IF NOT EXISTS user_id ON inbox_item TYPE string;
-         DEFINE FIELD IF NOT EXISTS kind ON inbox_item TYPE string
-             ASSERT $value IN ['receipt_confirmed', 'cycle_starting', 'payout_scheduled', 'admin_message', 'overdue'];
-         DEFINE FIELD IF NOT EXISTS title ON inbox_item TYPE string;
-         DEFINE FIELD IF NOT EXISTS body ON inbox_item TYPE string;
-         DEFINE FIELD IF NOT EXISTS pool_id ON inbox_item TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS cycle_id ON inbox_item TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS receipt_id ON inbox_item TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS read_at ON inbox_item TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS created_at ON inbox_item TYPE string;
-         DEFINE INDEX IF NOT EXISTS inbox_item_user_created
-             ON inbox_item FIELDS user_id, created_at;
-         DEFINE INDEX IF NOT EXISTS inbox_item_user_unread
-             ON inbox_item FIELDS user_id, read_at;",
-    )
-    .await?
-    .check()?;
-    Ok(())
-}
-
-/// Auth-specific tables are SCHEMAFULL so the security-critical shape is
-/// enforced at the DB layer rather than relying on application checks alone.
-async fn define_auth_tables(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
-    db.query(
-        "DEFINE TABLE IF NOT EXISTS user SCHEMAFULL;
-         DEFINE FIELD IF NOT EXISTS email ON user TYPE string;
-         DEFINE FIELD IF NOT EXISTS email_normalised ON user TYPE string;
-         DEFINE FIELD IF NOT EXISTS password_hash ON user TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS role ON user TYPE string
-             ASSERT $value IN ['super_admin', 'admin', 'member'];
-         DEFINE FIELD IF NOT EXISTS status ON user TYPE string ASSERT $value IN ['active', 'disabled'];
-         DEFINE FIELD IF NOT EXISTS token_version ON user TYPE int;
-         DEFINE FIELD IF NOT EXISTS must_reset_password ON user TYPE bool;
-         DEFINE FIELD IF NOT EXISTS version ON user TYPE int;
-         UPDATE user SET version = 1 WHERE version IS NONE;
-         DEFINE FIELD IF NOT EXISTS created_at ON user TYPE string;
-         DEFINE FIELD IF NOT EXISTS updated_at ON user TYPE string;
-         DEFINE FIELD IF NOT EXISTS deleted_at ON user TYPE option<string>;
-         DEFINE INDEX IF NOT EXISTS user_email_normalised ON user FIELDS email_normalised;
-
-         DEFINE TABLE IF NOT EXISTS user_identity SCHEMAFULL;
-         DEFINE FIELD IF NOT EXISTS user_id ON user_identity TYPE string;
-         DEFINE FIELD IF NOT EXISTS provider ON user_identity TYPE string
-             ASSERT $value IN ['google', 'github', 'apple', 'credentials'];
-         DEFINE FIELD IF NOT EXISTS provider_subject ON user_identity TYPE string;
-         DEFINE FIELD IF NOT EXISTS email_at_link ON user_identity TYPE string;
-         DEFINE FIELD IF NOT EXISTS created_at ON user_identity TYPE string;
-         DEFINE INDEX IF NOT EXISTS user_identity_provider_subject
-             ON user_identity FIELDS provider, provider_subject UNIQUE;
-
-         DEFINE TABLE IF NOT EXISTS auth_event SCHEMAFULL;
-         DEFINE FIELD IF NOT EXISTS user_id ON auth_event TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS actor_id ON auth_event TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS event_type ON auth_event TYPE string;
-         DEFINE FIELD IF NOT EXISTS ip ON auth_event TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS user_agent ON auth_event TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS success ON auth_event TYPE bool;
-         DEFINE FIELD IF NOT EXISTS reason ON auth_event TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS created_at ON auth_event TYPE string;
-
-         DEFINE TABLE IF NOT EXISTS refresh_token SCHEMAFULL;
-         DEFINE FIELD IF NOT EXISTS user_id ON refresh_token TYPE string;
-         DEFINE FIELD IF NOT EXISTS hashed_token ON refresh_token TYPE string;
-         DEFINE FIELD IF NOT EXISTS family_id ON refresh_token TYPE string;
-         DEFINE FIELD IF NOT EXISTS issued_at ON refresh_token TYPE string;
-         DEFINE FIELD IF NOT EXISTS expires_at ON refresh_token TYPE string;
-         DEFINE FIELD IF NOT EXISTS revoked_at ON refresh_token TYPE option<string>;
-         DEFINE FIELD IF NOT EXISTS replaced_by ON refresh_token TYPE option<string>;
-         DEFINE INDEX IF NOT EXISTS refresh_token_hashed
-             ON refresh_token FIELDS hashed_token UNIQUE;
-         DEFINE INDEX IF NOT EXISTS refresh_token_family ON refresh_token FIELDS family_id;
-         DEFINE INDEX IF NOT EXISTS refresh_token_user ON refresh_token FIELDS user_id;
-
-         DEFINE TABLE IF NOT EXISTS group_admin SCHEMAFULL;
-         DEFINE FIELD IF NOT EXISTS user_id ON group_admin TYPE string;
-         DEFINE FIELD IF NOT EXISTS group_id ON group_admin TYPE string;
-         DEFINE FIELD IF NOT EXISTS created_at ON group_admin TYPE string;
-         DEFINE FIELD IF NOT EXISTS created_by ON group_admin TYPE string;
-         DEFINE INDEX IF NOT EXISTS group_admin_user_group
-             ON group_admin FIELDS user_id, group_id UNIQUE;
-         DEFINE INDEX IF NOT EXISTS group_admin_group ON group_admin FIELDS group_id;",
-    )
-    .await?
-    .check()?;
     Ok(())
 }
 

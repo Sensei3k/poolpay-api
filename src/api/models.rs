@@ -339,7 +339,9 @@ pub struct DbReceipt {
     /// truth for financial dates and admin-queue ordering — `received_at`
     /// is bot-supplied and therefore spoofable. `#[surreal(default)]` so
     /// rows written before this column landed still deserialise (None);
-    /// the migration in `define_receipt_extensions` backfills them.
+    /// the `backfill_receipt_ingested_at` boot step in `db.rs` populates
+    /// them on the next startup after the migration runner extends the
+    /// schema.
     #[surreal(default)]
     pub ingested_at: Option<String>,
     pub created_at: String,
@@ -807,8 +809,8 @@ pub struct GroupLinkContent {
 }
 
 /// Insert shape for the `inbox_item` table. SCHEMAFULL on the DB side, so
-/// every field listed in `define_inbox_table` is mandatory unless declared
-/// `option<...>` there.
+/// every field defined in the `0001_initial_schema` migration is
+/// mandatory unless declared `option<...>` there.
 #[derive(Debug, Clone, Serialize, SurrealValue)]
 pub struct InboxItemContent {
     pub user_id: String,
