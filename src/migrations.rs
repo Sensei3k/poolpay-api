@@ -52,6 +52,7 @@ use surrealdb_types::SurrealValue;
 use tracing::{info, warn};
 
 use crate::api::models::now_iso;
+use crate::db::is_unique_constraint_error;
 
 /// Embedded migration corpus. New migrations land here in
 /// lexicographically-ordered insertion. Compile-time `include_str!`
@@ -164,14 +165,35 @@ async fn apply_one(
          CREATE schema_migration SET name = $name, checksum = $checksum, applied_at = $applied_at;\n\
          COMMIT TRANSACTION;"
     );
-    db.query(sql)
+    let result = db
+        .query(sql)
         .bind(("name", name.to_string()))
         .bind(("checksum", checksum.to_string()))
         .bind(("applied_at", applied_at))
-        .await?
-        .check()?;
-    info!(migration = name, "Applied migration");
-    Ok(())
+        .await
+        .and_then(|r| r.check());
+    match result {
+        Ok(_) => {
+            info!(migration = name, "Applied migration");
+            Ok(())
+        }
+        Err(e) if is_unique_constraint_error(&e.to_string()) => {
+            // Concurrent boot race: another binary applied this same
+            // migration between our `load_applied()` and our CREATE.
+            // The UNIQUE index on `schema_migration.name` caught it, so
+            // the other binary's work is durable and ours can no-op.
+            // The next iteration of `apply_pending`'s loop will skip
+            // this name on the cached `applied` set — fine because the
+            // only remaining work is downstream migrations, which the
+            // race partner has equal claim to apply.
+            info!(
+                migration = name,
+                "Concurrent boot race detected — migration was applied by another binary"
+            );
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Refuse to proceed if the applied set isn't a contiguous prefix of
