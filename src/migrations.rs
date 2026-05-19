@@ -95,6 +95,24 @@ pub async fn apply_pending(db: &Surreal<Any>) -> Result<(), surrealdb::Error> {
         }
     }
 
+    // Every migration body must end with a terminator. The runner
+    // interpolates the body directly before `COMMIT TRANSACTION;` in
+    // `apply_one`, so a body whose last statement is missing its `;`
+    // would silently chain with the COMMIT token, yielding a
+    // confusing SurrealQL parse error at boot rather than a clear
+    // "migration <name> is malformed" diagnostic. We reject up front
+    // instead.
+    for (name, body) in MIGRATIONS {
+        if !body.trim_end().ends_with(';') {
+            return Err(surrealdb::Error::thrown(format!(
+                "migration {name} does not end with a `;` terminator; \
+                 the runner concatenates `COMMIT TRANSACTION;` after the body, \
+                 so a missing terminator silently chains the COMMIT token \
+                 with the last statement — append `;` to fix"
+            )));
+        }
+    }
+
     ensure_meta_table(db).await?;
     let applied = load_applied(db).await?;
 
@@ -367,6 +385,22 @@ mod tests {
             checksum: "x".into(),
         }];
         enforce_no_skipped(migrations, &applied).expect("contiguous prefix must pass");
+    }
+
+    #[test]
+    fn every_embedded_migration_body_ends_with_semicolon() {
+        // Locks the apply_one invariant at compile/test time: a future
+        // .surql file that forgets its trailing `;` would silently chain
+        // with the appended `COMMIT TRANSACTION;` at runtime, producing a
+        // confusing syntax error. Catching it here means the failure mode
+        // is a test failure with a clear migration name, not a boot
+        // crash.
+        for (name, body) in MIGRATIONS {
+            assert!(
+                body.trim_end().ends_with(';'),
+                "migration {name} must end with a `;` terminator"
+            );
+        }
     }
 
     #[test]
